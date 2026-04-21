@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shareable-aion-flow"
+version = "0.1.0"
+description = "Clean AION attention-flow package for eROSITA/DESI flux prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "astropy>=6.1",
+    "h5py>=3.11",
+    "matplotlib>=3.9",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.13",
+    "torch>=2.2",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+]
+flow = [
+    "zuko>=1.5.0",
+]
+aion = [
+    "polymathic-aion",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["shareable_aion_flow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["shareable_aion_flow/tests"]
+pythonpath = ["."]

@@ -1,0 +1,18 @@
+# Large local data and generated outputs stay out of git.
+data/raw/
+data/staged/
+data/cache/
+outputs/
+
+!data/
+!data/raw/
+!data/staged/
+!data/cache/
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/staged/.gitkeep
+!data/cache/.gitkeep
+
+__pycache__/
+*.pyc
+
