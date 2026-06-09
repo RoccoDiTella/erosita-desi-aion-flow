@@ -15,47 +15,25 @@ import numpy as np
 import pandas as pd
 import torch
 
-try:
-    from .attention_pooling_head import (
-        MODALITIES,
-        AIONAttentionContext,
-        ComboSampler,
-        all_nonempty_modality_combos,
-    )
-    from .data_to_aion_embeddings import (
-        FITS_POOL_DIR,
-        SOURCE_HDF5,
-        SPLIT_MANIFEST,
-        STAGED_DIR,
-        AIONTokenEncoder,
-        build_dataloaders,
-        prepare_staged_data,
-        read_target_values,
-        write_json,
-    )
-    from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
-    from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
-except ImportError:
-    from attention_pooling_head import (
-        MODALITIES,
-        AIONAttentionContext,
-        ComboSampler,
-        all_nonempty_modality_combos,
-    )
-    from data_to_aion_embeddings import (
-        FITS_POOL_DIR,
-        SOURCE_HDF5,
-        SPLIT_MANIFEST,
-        STAGED_DIR,
-        AIONTokenEncoder,
-        build_dataloaders,
-        prepare_staged_data,
-        read_target_values,
-        write_json,
-    )
-    from evals import build_results_table, evaluate_all_combos, save_results_table_pdf
-    from normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
-
+from .attention_pooling_head import (
+    MODALITIES,
+    AIONAttentionContext,
+    ComboSampler,
+    all_nonempty_modality_combos,
+)
+from .data_to_aion_embeddings import (
+    FITS_POOL_DIR,
+    SOURCE_HDF5,
+    SPLIT_MANIFEST,
+    STAGED_DIR,
+    AIONTokenEncoder,
+    build_dataloaders,
+    prepare_staged_data,
+    read_target_values,
+    write_json,
+)
+from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
+from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 OUTPUTS_DIR = PACKAGE_DIR / "outputs"

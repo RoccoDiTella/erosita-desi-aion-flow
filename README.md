@@ -116,7 +116,7 @@ Requires Python ≥ 3.10.
 python -m pip install -e .            # core (numpy, torch, h5py, astropy, ...)
 python -m pip install -e ".[flow]"    # + zuko            (the normalizing flow)
 python -m pip install -e ".[aion]"    # + polymathic-aion (the frozen encoder)
-python -m pip install -e ".[dev]"     # + pytest
+python -m pip install -e ".[dev]"     # + pytest, ruff
 ```
 
 Full training and evaluation need both `zuko` and `polymathic-aion`. The unit tests run with only the

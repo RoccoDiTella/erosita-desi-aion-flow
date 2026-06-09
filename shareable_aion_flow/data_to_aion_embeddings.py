@@ -22,11 +22,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-try:
-    from .attention_pooling_head import MODALITY_TO_ID
-except ImportError:  # Allows `python data_to_aion_embeddings.py` during local debugging.
-    from attention_pooling_head import MODALITY_TO_ID
-
+from .attention_pooling_head import MODALITY_TO_ID
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DATA_DIR = PACKAGE_DIR / "data"
