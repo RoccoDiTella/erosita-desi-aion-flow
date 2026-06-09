@@ -64,7 +64,7 @@ Information gain is not a fixed number; it varies with redshift. Spectra and ima
 redshift, while WISE and redshift become more informative at high redshift:
 
 <p align="center">
-  <img src="results/performance_by_redshift.png" width="680" alt="Predictive performance as a function of redshift for different input combinations.">
+  <img src="results/performance_by_redshift.png" width="600" alt="Predictive performance as a function of redshift for different input combinations.">
 </p>
 
 ## Architecture
