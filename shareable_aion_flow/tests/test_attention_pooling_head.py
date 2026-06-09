@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from attention_pooling_head import (  # noqa: E402
+from shareable_aion_flow.attention_pooling_head import (
     AIONAttentionContext,
     ComboSampler,
     ModalityAffine,

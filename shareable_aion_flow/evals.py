@@ -15,15 +15,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-try:
-    from .attention_pooling_head import MODALITIES, all_nonempty_modality_combos, combo_name
-    from .data_to_aion_embeddings import move_batch_to_device
-    from .normalizing_flow import KDEPrior, TargetStandardizer
-except ImportError:
-    from attention_pooling_head import MODALITIES, all_nonempty_modality_combos, combo_name
-    from data_to_aion_embeddings import move_batch_to_device
-    from normalizing_flow import KDEPrior, TargetStandardizer
-
+from .attention_pooling_head import MODALITIES, all_nonempty_modality_combos, combo_name
+from .data_to_aion_embeddings import move_batch_to_device
+from .normalizing_flow import KDEPrior, TargetStandardizer
 
 # Canonical results schema. A fresh `eval` writes exactly these columns, in this
 # order, matching results/test_flow_metrics.csv so the shipped table is fully
