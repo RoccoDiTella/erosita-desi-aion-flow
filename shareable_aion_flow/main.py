@@ -1,3 +1,9 @@
+"""Command-line entry point: prepare-data, train, eval, make-table.
+
+Trains and evaluates the clean AION attention-flow model on the eROSITA/DESI
+matched sample. Run ``python -m shareable_aion_flow.main --help`` for usage.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,13 +16,18 @@ import pandas as pd
 import torch
 
 try:
-    from .attention_pooling_head import AIONAttentionContext, ComboSampler, MODALITIES, all_nonempty_modality_combos
+    from .attention_pooling_head import (
+        MODALITIES,
+        AIONAttentionContext,
+        ComboSampler,
+        all_nonempty_modality_combos,
+    )
     from .data_to_aion_embeddings import (
-        AIONTokenEncoder,
         FITS_POOL_DIR,
         SOURCE_HDF5,
-        STAGED_DIR,
         SPLIT_MANIFEST,
+        STAGED_DIR,
+        AIONTokenEncoder,
         build_dataloaders,
         prepare_staged_data,
         read_target_values,
@@ -25,13 +36,18 @@ try:
     from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
     from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
 except ImportError:
-    from attention_pooling_head import AIONAttentionContext, ComboSampler, MODALITIES, all_nonempty_modality_combos
+    from attention_pooling_head import (
+        MODALITIES,
+        AIONAttentionContext,
+        ComboSampler,
+        all_nonempty_modality_combos,
+    )
     from data_to_aion_embeddings import (
-        AIONTokenEncoder,
         FITS_POOL_DIR,
         SOURCE_HDF5,
-        STAGED_DIR,
         SPLIT_MANIFEST,
+        STAGED_DIR,
+        AIONTokenEncoder,
         build_dataloaders,
         prepare_staged_data,
         read_target_values,
@@ -61,7 +77,10 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(int(seed))
 
 
-def build_model(device: torch.device, dropout: float) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow]:
+def build_model(
+    device: torch.device, dropout: float
+) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow]:
+    """Build the frozen AION encoder, attention-context head, and conditional flow."""
     encoder = AIONTokenEncoder(freeze=True).to(device)
     context_encoder = AIONAttentionContext(dropout=dropout).to(device)
     flow = ConditionalNSFFlow(context_dim=context_encoder.context_dim).to(device)
@@ -115,6 +134,7 @@ def batch_nll(
     combo: tuple[str, ...],
     standardizer: TargetStandardizer,
 ) -> torch.Tensor:
+    """Negative log-likelihood of one batch under the flow for a given modality combo."""
     target = batch[6]
     if not torch.isfinite(target).all():
         bad = int((~torch.isfinite(target)).sum().item())
@@ -138,6 +158,7 @@ def validation_all_inputs_nll(
     standardizer: TargetStandardizer,
     device: torch.device,
 ) -> float:
+    """Mean all-inputs validation NLL -- the early-stopping and checkpoint criterion."""
     encoder.eval()
     context_encoder.eval()
     flow.eval()
@@ -160,6 +181,11 @@ def validation_all_inputs_nll(
 
 
 def train(args: argparse.Namespace) -> None:
+    """Train the attention head and flow (AION frozen) on a mix of modality combos.
+
+    Samples a modality combination per batch, minimizes the flow NLL, and
+    checkpoints the best all-inputs validation NLL to ``best.pt``.
+    """
     set_global_seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     run_dir = Path(args.output_dir) / (args.run_id or timestamp_run_id("aion-flow"))
@@ -233,7 +259,9 @@ def train(args: argparse.Namespace) -> None:
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(context_encoder.parameters()) + list(flow.parameters()), args.grad_clip)
+            torch.nn.utils.clip_grad_norm_(
+                list(context_encoder.parameters()) + list(flow.parameters()), args.grad_clip
+            )
             optimizer.step()
 
             train_losses.append(float(loss.item()))
@@ -293,6 +321,11 @@ def train(args: argparse.Namespace) -> None:
 
 
 def evaluate(args: argparse.Namespace) -> None:
+    """Evaluate a checkpoint over all 15 modality combinations.
+
+    Writes ``test_flow_metrics.csv``, ``test_predictions.csv`` and the readable
+    results table (CSV + PDF) to ``--output-dir``.
+    """
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -308,13 +341,19 @@ def evaluate(args: argparse.Namespace) -> None:
         resolved_target = str(checkpoint_target)
     else:
         resolved_target = str(args.target)
-        if checkpoint_target is not None and resolved_target != str(checkpoint_target) and not args.allow_target_override:
+        if (
+            checkpoint_target is not None
+            and resolved_target != str(checkpoint_target)
+            and not args.allow_target_override
+        ):
             raise ValueError(
                 f"Checkpoint target is {checkpoint_target!r}, but eval requested {resolved_target!r}. "
                 "Pass --allow-target-override only for an intentional diagnostic override."
             )
     checkpoint_prior = _config.get("prior_path")
-    prior_path = Path(checkpoint_prior) if checkpoint_prior else Path(args.checkpoint).parent / "kde_prior.npz"
+    prior_path = (
+        Path(checkpoint_prior) if checkpoint_prior else Path(args.checkpoint).parent / "kde_prior.npz"
+    )
     if not prior_path.exists():
         target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", resolved_target)
         KDEPrior(standardizer.transform_numpy(target_values), bw_method="scott").save(
@@ -333,7 +372,10 @@ def evaluate(args: argparse.Namespace) -> None:
         raise ValueError(f"Prior target {prior_target!r} does not match eval target {resolved_target!r}.")
     prior_standardizer = prior.metadata.get("standardizer")
     if isinstance(prior_standardizer, dict):
-        if abs(float(prior_standardizer["mean"]) - standardizer.mean) > 1e-6 or abs(float(prior_standardizer["std"]) - standardizer.std) > 1e-6:
+        if (
+            abs(float(prior_standardizer["mean"]) - standardizer.mean) > 1e-6
+            or abs(float(prior_standardizer["std"]) - standardizer.std) > 1e-6
+        ):
             raise ValueError("Prior standardizer metadata does not match checkpoint standardizer.")
 
     _train_loader, _val_loader, test_loader = build_dataloaders(
@@ -371,6 +413,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
 
 def make_table(args: argparse.Namespace) -> None:
+    """Render the readable results table (CSV + PDF) from a metrics CSV."""
     metrics = pd.read_csv(args.metrics_csv)
     table = build_results_table(metrics)
     table.to_csv(args.output_csv, index=False)
@@ -381,7 +424,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Clean shareable AION attention-flow package.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    prepare = subparsers.add_parser("prepare-data", help="Build image-backed staged HDF5 files from raw inputs.")
+    prepare = subparsers.add_parser(
+        "prepare-data", help="Build image-backed staged HDF5 files from raw inputs."
+    )
     prepare.add_argument("--source-hdf5", type=Path, default=None)
     prepare.add_argument("--split-manifest-csv", type=Path, default=None)
     prepare.add_argument("--fits-pool-dir", type=Path, default=None)
@@ -408,7 +453,9 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--eval-after-train", action="store_true")
     train_parser.add_argument("--eval-samples", type=int, default=256)
 
-    eval_parser = subparsers.add_parser("eval", help="Evaluate all 15 modality combinations from a checkpoint.")
+    eval_parser = subparsers.add_parser(
+        "eval", help="Evaluate all 15 modality combinations from a checkpoint."
+    )
     eval_parser.add_argument("--checkpoint", type=Path, required=True)
     eval_parser.add_argument("--staged-dir", type=Path, default=STAGED_DIR)
     eval_parser.add_argument("--target", choices=["log_ml_flux_1", "log_lx"], default=None)

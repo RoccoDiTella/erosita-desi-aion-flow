@@ -1,3 +1,11 @@
+"""Conditional normalizing flow, target standardizer, and KDE prior.
+
+A one-dimensional Zuko neural spline flow (NSF) conditioned on the attention
+context predicts a full posterior over the standardized target. The KDE prior is
+the unconditional baseline used to define information gain (posterior minus prior
+log-likelihood).
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,11 +20,13 @@ from torch import nn
 
 @dataclass(frozen=True)
 class TargetStandardizer:
+    """Frozen z-score standardizer for the one-dimensional regression target."""
+
     mean: float
     std: float
 
     @classmethod
-    def fit(cls, values: np.ndarray) -> "TargetStandardizer":
+    def fit(cls, values: np.ndarray) -> TargetStandardizer:
         values = np.asarray(values, dtype=np.float64)
         values = values[np.isfinite(values)]
         if values.size < 2:
@@ -31,7 +41,7 @@ class TargetStandardizer:
         return asdict(self)
 
     @classmethod
-    def from_state_dict(cls, state: dict[str, float]) -> "TargetStandardizer":
+    def from_state_dict(cls, state: dict[str, float]) -> TargetStandardizer:
         return cls(mean=float(state["mean"]), std=float(state["std"]))
 
     def transform_tensor(self, values: torch.Tensor) -> torch.Tensor:
@@ -48,7 +58,12 @@ class TargetStandardizer:
 
 
 class KDEPrior:
-    """One-dimensional KDE prior on standardized targets."""
+    """Unconditional Gaussian-KDE baseline over the standardized target.
+
+    Fit on the training targets only, it stands in for "predict the marginal" and
+    anchors the information-gain metric: IG = posterior log-likelihood minus this
+    prior's log-likelihood, in nats.
+    """
 
     def __init__(
         self,
@@ -89,7 +104,7 @@ class KDEPrior:
         )
 
     @classmethod
-    def load(cls, path: Path) -> "KDEPrior":
+    def load(cls, path: Path) -> KDEPrior:
         payload = np.load(path, allow_pickle=False)
         bw_raw = str(payload["bw_method"].item())
         bw_method: str | float = float(bw_raw) if bw_raw.replace(".", "", 1).isdigit() else bw_raw
@@ -100,7 +115,12 @@ class KDEPrior:
 
 
 class ConditionalNSFFlow(nn.Module):
-    """Conditional one-dimensional neural spline flow."""
+    """Conditional 1-D neural spline flow (Zuko NSF) over the standardized target.
+
+    Conditioned on the attention context, it models the full posterior
+    ``p(target | inputs)`` rather than a point estimate. ``zuko`` is imported lazily
+    so the rest of the package works without it installed.
+    """
 
     def __init__(
         self,
@@ -135,7 +155,9 @@ class ConditionalNSFFlow(nn.Module):
         else:
             raise ValueError(f"Expected target shape [B] or [B, 1], got {tuple(standardized_target.shape)}.")
         if target.shape[0] != context.shape[0]:
-            raise ValueError(f"Target batch size {target.shape[0]} does not match context batch size {context.shape[0]}.")
+            raise ValueError(
+                f"Target batch size {target.shape[0]} does not match context batch size {context.shape[0]}."
+            )
         return self.distribution(context).log_prob(target).reshape(-1)
 
     def sample(self, context: torch.Tensor, num_samples: int) -> torch.Tensor:

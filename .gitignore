@@ -1,4 +1,30 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+build/
+dist/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environments
 .venv/
+venv/
+env/
+
+# Large data, checkpoints, and run outputs (see docs/DATA.md)
+*.pt
+*.ckpt
+*.hdf5
+*.h5
+*.npz
+shareable_aion_flow/data/raw/
+shareable_aion_flow/data/staged/
+shareable_aion_flow/data/cache/
+shareable_aion_flow/outputs/
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/

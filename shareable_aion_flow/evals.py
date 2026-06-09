@@ -1,3 +1,10 @@
+"""Evaluation: posterior metrics over modality combinations and the results table.
+
+Runs a trained attention-flow over every non-empty modality combination and
+reports R squared, RMSE, information gain (nats) and exp(mean information gain),
+plus a human-readable results table (CSV/PDF) matching the paper.
+"""
+
 from __future__ import annotations
 
 import math
@@ -18,14 +25,64 @@ except ImportError:
     from normalizing_flow import KDEPrior, TargetStandardizer
 
 
-def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+# Canonical results schema. A fresh `eval` writes exactly these columns, in this
+# order, matching results/test_flow_metrics.csv so the shipped table is fully
+# regenerable by this code (and so `make-table` consumes it without surprises).
+METRIC_COLUMNS = [
+    "input_group",
+    "n_test",
+    "r2",
+    "r2_trimmed_0.05",
+    "rmse",
+    "mae",
+    "mean_posterior_log_prob_nats",
+    "mean_prior_log_prob_nats",
+    "info_gain_nats",
+    "exp_info_gain",
+    "delta_ll_frac_negative",
+    "delta_ll_frac_near_zero",
+    "delta_ll_frac_positive",
+]
+
+# Single source of truth for the per-modality column markers used in the table.
+MODALITY_MARKERS = {"spectra": "S", "z": "Z", "wise": "W", "image": "I"}
+
+
+def _r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    denom = float(np.sum((y_true - y_true.mean()) ** 2))
+    if denom <= 0.0:
+        return float("nan")
+    return float(1.0 - np.sum((y_true - y_pred) ** 2) / denom)
+
+
+def _trim_mask(residual: np.ndarray, trim_fraction: float) -> np.ndarray:
+    """Boolean mask keeping all but the ``trim_fraction`` largest-|residual| points."""
+    n = residual.shape[0]
+    n_drop = int(np.floor(trim_fraction * n))
+    keep = np.ones(n, dtype=bool)
+    if n_drop > 0:
+        keep[np.argsort(np.abs(residual))[n - n_drop :]] = False
+    return keep
+
+
+def regression_metrics(
+    y_true: np.ndarray, y_pred: np.ndarray, trim_fraction: float = 0.05
+) -> dict[str, float]:
+    """R squared, outlier-trimmed R squared, RMSE, and MAE for predictions.
+
+    The trimmed R squared drops the ``trim_fraction`` of points with the largest
+    absolute residual before recomputing, as a robustness check against a handful
+    of catastrophic outliers dominating the score.
+    """
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
     residual = y_true - y_pred
-    denom = np.sum((y_true - y_true.mean()) ** 2)
+    keep = _trim_mask(residual, trim_fraction)
     return {
-        "r2": float(1.0 - np.sum(residual**2) / denom) if denom > 0 else float("nan"),
+        "r2": _r_squared(y_true, y_pred),
+        "r2_trimmed_0.05": _r_squared(y_true[keep], y_pred[keep]),
         "rmse": float(np.sqrt(np.mean(residual**2))),
+        "mae": float(np.mean(np.abs(residual))),
     }
 
 
@@ -40,9 +97,15 @@ def evaluate_all_combos(
     prior: KDEPrior,
     device: torch.device,
     num_samples: int = 256,
+    near_zero_threshold: float = 0.05,
     combos: list[tuple[str, ...]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Evaluate posterior metrics for every requested modality combination."""
+    """Evaluate posterior metrics for every requested modality combination.
+
+    Returns ``(metrics, predictions)``. ``metrics`` carries one row per combination
+    in the canonical ``METRIC_COLUMNS`` schema; ``predictions`` is the per-source
+    posterior summary (mean, 16/50/84th percentiles, log-probs, info gain).
+    """
 
     combos = combos or all_nonempty_modality_combos()
     encoder.eval()
@@ -80,13 +143,19 @@ def evaluate_all_combos(
             posterior_ll = flow.log_prob(target_std, context)
             prior_ll = prior.log_prob_tensor(target_std)
             if not torch.isfinite(posterior_ll).all():
-                raise FloatingPointError(f"Non-finite posterior log-prob for combo={input_group}, batch={batch_index}.")
+                raise FloatingPointError(
+                    f"Non-finite posterior log-prob for combo={input_group}, batch={batch_index}."
+                )
             if not torch.isfinite(prior_ll).all():
-                raise FloatingPointError(f"Non-finite prior log-prob for combo={input_group}, batch={batch_index}.")
+                raise FloatingPointError(
+                    f"Non-finite prior log-prob for combo={input_group}, batch={batch_index}."
+                )
 
             samples_std = flow.sample(context, num_samples=num_samples)
             if not torch.isfinite(samples_std).all():
-                raise FloatingPointError(f"Non-finite posterior samples for combo={input_group}, batch={batch_index}.")
+                raise FloatingPointError(
+                    f"Non-finite posterior samples for combo={input_group}, batch={batch_index}."
+                )
             samples = standardizer.inverse_tensor(samples_std)
             pred = samples.mean(dim=0)
             p16 = torch.quantile(samples, 0.16, dim=0)
@@ -110,14 +179,22 @@ def evaluate_all_combos(
         info_gain = posterior_ll - prior_ll
         metrics = regression_metrics(y_true, y_pred)
         input_group = combo_name(combo)
+        # One row in the canonical METRIC_COLUMNS schema (see module top).
         metric_rows.append(
             {
                 "input_group": input_group,
+                "n_test": int(y_true.shape[0]),
                 "r2": metrics["r2"],
+                "r2_trimmed_0.05": metrics["r2_trimmed_0.05"],
                 "rmse": metrics["rmse"],
-                "mean_info_gain": float(np.mean(info_gain)),
-                "exp_mean_info_gain": float(math.exp(np.mean(info_gain))),
-                "mean_nll": float(-np.mean(posterior_ll)),
+                "mae": metrics["mae"],
+                "mean_posterior_log_prob_nats": float(np.mean(posterior_ll)),
+                "mean_prior_log_prob_nats": float(np.mean(prior_ll)),
+                "info_gain_nats": float(np.mean(info_gain)),
+                "exp_info_gain": float(math.exp(np.mean(info_gain))),
+                "delta_ll_frac_negative": float(np.mean(info_gain < -near_zero_threshold)),
+                "delta_ll_frac_near_zero": float(np.mean(np.abs(info_gain) <= near_zero_threshold)),
+                "delta_ll_frac_positive": float(np.mean(info_gain > near_zero_threshold)),
             }
         )
         prediction_rows.append(
@@ -137,15 +214,15 @@ def evaluate_all_combos(
             )
         )
 
-    return pd.DataFrame(metric_rows), pd.concat(prediction_rows, ignore_index=True)
+    return pd.DataFrame(metric_rows, columns=METRIC_COLUMNS), pd.concat(prediction_rows, ignore_index=True)
 
 
 def _indicator(combo: str, modality: str) -> str:
-    marker = {"spectra": "S", "z": "Z", "wise": "W", "image": "I"}[modality]
-    return marker if modality in combo.split("+") else ""
+    return MODALITY_MARKERS[modality] if modality in combo.split("+") else ""
 
 
 def build_results_table(metrics: pd.DataFrame) -> pd.DataFrame:
+    """Order combinations by R squared and add S/Z/W/I modality indicator columns."""
     table = metrics.copy()
     for modality in MODALITIES:
         table[modality] = table["input_group"].map(lambda combo: _indicator(str(combo), modality))
@@ -157,8 +234,8 @@ def build_results_table(metrics: pd.DataFrame) -> pd.DataFrame:
             "wise",
             "image",
             "r2",
-            "mean_info_gain",
-            "exp_mean_info_gain",
+            "info_gain_nats",
+            "exp_info_gain",
             "rmse",
             "input_group",
         ]
@@ -175,8 +252,8 @@ def save_results_table_pdf(table: pd.DataFrame, path: Path) -> None:
             "wise": "WISE",
             "image": "Images",
             "r2": r"$R^2$",
-            "mean_info_gain": "Info Gain",
-            "exp_mean_info_gain": r"$\exp(\mathrm{Info\ Gain})$",
+            "info_gain_nats": "Info Gain",
+            "exp_info_gain": r"$\exp(\mathrm{Info\ Gain})$",
             "rmse": "RMSE",
         }
     ).drop(columns=["input_group"])

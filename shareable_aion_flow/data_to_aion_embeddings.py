@@ -1,8 +1,16 @@
+"""Data staging, AION tokenization, and dataloaders.
+
+Builds the image-backed train/val/test HDF5 splits from the canonical
+eROSITA/DESI raw data, wraps the frozen AION encoder so a batch becomes
+``(tokens, group_ids)``, and exposes PyTorch dataloaders over the staged splits.
+See ``docs/DATA.md`` for how to obtain the raw inputs.
+"""
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import h5py
 import numpy as np
@@ -15,9 +23,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 try:
-    from .attention_pooling_head import MODALITIES, MODALITY_TO_ID
+    from .attention_pooling_head import MODALITY_TO_ID
 except ImportError:  # Allows `python data_to_aion_embeddings.py` during local debugging.
-    from attention_pooling_head import MODALITIES, MODALITY_TO_ID
+    from attention_pooling_head import MODALITY_TO_ID
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -73,7 +81,9 @@ def resolve_dataset_name(handle: h5py.File, canonical_name: str) -> str:
     raise KeyError(f"Dataset {canonical_name!r} not found in {handle.filename}.")
 
 
-def read_dataset(handle: h5py.File, canonical_name: str, rows: np.ndarray | slice | None = None) -> np.ndarray:
+def read_dataset(
+    handle: h5py.File, canonical_name: str, rows: np.ndarray | slice | None = None
+) -> np.ndarray:
     dataset = handle[resolve_dataset_name(handle, canonical_name)]
     if rows is None:
         return dataset[:]
@@ -204,7 +214,9 @@ def prepare_staged_data(
     manifest = manifest.loc[finite_targets].copy()
     if limit is not None:
         if int(limit) < 3:
-            raise ValueError("--limit must be at least 3 so train, val, and test each receive at least one row.")
+            raise ValueError(
+                "--limit must be at least 3 so train, val, and test each receive at least one row."
+            )
         split_order = ("train", "val", "test")
         base = int(limit) // len(split_order)
         remainder = int(limit) % len(split_order)
@@ -274,9 +286,19 @@ def prepare_staged_data(
 
             image_ds = dest.create_dataset(
                 LEGACY_SURVEY_IMAGE_DATASET,
-                shape=(len(rows), len(LEGACY_SURVEY_IMAGE_BANDS), LEGACY_SURVEY_IMAGE_SIZE, LEGACY_SURVEY_IMAGE_SIZE),
+                shape=(
+                    len(rows),
+                    len(LEGACY_SURVEY_IMAGE_BANDS),
+                    LEGACY_SURVEY_IMAGE_SIZE,
+                    LEGACY_SURVEY_IMAGE_SIZE,
+                ),
                 dtype=np.float32,
-                chunks=(min(16, max(1, len(rows))), len(LEGACY_SURVEY_IMAGE_BANDS), LEGACY_SURVEY_IMAGE_SIZE, LEGACY_SURVEY_IMAGE_SIZE),
+                chunks=(
+                    min(16, max(1, len(rows))),
+                    len(LEGACY_SURVEY_IMAGE_BANDS),
+                    LEGACY_SURVEY_IMAGE_SIZE,
+                    LEGACY_SURVEY_IMAGE_SIZE,
+                ),
                 **compression_kwargs,
             )
             for index, targetid in enumerate(tqdm(targetids, desc=f"stage-{split}-images", unit="img")):
@@ -293,6 +315,12 @@ def prepare_staged_data(
 
 
 class AIONHDF5Dataset(Dataset):
+    """PyTorch dataset over one staged split.
+
+    Each item is the 8-tuple ``(spectra, spectra_ivar, wavelength, redshift, wise,
+    image, target, targetid)`` consumed by the AION tokenizer and the training loop.
+    """
+
     def __init__(self, hdf5_path: Path, target_name: str) -> None:
         self.hdf5_path = Path(hdf5_path)
         self.target_name = target_name
@@ -311,16 +339,28 @@ class AIONHDF5Dataset(Dataset):
 
     def __getitem__(self, index: int):
         handle = self._ensure_open()
-        wise = np.asarray([handle[name][index] for name in ("flux_w1", "flux_w2", "flux_w3")], dtype=np.float32)
+        wise = np.asarray(
+            [handle[name][index] for name in ("flux_w1", "flux_w2", "flux_w3")], dtype=np.float32
+        )
         return (
             torch.from_numpy(read_dataset(handle, "spectra", slice(index, index + 1))[0].astype(np.float32)),
-            torch.from_numpy(read_dataset(handle, "spectra_ivar", slice(index, index + 1))[0].astype(np.float32)),
+            torch.from_numpy(
+                read_dataset(handle, "spectra_ivar", slice(index, index + 1))[0].astype(np.float32)
+            ),
             self._wavelength,
             torch.tensor(read_dataset(handle, "redshift", slice(index, index + 1))[0], dtype=torch.float32),
             torch.from_numpy(wise),
-            torch.from_numpy(read_dataset(handle, LEGACY_SURVEY_IMAGE_DATASET, slice(index, index + 1))[0].astype(np.float32)),
-            torch.tensor(read_dataset(handle, self.target_name, slice(index, index + 1))[0], dtype=torch.float32),
-            torch.tensor(int(read_dataset(handle, "desi_targetid", slice(index, index + 1))[0]), dtype=torch.int64),
+            torch.from_numpy(
+                read_dataset(handle, LEGACY_SURVEY_IMAGE_DATASET, slice(index, index + 1))[0].astype(
+                    np.float32
+                )
+            ),
+            torch.tensor(
+                read_dataset(handle, self.target_name, slice(index, index + 1))[0], dtype=torch.float32
+            ),
+            torch.tensor(
+                int(read_dataset(handle, "desi_targetid", slice(index, index + 1))[0]), dtype=torch.int64
+            ),
         )
 
 
@@ -333,6 +373,7 @@ def build_dataloaders(
     num_workers: int = 0,
     seed: int | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Build train/val/test dataloaders over the staged HDF5 splits."""
     eval_batch_size = eval_batch_size or batch_size
     loaders: list[DataLoader] = []
     train_generator = None
@@ -355,6 +396,7 @@ def build_dataloaders(
 
 
 def read_target_values(hdf5_path: Path, target_name: str) -> np.ndarray:
+    """Read the one-dimensional target column from a staged split."""
     with h5py.File(hdf5_path, "r") as handle:
         return read_dataset(handle, target_name).astype(np.float32)
 
@@ -364,14 +406,26 @@ def move_batch_to_device(batch: tuple[torch.Tensor, ...], device: torch.device) 
 
 
 class AIONTokenEncoder(nn.Module):
-    """Native AION encoder wrapper returning full tokens and direct modality ids."""
+    """Frozen AION encoder wrapped to return tokens and per-token modality ids.
+
+    ``encode_tokens`` turns a batch into ``(tokens [B, T, 768], group_ids [B, T])``,
+    where each group id is a direct modality (0=spectra, 1=z, 2=wise, 3=image) for the
+    attention head. ``aion`` is imported lazily so staging and tests run without it.
+    """
 
     def __init__(self, model_name: str = "polymathic-ai/aion-base", freeze: bool = True) -> None:
         super().__init__()
         try:
             from aion import AION
             from aion.codecs import CodecManager
-            from aion.modalities import DESISpectrum, LegacySurveyFluxW1, LegacySurveyFluxW2, LegacySurveyFluxW3, LegacySurveyImage, Z
+            from aion.modalities import (
+                DESISpectrum,
+                LegacySurveyFluxW1,
+                LegacySurveyFluxW2,
+                LegacySurveyFluxW3,
+                LegacySurveyImage,
+                Z,
+            )
         except ImportError as exc:
             raise ImportError("Install polymathic-aion to use the AION encoder.") from exc
 
@@ -405,7 +459,9 @@ class AIONTokenEncoder(nn.Module):
         requested = set(combo)
         modalities: list[object] = []
         if "spectra" in requested:
-            modalities.append(self.spectrum_cls(flux=flux, ivar=ivar, mask=ivar <= 0.0, wavelength=wavelength))
+            modalities.append(
+                self.spectrum_cls(flux=flux, ivar=ivar, mask=ivar <= 0.0, wavelength=wavelength)
+            )
         if "z" in requested:
             modalities.append(self.z_cls(value=redshift))
         if "wise" in requested:
@@ -425,7 +481,9 @@ class AIONTokenEncoder(nn.Module):
         for group_name, token_keys in TOKEN_KEYS_BY_MODALITY.items():
             for token_key in token_keys:
                 if token_key in modality_info:
-                    group_ids[modality_mask.eq(int(modality_info[token_key]["id"]))] = MODALITY_TO_ID[group_name]
+                    group_ids[modality_mask.eq(int(modality_info[token_key]["id"]))] = MODALITY_TO_ID[
+                        group_name
+                    ]
         if bool(group_ids.lt(0).any()):
             raise RuntimeError("AION returned token ids that are not mapped to spectra, z, WISE, or image.")
         return group_ids

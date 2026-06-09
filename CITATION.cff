@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "erosita-desi-aion-flow: AION attention-flow for optical-to-X-ray prediction"
+version: 0.1.0
+date-released: "2026-06-08"
+license: MIT
+url: "https://github.com/RoccoDiTella/erosita-desi-aion-flow"
+# Author of this software (the code). The paper and its full author list are in
+# preferred-citation below.
+authors:
+  - family-names: "Di Tella"
+    given-names: Rocco
+preferred-citation:
+  type: conference-paper
+  title: "Exploring the connection between optical and X-ray emissions in Active Galactic Nuclei"
+  year: 2026
+  collection-title: "Conference on Physics and AI (PAI)"
+  url: "https://openreview.net/forum?id=u401Qxwqgw"
+  notes: "Equal contribution: Bottger and Di Tella."
+  authors:
+    - family-names: Bottger
+      given-names: "Rebeka L."
+    - family-names: "Di Tella"
+      given-names: Rocco
+    - family-names: Cuesta-Lazaro
+      given-names: Carolina
+    - family-names: Reeves
+      given-names: Jason
+    - family-names: Cappelluti
+      given-names: Nico
+    - family-names: "Martínez-Galarza"
+      given-names: Rafael

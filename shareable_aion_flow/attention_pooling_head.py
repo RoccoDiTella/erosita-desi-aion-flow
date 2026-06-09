@@ -1,3 +1,12 @@
+"""Attention-pooling head for AION tokens (the clean q4/l2 paper model).
+
+Pools AION's per-modality token sequence into a fixed-size flow context using a
+learned modality-affine calibration, four global queries conditioned on a
+modality-presence embedding, and two cross/self-attention blocks. This is the
+simplified reference implementation of the architecture used in the PAI 2026
+paper; see the repository README for how it relates to the full research code.
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -5,7 +14,6 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-
 
 MODALITIES: tuple[str, ...] = ("spectra", "z", "wise", "image")
 MODALITY_TO_ID = {name: index for index, name in enumerate(MODALITIES)}
@@ -49,7 +57,9 @@ def validate_direct_group_ids(tokens: torch.Tensor, group_ids: torch.Tensor) -> 
     if tokens.dim() != 3:
         raise ValueError(f"Expected AION tokens with shape [B, T, D], got {tuple(tokens.shape)}.")
     if group_ids.shape != tokens.shape[:2]:
-        raise ValueError(f"group_ids shape {tuple(group_ids.shape)} does not match token shape {tuple(tokens.shape[:2])}.")
+        raise ValueError(
+            f"group_ids shape {tuple(group_ids.shape)} does not match token shape {tuple(tokens.shape[:2])}."
+        )
     if group_ids.dtype != torch.long:
         raise TypeError(f"group_ids must use torch.long dtype, got {group_ids.dtype}.")
     if bool(group_ids.lt(0).any() or group_ids.ge(len(MODALITIES)).any()):
@@ -237,7 +247,7 @@ class ComboSampler:
     combos_by_size: dict[int, tuple[tuple[str, ...], ...]]
 
     @classmethod
-    def default(cls) -> "ComboSampler":
+    def default(cls) -> ComboSampler:
         combos_by_size: dict[int, list[tuple[str, ...]]] = {}
         for combo in all_nonempty_modality_combos():
             combos_by_size.setdefault(len(combo), []).append(combo)

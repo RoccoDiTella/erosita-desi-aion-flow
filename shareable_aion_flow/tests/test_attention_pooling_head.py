@@ -1,10 +1,12 @@
+"""Unit tests for the attention-pooling head (shapes, presence ids, validation)."""
+
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
-import torch
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

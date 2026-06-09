@@ -5,30 +5,58 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "shareable-aion-flow"
 version = "0.1.0"
-description = "Clean AION attention-flow package for eROSITA/DESI flux prediction."
+description = "Reference implementation of the PAI 2026 paper on optical-to-X-ray prediction in AGN: a conditional normalizing flow on frozen AION embeddings."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Rebeka L. Bottger" },
+    { name = "Rocco Di Tella", email = "rocco.di_tella@cfa.harvard.edu" },
+    { name = "Carolina Cuesta-Lazaro" },
+    { name = "Jason Reeves" },
+    { name = "Nico Cappelluti" },
+    { name = "Rafael Martínez-Galarza" },
+]
+keywords = [
+    "astronomy",
+    "foundation-models",
+    "normalizing-flows",
+    "multimodal",
+    "active-galactic-nuclei",
+    "x-ray",
+    "AION",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "astropy>=6.1",
     "h5py>=3.11",
-    "matplotlib>=3.9",
+    "matplotlib>=3.7",
     "numpy>=1.26",
     "pandas>=2.1",
-    "scipy>=1.13",
+    "scipy>=1.11",
     "torch>=2.2",
     "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.3",
-]
-flow = [
-    "zuko>=1.5.0",
-]
-aion = [
-    "polymathic-aion",
-]
+dev = ["pytest>=8.3"]
+flow = ["zuko>=1.5.0"]
+aion = ["polymathic-aion"]
+
+[project.urls]
+Repository = "https://github.com/RoccoDiTella/erosita-desi-aion-flow"
+Paper = "https://openreview.net/forum?id=u401Qxwqgw"
+
+[project.scripts]
+aion-flow = "shareable_aion_flow.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -37,3 +65,10 @@ include = ["shareable_aion_flow*"]
 [tool.pytest.ini_options]
 testpaths = ["shareable_aion_flow/tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

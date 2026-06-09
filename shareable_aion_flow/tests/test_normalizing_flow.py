@@ -1,7 +1,9 @@
+"""Unit tests for the target standardizer and KDE prior."""
+
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,4 +29,3 @@ def test_kde_prior_round_trips_metadata(tmp_path: Path) -> None:
     loaded = KDEPrior.load(path)
     assert loaded.metadata["target"] == "log_ml_flux_1"
     assert np.isfinite(loaded.log_prob_numpy(np.array([0.0]))).all()
-
