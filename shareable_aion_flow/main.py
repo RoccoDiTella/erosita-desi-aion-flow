@@ -10,6 +10,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -34,7 +35,7 @@ try:
         write_json,
     )
     from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
-    from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
+    from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer, sample_split_normal
 except ImportError:
     from attention_pooling_head import (
         MODALITIES,
@@ -54,7 +55,7 @@ except ImportError:
         write_json,
     )
     from evals import build_results_table, evaluate_all_combos, save_results_table_pdf
-    from normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer
+    from normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer, sample_split_normal
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -77,12 +78,28 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(int(seed))
 
 
+PAPER_HEAD: dict[str, Any] = {"num_queries": 4, "num_layers": 2, "context_hidden": [512, 512], "context_dim": 256}
+
+
 def build_model(
-    device: torch.device, dropout: float
+    device: torch.device,
+    dropout: float,
+    head: dict[str, Any] | None = None,
 ) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow]:
-    """Build the frozen AION encoder, attention-context head, and conditional flow."""
+    """Build the frozen AION encoder, attention-context head, and conditional flow.
+
+    ``head`` overrides the attention-head sizes (num_queries/num_layers/
+    context_hidden/context_dim); ``None`` uses the paper q4/l2 defaults.
+    """
+    head = {**PAPER_HEAD, **(head or {})}
     encoder = AIONTokenEncoder(freeze=True).to(device)
-    context_encoder = AIONAttentionContext(dropout=dropout).to(device)
+    context_encoder = AIONAttentionContext(
+        dropout=dropout,
+        num_queries=int(head["num_queries"]),
+        num_layers=int(head["num_layers"]),
+        context_hidden=tuple(head["context_hidden"]),
+        context_dim=int(head["context_dim"]),
+    ).to(device)
     flow = ConditionalNSFFlow(context_dim=context_encoder.context_dim).to(device)
     return encoder, context_encoder, flow
 
@@ -118,7 +135,8 @@ def load_checkpoint(
     dropout: float,
 ) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow, TargetStandardizer, dict[str, object]]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    encoder, context_encoder, flow = build_model(device, dropout=dropout)
+    head = checkpoint.get("config", {}).get("head")
+    encoder, context_encoder, flow = build_model(device, dropout=dropout, head=head)
     context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
     flow.load_state_dict(checkpoint["flow_state_dict"])
     standardizer = TargetStandardizer.from_state_dict(checkpoint["standardizer"])
@@ -133,8 +151,15 @@ def batch_nll(
     batch: tuple[torch.Tensor, ...],
     combo: tuple[str, ...],
     standardizer: TargetStandardizer,
+    error_mode: str = "none",
 ) -> torch.Tensor:
-    """Negative log-likelihood of one batch under the flow for a given modality combo."""
+    """Negative log-likelihood of one batch under the flow for a given modality combo.
+
+    ``error_mode`` folds in the per-source split-normal measurement error carried
+    as ``batch[8]=sig_lo, batch[9]=sig_hi`` (in target units): ``convolve``
+    deconvolves it via the convolution likelihood, ``inject`` adds it as noise,
+    ``none`` ignores it. Falls back to plain log-prob when errors are absent/zero.
+    """
     target = batch[6]
     if not torch.isfinite(target).all():
         bad = int((~torch.isfinite(target)).sum().item())
@@ -142,7 +167,21 @@ def batch_nll(
     target_std = standardizer.transform_tensor(target)
     tokens, group_ids = encoder.encode_tokens(batch, combo)
     context = context_encoder(tokens, group_ids)
-    loss = -flow.log_prob(target_std, context).mean()
+
+    has_err = error_mode != "none" and len(batch) >= 10 and float((batch[8].abs() + batch[9].abs()).max()) > 1e-8
+    if has_err:
+        sig_lo = (batch[8].abs() / standardizer.std).clamp_min(1e-6)
+        sig_hi = (batch[9].abs() / standardizer.std).clamp_min(1e-6)
+        if error_mode == "convolve":
+            log_prob = flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
+        elif error_mode == "inject":
+            log_prob = flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
+        else:
+            raise ValueError(f"Unknown error_mode {error_mode!r}.")
+    else:
+        log_prob = flow.log_prob(target_std, context)
+
+    loss = -log_prob.mean()
     if not torch.isfinite(loss):
         raise FloatingPointError(f"Non-finite NLL for combo={'+'.join(combo)}.")
     return loss
@@ -157,6 +196,7 @@ def validation_all_inputs_nll(
     val_loader,
     standardizer: TargetStandardizer,
     device: torch.device,
+    error_mode: str = "none",
 ) -> float:
     """Mean all-inputs validation NLL -- the early-stopping and checkpoint criterion."""
     encoder.eval()
@@ -174,6 +214,7 @@ def validation_all_inputs_nll(
             batch=batch,
             combo=combo,
             standardizer=standardizer,
+            error_mode=error_mode,
         )
         losses.append(float(loss.item()))
         counts.append(int(batch[6].shape[0]))
@@ -210,7 +251,14 @@ def train(args: argparse.Namespace) -> None:
     }
     prior.save(run_dir / "kde_prior.npz", metadata=prior_metadata)
 
-    encoder, context_encoder, flow = build_model(device, dropout=args.dropout)
+    head = {
+        "num_queries": args.num_queries,
+        "num_layers": args.num_layers,
+        "context_hidden": list(args.context_hidden),
+        "context_dim": args.context_dim,
+    }
+    is_paper_head = head == PAPER_HEAD
+    encoder, context_encoder, flow = build_model(device, dropout=args.dropout, head=head)
     optimizer = torch.optim.AdamW(
         list(context_encoder.parameters()) + list(flow.parameters()),
         lr=args.lr,
@@ -226,7 +274,9 @@ def train(args: argparse.Namespace) -> None:
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "dropout": args.dropout,
-        "architecture": "paper_q4_l2_attention_flow_clean",
+        "head": head,
+        "error_mode": args.error_mode,
+        "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
         "training_mix": "25% singles, 25% pairs, 25% triples, 25% all-input",
         "modalities": list(MODALITIES),
         "standardizer": standardizer.state_dict(),
@@ -256,6 +306,7 @@ def train(args: argparse.Namespace) -> None:
                 batch=batch,
                 combo=combo,
                 standardizer=standardizer,
+                error_mode=args.error_mode,
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -274,6 +325,7 @@ def train(args: argparse.Namespace) -> None:
             val_loader=val_loader,
             standardizer=standardizer,
             device=device,
+            error_mode=args.error_mode,
         )
         train_nll = float(np.average(train_losses, weights=train_counts))
         row = {"epoch": epoch, "train_nll": train_nll, "val_all_inputs_nll": val_nll}
@@ -434,10 +486,21 @@ def parse_args() -> argparse.Namespace:
     prepare.add_argument("--limit", type=int, default=None)
     prepare.add_argument("--overwrite", action="store_true")
     prepare.add_argument("--image-compression", choices=["none", "gzip", "lzf"], default="none")
+    prepare.add_argument("--clean", action="store_true",
+                         help="Apply NWAY clean filter + dedup + re-split on the cleaned sample.")
+    prepare.add_argument("--match-quality-csv", type=Path, default=None, help="Per-targetid NWAY keep filter.")
+    prepare.add_argument("--targets-extra-csv", type=Path, default=None,
+                         help="Extra target + error columns (logmstar, hr32_u, flux_sig_lo/hi).")
 
     train_parser = subparsers.add_parser("train", help="Train the clean paper AION attention-flow model.")
     train_parser.add_argument("--staged-dir", type=Path, default=STAGED_DIR)
-    train_parser.add_argument("--target", choices=["log_ml_flux_1", "log_lx"], default="log_ml_flux_1")
+    train_parser.add_argument(
+        "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default="log_ml_flux_1"
+    )
+    train_parser.add_argument(
+        "--error-mode", choices=["none", "inject", "convolve"], default="convolve",
+        help="Fold per-source split-normal errors into the likelihood (convolve=deconvolve).",
+    )
     train_parser.add_argument("--output-dir", type=Path, default=OUTPUTS_DIR)
     train_parser.add_argument("--run-id", default=None)
     train_parser.add_argument("--epochs", type=int, default=50)
@@ -452,13 +515,23 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--device", default=None)
     train_parser.add_argument("--eval-after-train", action="store_true")
     train_parser.add_argument("--eval-samples", type=int, default=256)
+    # Attention-head size (defaults = paper q4/l2; e.g. V1 minimal head:
+    #   --num-queries 1 --num-layers 1 --context-hidden 128)
+    train_parser.add_argument("--num-queries", type=int, default=PAPER_HEAD["num_queries"])
+    train_parser.add_argument("--num-layers", type=int, default=PAPER_HEAD["num_layers"])
+    train_parser.add_argument(
+        "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
+    )
+    train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
 
     eval_parser = subparsers.add_parser(
         "eval", help="Evaluate all 15 modality combinations from a checkpoint."
     )
     eval_parser.add_argument("--checkpoint", type=Path, required=True)
     eval_parser.add_argument("--staged-dir", type=Path, default=STAGED_DIR)
-    eval_parser.add_argument("--target", choices=["log_ml_flux_1", "log_lx"], default=None)
+    eval_parser.add_argument(
+        "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default=None
+    )
     eval_parser.add_argument("--allow-target-override", action="store_true")
     eval_parser.add_argument("--output-dir", type=Path, required=True)
     eval_parser.add_argument("--batch-size", type=int, default=448)
@@ -486,6 +559,9 @@ def main() -> None:
             limit=args.limit,
             overwrite=args.overwrite,
             image_compression=args.image_compression,
+            clean=args.clean,
+            match_quality_csv=args.match_quality_csv,
+            targets_extra_csv=args.targets_extra_csv,
         )
         print(json.dumps(summary, indent=2, sort_keys=True))
     elif args.command == "train":

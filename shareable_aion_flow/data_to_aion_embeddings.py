@@ -65,7 +65,23 @@ DATASET_ALIASES = {
     "ml_flux_1": ("ml_flux_1",),
     "log_ml_flux_1": ("log_ml_flux_1",),
     "log_lx": ("log_lx",),
+    "logmstar": ("logmstar",),
+    "logmstar_sig": ("logmstar_sig",),
+    "hr32_u": ("hr32_u",),
+    "hr32_u_sig": ("hr32_u_sig",),
+    "flux_sig_lo": ("flux_sig_lo",),
+    "flux_sig_hi": ("flux_sig_hi",),
     LEGACY_SURVEY_IMAGE_DATASET: (LEGACY_SURVEY_IMAGE_DATASET,),
+}
+
+# Extra target columns joined from targets_extra.csv (by desi_targetid) into each
+# staged split, and the (lower, upper) 1-sigma error column for each target.
+EXTRA_TARGET_COLUMNS = ("logmstar", "logmstar_sig", "hr32_u", "hr32_u_sig", "flux_sig_lo", "flux_sig_hi")
+TARGET_ERROR_COLS = {
+    "log_ml_flux_1": ("flux_sig_lo", "flux_sig_hi"),
+    "log_lx": ("flux_sig_lo", "flux_sig_hi"),
+    "logmstar": ("logmstar_sig", "logmstar_sig"),
+    "hr32_u": ("hr32_u_sig", "hr32_u_sig"),
 }
 
 
@@ -161,6 +177,41 @@ def _compression_kwargs(compression: str) -> dict[str, object]:
     raise ValueError(f"Unsupported compression: {compression!r}")
 
 
+def build_clean_manifest(
+    manifest: pd.DataFrame,
+    match_quality_csv: Path,
+    *,
+    seed: int = 42,
+    split_fracs: tuple[float, float, float] = (0.8, 0.1, 0.1),
+) -> pd.DataFrame:
+    """Apply the NWAY clean filter, dedup to one row per targetid, and RE-SPLIT.
+
+    The split is re-derived on the cleaned+deduped sample so train/val/test reflect
+    the objects we actually train on. It is targetid-grouped by construction (one
+    row per targetid after dedup), so no targetid crosses splits.
+    ``match_quality_csv`` provides per-targetid ``keep`` (NWAY-correct match).
+    """
+    mq = pd.read_csv(match_quality_csv, usecols=["targetid", "keep"])
+    keep_ids = set(mq.loc[mq["keep"].astype(bool), "targetid"].astype(np.int64).tolist())
+    cleaned = (
+        manifest.assign(targetid=manifest["targetid"].astype(np.int64))
+        .loc[lambda d: d["targetid"].isin(keep_ids)]
+        .drop_duplicates("targetid")
+        .reset_index(drop=True)
+        .copy()
+    )
+    ids = cleaned["targetid"].to_numpy(np.int64)
+    perm = np.random.default_rng(seed).permutation(len(ids))
+    n = len(ids)
+    n_train = int(split_fracs[0] * n)
+    n_val = int(split_fracs[1] * n)
+    split_labels = np.array(["test"] * n, dtype=object)
+    split_labels[perm[:n_train]] = "train"
+    split_labels[perm[n_train : n_train + n_val]] = "val"
+    cleaned["split"] = split_labels
+    return cleaned
+
+
 def prepare_staged_data(
     *,
     source_hdf5: Path = SOURCE_HDF5,
@@ -170,12 +221,19 @@ def prepare_staged_data(
     limit: int | None = None,
     overwrite: bool = False,
     image_compression: str = "none",
+    clean: bool = False,
+    match_quality_csv: Path | None = None,
+    targets_extra_csv: Path | None = None,
 ) -> dict[str, object]:
     """Build image-backed train/val/test HDF5 files from canonical raw data.
 
     The split manifest is targetid-safe and carries the source HDF5 row for
     each sample. Rows whose targetid does not have a FITS file are excluded,
     because this package trains the four-modality model.
+
+    ``clean=True`` applies the NWAY clean filter + dedup and RE-SPLITS on the
+    cleaned sample (needs ``match_quality_csv``). ``targets_extra_csv`` adds the
+    extra target + per-source error columns (logmstar, hr32_u, flux_sig_lo/hi).
     """
 
     output_dir = Path(output_dir)
@@ -187,6 +245,16 @@ def prepare_staged_data(
 
     manifest = pd.read_csv(split_manifest_csv)
     original_manifest_rows = int(len(manifest))
+    if clean:
+        if match_quality_csv is None:
+            raise ValueError("clean=True requires match_quality_csv (the NWAY keep filter).")
+        manifest = build_clean_manifest(manifest, Path(match_quality_csv))
+
+    targets_extra = None
+    if targets_extra_csv is not None:
+        targets_extra = pd.read_csv(targets_extra_csv)
+        targets_extra["targetid"] = targets_extra["targetid"].astype(np.int64)
+        targets_extra = targets_extra.drop_duplicates("targetid").set_index("targetid")
     manifest["fits_path"] = manifest["targetid"].map(lambda targetid: fits_pool_dir / f"{int(targetid)}.fits")
     has_fits = manifest["fits_path"].map(Path.exists)
     missing_fits_count = int((~has_fits).sum())
@@ -284,6 +352,21 @@ def prepare_staged_data(
                 compression_opts=4,
             )
 
+            if targets_extra is not None:
+                aligned = targets_extra.reindex(targetids)
+                for col in EXTRA_TARGET_COLUMNS:
+                    values = (
+                        aligned[col].to_numpy(dtype=np.float64)
+                        if col in aligned.columns
+                        else np.full(len(targetids), np.nan)
+                    )
+                    dest.create_dataset(
+                        col, data=values.astype(np.float32), compression="gzip", compression_opts=4
+                    )
+                if "spectype" in aligned.columns:
+                    spectype = aligned["spectype"].fillna("").astype(str).to_numpy()
+                    dest.create_dataset("spectype", data=np.asarray(spectype, dtype="S"))
+
             image_ds = dest.create_dataset(
                 LEGACY_SURVEY_IMAGE_DATASET,
                 shape=(
@@ -325,9 +408,11 @@ class AIONHDF5Dataset(Dataset):
         self.hdf5_path = Path(hdf5_path)
         self.target_name = target_name
         self._handle: h5py.File | None = None
+        self.err_cols = TARGET_ERROR_COLS.get(target_name)
         with h5py.File(self.hdf5_path, "r") as handle:
             self.length = int(handle["desi_targetid"].shape[0])
             self._wavelength = torch.from_numpy(read_dataset(handle, "spectra_lambda").astype(np.float32))
+            self.has_err = bool(self.err_cols) and all(name in handle for name in self.err_cols)
 
     def _ensure_open(self) -> h5py.File:
         if self._handle is None:
@@ -342,6 +427,11 @@ class AIONHDF5Dataset(Dataset):
         wise = np.asarray(
             [handle[name][index] for name in ("flux_w1", "flux_w2", "flux_w3")], dtype=np.float32
         )
+        if self.has_err:
+            sig_lo = float(read_dataset(handle, self.err_cols[0], slice(index, index + 1))[0])
+            sig_hi = float(read_dataset(handle, self.err_cols[1], slice(index, index + 1))[0])
+        else:
+            sig_lo = sig_hi = 0.0
         return (
             torch.from_numpy(read_dataset(handle, "spectra", slice(index, index + 1))[0].astype(np.float32)),
             torch.from_numpy(
@@ -361,6 +451,8 @@ class AIONHDF5Dataset(Dataset):
             torch.tensor(
                 int(read_dataset(handle, "desi_targetid", slice(index, index + 1))[0]), dtype=torch.int64
             ),
+            torch.tensor(sig_lo, dtype=torch.float32),
+            torch.tensor(sig_hi, dtype=torch.float32),
         )
 
 
@@ -493,7 +585,7 @@ class AIONTokenEncoder(nn.Module):
         batch: tuple[torch.Tensor, ...],
         combo: tuple[str, ...],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flux, ivar, wavelength, redshift, wise, image, _target, _targetid = batch
+        flux, ivar, wavelength, redshift, wise, image = batch[:6]
         codec = self._codec(flux.device)
         modalities = self._modalities(flux, ivar, wavelength, redshift, wise, image, combo)
         token_dict = codec.encode(*modalities)

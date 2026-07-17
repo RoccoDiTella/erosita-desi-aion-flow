@@ -13,6 +13,10 @@ dist/
 venv/
 env/
 
+# FASRC ops (local machine/cluster specifics, secrets)
+.fasrc.env
+logs/
+
 # Large data, checkpoints, and run outputs (see docs/DATA.md)
 *.pt
 *.ckpt

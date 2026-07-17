@@ -228,12 +228,39 @@ class FlowContextMLP(nn.Module):
 
 
 class AIONAttentionContext(nn.Module):
-    """AION-token attention pooler plus MLP context adapter."""
+    """AION-token attention pooler plus MLP context adapter.
 
-    def __init__(self, dropout: float = 0.05) -> None:
+    The pooler/adapter sizes are configurable so smaller heads can be tried
+    without touching the paper defaults. ``num_queries=4, num_layers=2,
+    context_hidden=(512, 512), context_dim=256`` reproduces the paper q4/l2
+    head; e.g. ``num_queries=1, num_layers=1, context_hidden=(128,)`` is the
+    minimal "V1" head. The adapter input width follows ``embed_dim * num_queries``
+    automatically, so reducing the query count shrinks the MLP too.
+    """
+
+    def __init__(
+        self,
+        dropout: float = 0.05,
+        *,
+        num_queries: int = 4,
+        num_layers: int = 2,
+        num_heads: int = 8,
+        context_hidden: tuple[int, ...] = (512, 512),
+        context_dim: int = 256,
+    ) -> None:
         super().__init__()
-        self.pooler = PaperQ4L2AttentionPooler(dropout=dropout)
-        self.adapter = FlowContextMLP(dropout=dropout)
+        self.pooler = PaperQ4L2AttentionPooler(
+            num_queries=num_queries,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            dropout=dropout,
+        )
+        self.adapter = FlowContextMLP(
+            input_dim=self.pooler.feature_dim,
+            hidden_dims=tuple(context_hidden),
+            output_dim=context_dim,
+            dropout=dropout,
+        )
         self.context_dim = self.adapter.output_dim
 
     def forward(self, tokens: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
