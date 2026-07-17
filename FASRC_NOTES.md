@@ -1,8 +1,19 @@
 # FASRC operations notes (SLURM)
 
-Working notes for running this repo on the Harvard FASRC cluster (SLURM). This is
-the SLURM analog of the old RunPod workflow. **Fill the `<...>` placeholders from
-the Phase 0 discovery output.**
+Working notes for running this repo on the Harvard FASRC cluster (SLURM).
+
+## Workflow (adopted): develop locally, git for code, FASRC only for jobs + data
+- **Local (pop-os):** edit + run tests in `stanford_deadline/.venv`; commit to a branch; `git push`. Source of truth. Working branch: `multitarget-clean-errors`.
+- **Code → FASRC via git** (repo is PUBLIC → HTTPS clone/pull needs no auth on the cluster):
+  `git clone https://github.com/RoccoDiTella/erosita-desi-aion-flow.git && cd erosita-desi-aion-flow && git checkout multitarget-clean-errors` (update: `git pull`). Then copy the gitignored config once (`rsync .fasrc.env` into the cluster repo).
+- **Data → FASRC via rsync**: `scripts/fasrc_stage_data.sh` (verify-before-push allowlist).
+- **Compute = jobs ONLY. Never run env build / unzip / prepare-data / training on the login node** — arbiter2 kills login-node compute (it did once). Submit to compute nodes:
+  1. `scripts/submit.sh sbatch/setup.sbatch` — build conda env + unzip fits_pool
+  2. `scripts/submit.sh sbatch/prepare_data.sbatch` — cleaned/deduped/re-split staged HDF5
+  3. `scripts/submit.sh sbatch/train_smoke.sbatch` — V1 log_flux smoke (`gpu_test`, `--error-mode convolve`)
+  The socket is only for `submit.sh` / `squeue` / `tail -f logs/…` — a socket drop cannot hurt a queued/running job.
+
+**Fill the `<...>` placeholders below from the Phase 0 discovery output.**
 
 ## Discovered settings (Phase 0, 2026-07-13)
 - User `rditella`; login node `holylogin05`. Groups: **finkbeiner_lab**, itc_lab, starfish_users, training, cluster_users.
