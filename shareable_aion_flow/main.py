@@ -32,6 +32,7 @@ try:
         build_dataloaders,
         prepare_staged_data,
         read_target_values,
+        read_view_target_values,
         write_json,
     )
     from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
@@ -53,6 +54,7 @@ except ImportError:
         build_dataloaders,
         prepare_staged_data,
         read_target_values,
+        read_view_target_values,
         write_json,
     )
     from evals import build_results_table, evaluate_all_combos, save_results_table_pdf
@@ -234,6 +236,7 @@ def train(args: argparse.Namespace) -> None:
     run_dir = Path(args.output_dir) / (args.run_id or timestamp_run_id("aion-flow"))
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    clean_split_csv = Path(args.clean_split_csv) if args.clean_split_csv else None
     train_loader, val_loader, test_loader = build_dataloaders(
         staged_dir=Path(args.staged_dir),
         target_name=args.target,
@@ -241,8 +244,15 @@ def train(args: argparse.Namespace) -> None:
         eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        clean_split_csv=clean_split_csv,
     )
-    target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", args.target)
+    # Standardizer + prior must be fit on the same rows the model trains on.
+    if clean_split_csv is not None:
+        target_values = read_view_target_values(
+            Path(args.staged_dir), args.target, clean_split_csv, split="train"
+        )
+    else:
+        target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", args.target)
     standardizer = TargetStandardizer.fit(target_values)
     prior = KDEPrior(standardizer.transform_numpy(target_values), bw_method="scott")
     prior_metadata = {
@@ -278,6 +288,7 @@ def train(args: argparse.Namespace) -> None:
         "dropout": args.dropout,
         "head": head,
         "error_mode": args.error_mode,
+        "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
         "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
         "training_mix": "25% singles, 25% pairs, 25% triples, 25% all-input",
         "modalities": list(MODALITIES),
@@ -403,6 +414,7 @@ def train(args: argparse.Namespace) -> None:
             dropout=args.dropout,
             num_samples=args.eval_samples,
             allow_target_override=False,
+            clean_split_csv=clean_split_csv,
         )
         evaluate(eval_args)
         log_eval_metrics(tracker, run_dir / "test_flow_metrics.csv")
@@ -461,12 +473,18 @@ def evaluate(args: argparse.Namespace) -> None:
                 f"Checkpoint target is {checkpoint_target!r}, but eval requested {resolved_target!r}. "
                 "Pass --allow-target-override only for an intentional diagnostic override."
             )
+    eval_clean_split_csv = Path(args.clean_split_csv) if getattr(args, "clean_split_csv", None) else None
     checkpoint_prior = _config.get("prior_path")
     prior_path = (
         Path(checkpoint_prior) if checkpoint_prior else Path(args.checkpoint).parent / "kde_prior.npz"
     )
     if not prior_path.exists():
-        target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", resolved_target)
+        if eval_clean_split_csv is not None:
+            target_values = read_view_target_values(
+                Path(args.staged_dir), resolved_target, eval_clean_split_csv, split="train"
+            )
+        else:
+            target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", resolved_target)
         KDEPrior(standardizer.transform_numpy(target_values), bw_method="scott").save(
             output_dir / "kde_prior.npz",
             metadata={
@@ -492,6 +510,7 @@ def evaluate(args: argparse.Namespace) -> None:
     _train_loader, _val_loader, test_loader = build_dataloaders(
         staged_dir=Path(args.staged_dir),
         target_name=resolved_target,
+        clean_split_csv=eval_clean_split_csv,
         batch_size=args.batch_size,
         eval_batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -588,6 +607,13 @@ def parse_args() -> argparse.Namespace:
         "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
+    train_parser.add_argument(
+        "--clean-split-csv",
+        type=Path,
+        default=None,
+        help="targetid->split sidecar (scripts/make_clean_split.py): train on the cleaned "
+        "re-split VIEW of the staged superset instead of the files' native splits.",
+    )
     train_parser.add_argument("--wandb", action="store_true", help="Track this run with Weights & Biases.")
     train_parser.add_argument("--wandb-project", default="erosita-desi-aion-flow")
     train_parser.add_argument("--wandb-entity", default=None)
@@ -609,6 +635,12 @@ def parse_args() -> argparse.Namespace:
         "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default=None
     )
     eval_parser.add_argument("--allow-target-override", action="store_true")
+    eval_parser.add_argument(
+        "--clean-split-csv",
+        type=Path,
+        default=None,
+        help="Evaluate on the cleaned re-split VIEW of the staged superset (must match training).",
+    )
     eval_parser.add_argument("--output-dir", type=Path, required=True)
     eval_parser.add_argument("--batch-size", type=int, default=448)
     eval_parser.add_argument("--num-workers", type=int, default=0)

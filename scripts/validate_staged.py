@@ -386,7 +386,8 @@ def check_model_contract(rep: Report, staged_dir: Path, target: str, run_forward
 
     import torch
 
-    from shareable_aion_flow.main import build_model
+    from shareable_aion_flow.attention_pooling_head import MODALITIES
+    from shareable_aion_flow.main import batch_nll, build_model
     from shareable_aion_flow.normalizing_flow import TargetStandardizer
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -394,14 +395,21 @@ def check_model_contract(rep: Report, staged_dir: Path, target: str, run_forward
         device, dropout=0.0, head={"num_queries": 1, "num_layers": 1, "context_hidden": [128], "context_dim": 256}
     )
     batch = tuple(t.to(device) for t in batch)
+    # Exercise the REAL training path (encode_tokens + head + flow NLL) so a
+    # contract drift between loader and trainer fails here, not mid-job.
     with torch.no_grad():
-        tokens = encoder.encode_tokens(*batch[:6])
-        context = context_encoder(tokens, combo=tuple(sorted(tokens.keys())))
         standardizer = TargetStandardizer.fit(batch[6].cpu().numpy())
-        y = torch.as_tensor(standardizer.transform_numpy(batch[6].cpu().numpy()), device=device).float()
-        logp = flow.log_prob(y.unsqueeze(-1), context)
+        loss = batch_nll(
+            encoder=encoder,
+            context_encoder=context_encoder,
+            flow=flow,
+            batch=batch,
+            combo=tuple(MODALITIES),
+            standardizer=standardizer,
+            error_mode="none",
+        )
     rep.check(
-        bool(torch.isfinite(logp).all()), "model forward", f"log_prob finite, shape={tuple(logp.shape)}, device={device}"
+        bool(torch.isfinite(loss)), "model forward", f"all-inputs batch NLL={float(loss):.4f}, device={device}"
     )
 
 

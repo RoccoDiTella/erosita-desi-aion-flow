@@ -3,7 +3,7 @@
 #SBATCH -p shared
 #SBATCH -c 16
 #SBATCH --mem 48G
-#SBATCH -t 0-06:00
+#SBATCH -t 0-01:00
 #SBATCH -o logs/prepare_%j.out
 #SBATCH -e logs/prepare_%j.err
 #SBATCH --open-mode=append

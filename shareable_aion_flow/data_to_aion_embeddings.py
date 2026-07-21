@@ -19,7 +19,7 @@ import torch
 from astropy.cosmology import Planck18
 from astropy.io import fits
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from tqdm import tqdm
 
 try:
@@ -398,19 +398,26 @@ def prepare_staged_data(
 
 
 class AIONHDF5Dataset(Dataset):
-    """PyTorch dataset over one staged split.
+    """PyTorch dataset over one staged split (optionally a row-subset view).
 
-    Each item is the 8-tuple ``(spectra, spectra_ivar, wavelength, redshift, wise,
-    image, target, targetid)`` consumed by the AION tokenizer and the training loop.
+    Each item is the 10-tuple ``(spectra, spectra_ivar, wavelength, redshift, wise,
+    image, target, targetid, sig_lo, sig_hi)`` consumed by the AION tokenizer and
+    the training loop. ``rows`` restricts the dataset to those row indices — used
+    by the clean-split runtime view so the cleaned configuration needs no second
+    staged copy of the data.
     """
 
-    def __init__(self, hdf5_path: Path, target_name: str) -> None:
+    def __init__(self, hdf5_path: Path, target_name: str, rows: np.ndarray | None = None) -> None:
         self.hdf5_path = Path(hdf5_path)
         self.target_name = target_name
         self._handle: h5py.File | None = None
         self.err_cols = TARGET_ERROR_COLS.get(target_name)
+        self.rows = None if rows is None else np.asarray(rows, dtype=np.int64)
         with h5py.File(self.hdf5_path, "r") as handle:
-            self.length = int(handle["desi_targetid"].shape[0])
+            n = int(handle["desi_targetid"].shape[0])
+            if self.rows is not None and len(self.rows) and (self.rows.min() < 0 or self.rows.max() >= n):
+                raise IndexError(f"rows out of range for {self.hdf5_path} (n={n}).")
+            self.length = n if self.rows is None else int(len(self.rows))
             self._wavelength = torch.from_numpy(read_dataset(handle, "spectra_lambda").astype(np.float32))
             self.has_err = bool(self.err_cols) and all(name in handle for name in self.err_cols)
 
@@ -424,6 +431,8 @@ class AIONHDF5Dataset(Dataset):
 
     def __getitem__(self, index: int):
         handle = self._ensure_open()
+        if self.rows is not None:
+            index = int(self.rows[index])
         wise = np.asarray(
             [handle[name][index] for name in ("flux_w1", "flux_w2", "flux_w3")], dtype=np.float32
         )
@@ -456,6 +465,39 @@ class AIONHDF5Dataset(Dataset):
         )
 
 
+def clean_view_row_maps(
+    staged_dir: Path, clean_split_csv: Path
+) -> dict[str, list[tuple[Path, np.ndarray]]]:
+    """Map the clean-split sidecar onto the staged superset files.
+
+    Returns, per view split, the ``(staged_file, row_indices)`` pairs selecting
+    exactly the cleaned sample: targetids absent from the CSV are excluded (NWAY
+    reject) and only the first occurrence of a duplicated targetid is used
+    (dedup), scanning train/val/test in order — mirroring ``build_clean_manifest``.
+    """
+    assign = pd.read_csv(clean_split_csv)
+    split_of = dict(
+        zip(assign["targetid"].astype(np.int64).tolist(), assign["split"].astype(str).tolist())
+    )
+    maps: dict[str, list[tuple[Path, np.ndarray]]] = {"train": [], "val": [], "test": []}
+    seen: set[int] = set()
+    for split_file in ("train", "val", "test"):
+        path = Path(staged_dir) / f"desi_{split_file}.hdf5"
+        with h5py.File(path, "r") as handle:
+            targetids = handle["desi_targetid"][:].astype(np.int64)
+        rows_by_view: dict[str, list[int]] = {"train": [], "val": [], "test": []}
+        for row, targetid in enumerate(targetids.tolist()):
+            view = split_of.get(targetid)
+            if view is None or targetid in seen:
+                continue
+            seen.add(targetid)
+            rows_by_view[view].append(row)
+        for view, rows in rows_by_view.items():
+            if rows:
+                maps[view].append((path, np.asarray(rows, dtype=np.int64)))
+    return maps
+
+
 def build_dataloaders(
     *,
     staged_dir: Path = STAGED_DIR,
@@ -464,16 +506,29 @@ def build_dataloaders(
     eval_batch_size: int | None = None,
     num_workers: int = 0,
     seed: int | None = None,
+    clean_split_csv: Path | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Build train/val/test dataloaders over the staged HDF5 splits."""
+    """Build train/val/test dataloaders over the staged HDF5 splits.
+
+    With ``clean_split_csv``, the loaders serve the cleaned+re-split VIEW of the
+    staged superset (row selection at load time) instead of the files' native
+    splits — one staged copy serves both the paper and cleaned configurations.
+    """
     eval_batch_size = eval_batch_size or batch_size
+    view_maps = clean_view_row_maps(Path(staged_dir), clean_split_csv) if clean_split_csv else None
     loaders: list[DataLoader] = []
     train_generator = None
     if seed is not None:
         train_generator = torch.Generator()
         train_generator.manual_seed(int(seed))
     for split in ("train", "val", "test"):
-        dataset = AIONHDF5Dataset(Path(staged_dir) / f"desi_{split}.hdf5", target_name)
+        if view_maps is None:
+            dataset: Dataset = AIONHDF5Dataset(Path(staged_dir) / f"desi_{split}.hdf5", target_name)
+        else:
+            parts = [AIONHDF5Dataset(path, target_name, rows=rows) for path, rows in view_maps[split]]
+            if not parts:
+                raise ValueError(f"Clean-split view has no rows for split {split!r}.")
+            dataset = ConcatDataset(parts)
         loaders.append(
             DataLoader(
                 dataset,
@@ -491,6 +546,20 @@ def read_target_values(hdf5_path: Path, target_name: str) -> np.ndarray:
     """Read the one-dimensional target column from a staged split."""
     with h5py.File(hdf5_path, "r") as handle:
         return read_dataset(handle, target_name).astype(np.float32)
+
+
+def read_view_target_values(
+    staged_dir: Path, target_name: str, clean_split_csv: Path, split: str = "train"
+) -> np.ndarray:
+    """Target values for one split of the clean view (standardizer/prior fitting)."""
+    maps = clean_view_row_maps(Path(staged_dir), clean_split_csv)
+    parts: list[np.ndarray] = []
+    for path, rows in maps[split]:
+        with h5py.File(path, "r") as handle:
+            parts.append(read_dataset(handle, target_name)[rows].astype(np.float32))
+    if not parts:
+        raise ValueError(f"Clean-split view has no rows for split {split!r}.")
+    return np.concatenate(parts)
 
 
 def move_batch_to_device(batch: tuple[torch.Tensor, ...], device: torch.device) -> tuple[torch.Tensor, ...]:

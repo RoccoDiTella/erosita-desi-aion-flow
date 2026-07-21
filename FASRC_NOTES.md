@@ -20,6 +20,18 @@ Working notes for running this repo on the Harvard FASRC cluster (SLURM).
 8. **Keep the socket dumb**: submit/squeue/tail/rsync only, with `ServerAliveInterval=60`. A dropped socket then costs nothing.
 9. **Train/eval likelihoods are one contract**: convolve-trained flows must be eval'd through the same measurement kernel or IG is understated (fixed in `evals.py`; `error_mode` read from the checkpoint config).
 10. **`gpu_test` QOS: max 2 submitted jobs per user** (`QOSMaxSubmitJobPerUserLimit`, 2 running, ≤8 GPUs/512G aggregate). Plan gpu_test work in pairs; a third submit is rejected outright, so don't build dependency chains assuming more slots.
+11. **Check measured timings before launching/right-sizing jobs** (sacct Elapsed):
+
+| Step | Measured | Notes |
+|---|---|---|
+| env build (idempotent re-run) | 2:15 | pip already cached |
+| fits_pool unzip (27,373 files) | ~22 min | netscratch small-file I/O bound |
+| staging, 2k rows | 1:16 | smoke subsets |
+| staging, 9.6k rows | 3:36 | ~2,700 rows/min |
+| staging, 25.2k rows (cleaned) | ~10 min | |
+| validator w/ model forward (gpu_test) | ~5 min | |
+| V1 smoke, 667 rows × 2 epochs (MIG, bs 32) | 6:16 | incl. 15-combo eval |
+| full 50-epoch train | **extrapolate from repro smoke first** | never submit blind |
 
 ## Workflow (adopted): develop locally, git for code, FASRC only for jobs + data
 - **Local (pop-os):** edit + run tests in `stanford_deadline/.venv`; commit to a branch; `git push`. Source of truth. Working branch: `multitarget-clean-errors`.
