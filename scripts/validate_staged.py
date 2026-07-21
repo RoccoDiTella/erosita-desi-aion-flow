@@ -306,6 +306,12 @@ def main() -> int:
     parser.add_argument("--expect-clean", action="store_true", help="Fail if NWAY-rejected matches are present.")
     parser.add_argument("--expect-rows", type=int, default=None, help="Expected total rows across splits (1%% tol).")
     parser.add_argument("--target", default="log_ml_flux_1", help="Target used for the dataloader contract check.")
+    parser.add_argument(
+        "--max-missing-fits",
+        type=float,
+        default=0.20,
+        help="Fail if more than this fraction of manifest rows lacked a Legacy Survey cutout.",
+    )
     parser.add_argument("--check-model", action="store_true", help="Also run AION + head forward on one batch.")
     parser.add_argument("--skip-dataloader", action="store_true")
     args = parser.parse_args()
@@ -328,6 +334,20 @@ def main() -> int:
         dropped = summary.get("dropped_nonfinite_targets")
         if dropped:
             rep.warn("dropped rows", f"{dropped} rows had non-finite targets at staging")
+
+        # Staging silently drops any object without a Legacy Survey cutout. An
+        # interrupted unzip therefore shrinks the sample with no other symptom,
+        # so make that loss loud rather than something you notice in a row count.
+        missing = summary.get("missing_fits_count")
+        original = summary.get("original_manifest_rows")
+        if missing is not None and original:
+            lost = missing / original
+            rep.check(
+                lost <= args.max_missing_fits,
+                "fits coverage",
+                f"{missing}/{original} manifest rows had no cutout ({lost:.1%} lost; "
+                f"max {args.max_missing_fits:.0%}) — check the fits_pool unzip is complete",
+            )
     else:
         rep.warn("summary.json", "absent")
 

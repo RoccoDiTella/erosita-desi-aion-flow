@@ -16,9 +16,20 @@ source .fasrc.env
 echo "[1/2] build conda env (idempotent)"
 bash scripts/fasrc_build_env.sh
 
-echo "[2/2] unzip fits_pool if needed"
-if [ ! -d "$AIONFLOW_DATA/raw/legacysurvey/fits_pool" ]; then
-  ( cd "$AIONFLOW_DATA/raw/legacysurvey" && unzip -q -o fits_pool.zip )
+echo "[2/2] unzip fits_pool if incomplete"
+# Idempotency must be COUNT-based, not directory-existence based: an interrupted
+# unzip leaves a populated-but-partial directory, and an existence check then
+# skips the repair forever. (This bit us once: 10,355 of 27,373 cutouts on disk,
+# which silently cut the staged sample from ~22k rows to 9,592.)
+LS_DIR="$AIONFLOW_DATA/raw/legacysurvey"
+want=$(unzip -l "$LS_DIR/fits_pool.zip" | tail -1 | awk '{print $2}')
+have=$(ls "$LS_DIR/fits_pool" 2>/dev/null | wc -l)
+echo "fits_pool: have=$have want=$want"
+if [ "$have" -lt "$want" ]; then
+  echo "incomplete -> unzipping (this can take a while)"
+  ( cd "$LS_DIR" && unzip -q -o fits_pool.zip )
+  have=$(ls "$LS_DIR/fits_pool" | wc -l)
 fi
-echo "fits count: $(ls "$AIONFLOW_DATA/raw/legacysurvey/fits_pool" 2>/dev/null | wc -l)"
+echo "fits count: $have / $want"
+[ "$have" -ge "$want" ] || { echo "ERROR: fits_pool still incomplete"; exit 1; }
 echo "SETUP DONE"
