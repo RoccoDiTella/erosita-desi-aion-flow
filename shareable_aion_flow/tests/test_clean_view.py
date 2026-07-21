@@ -125,3 +125,29 @@ def test_rows_subset_dataset_bounds_check(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("out-of-range rows must raise")
+
+
+def test_nonfinite_targets_excluded_native(tmp_path: Path) -> None:
+    """Rows with unmeasured (NaN) targets never reach the loaders — batch_nll
+    refuses them, so a secondary-target run would otherwise crash mid-epoch."""
+    staged = build_superset(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        handle["log_ml_flux_1"][1] = np.nan  # targetid 2 unmeasured
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0
+    )
+    ids = collect_targetids(train_loader)
+    assert 2 not in ids and ids == {1, 3, 4}
+    for batch in train_loader:
+        assert bool(np.isfinite(batch[6].numpy()).all())
+
+
+def test_nonfinite_targets_excluded_in_view(tmp_path: Path) -> None:
+    staged = build_superset(tmp_path)
+    csv_path = write_view_csv(tmp_path)
+    with h5py.File(staged / "desi_val.hdf5", "a") as handle:
+        handle["log_ml_flux_1"][0] = np.nan  # targetid 5: view-train, unmeasured
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0, clean_split_csv=csv_path
+    )
+    assert collect_targetids(train_loader) == {1, 6}

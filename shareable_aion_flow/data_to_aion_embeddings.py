@@ -498,6 +498,28 @@ def clean_view_row_maps(
     return maps
 
 
+def _finite_target_rows(path: Path, target_name: str, rows: np.ndarray | None) -> np.ndarray | None:
+    """Restrict ``rows`` (or the whole file) to rows whose target is finite.
+
+    Secondary targets (logmstar, hr32_u) are not measured for every object and
+    ``batch_nll`` intentionally refuses non-finite targets, so the loaders must
+    serve only measured rows. Returns ``None`` when the whole file qualifies.
+    """
+    with h5py.File(path, "r") as handle:
+        values = read_dataset(handle, target_name)
+    finite = np.isfinite(values)
+    if rows is None:
+        if bool(finite.all()):
+            return None
+        kept = np.flatnonzero(finite).astype(np.int64)
+    else:
+        kept = rows[finite[rows]]
+    dropped = (len(values) if rows is None else len(rows)) - len(kept)
+    if dropped:
+        print(f"[loader] {path.name}: dropped {dropped} rows with non-finite {target_name}", flush=True)
+    return kept
+
+
 def build_dataloaders(
     *,
     staged_dir: Path = STAGED_DIR,
@@ -513,6 +535,7 @@ def build_dataloaders(
     With ``clean_split_csv``, the loaders serve the cleaned+re-split VIEW of the
     staged superset (row selection at load time) instead of the files' native
     splits — one staged copy serves both the paper and cleaned configurations.
+    Rows whose target is non-finite are always excluded (see _finite_target_rows).
     """
     eval_batch_size = eval_batch_size or batch_size
     view_maps = clean_view_row_maps(Path(staged_dir), clean_split_csv) if clean_split_csv else None
@@ -523,9 +546,15 @@ def build_dataloaders(
         train_generator.manual_seed(int(seed))
     for split in ("train", "val", "test"):
         if view_maps is None:
-            dataset: Dataset = AIONHDF5Dataset(Path(staged_dir) / f"desi_{split}.hdf5", target_name)
+            path = Path(staged_dir) / f"desi_{split}.hdf5"
+            rows = _finite_target_rows(path, target_name, None)
+            dataset: Dataset = AIONHDF5Dataset(path, target_name, rows=rows)
         else:
-            parts = [AIONHDF5Dataset(path, target_name, rows=rows) for path, rows in view_maps[split]]
+            parts = []
+            for path, rows in view_maps[split]:
+                kept = _finite_target_rows(path, target_name, rows)
+                if kept is None or len(kept):
+                    parts.append(AIONHDF5Dataset(path, target_name, rows=kept if kept is not None else rows))
             if not parts:
                 raise ValueError(f"Clean-split view has no rows for split {split!r}.")
             dataset = ConcatDataset(parts)
