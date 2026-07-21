@@ -1,0 +1,200 @@
+"""Tests for scripts/validate_staged.py.
+
+Each test builds a small synthetic staged directory, breaks exactly one thing,
+and asserts the corresponding check turns red. A validator whose checks never
+fire is worse than no validator, so the negative cases are the point.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pandas as pd
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_spec = importlib.util.spec_from_file_location("validate_staged", REPO_ROOT / "scripts" / "validate_staged.py")
+assert _spec is not None and _spec.loader is not None
+vs = importlib.util.module_from_spec(_spec)
+sys.modules["validate_staged"] = vs
+_spec.loader.exec_module(vs)
+
+
+N_PIX = 32
+SPLIT_SIZES = {"train": 16, "val": 2, "test": 2}
+
+
+def write_split(path: Path, targetids: np.ndarray, *, sig_lo: float = 0.1, extras: bool = True) -> None:
+    n = len(targetids)
+    rng = np.random.default_rng(len(targetids))
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("source_row", data=np.arange(n, dtype=np.int64))
+        handle.create_dataset("desi_targetid", data=targetids.astype(np.int64))
+        handle.create_dataset("spectra", data=rng.normal(size=(n, N_PIX)).astype(np.float32))
+        handle.create_dataset("spectra_ivar", data=np.ones((n, N_PIX), dtype=np.float32))
+        handle.create_dataset("spectra_lambda", data=np.linspace(3600, 9800, N_PIX).astype(np.float32))
+        handle.create_dataset("redshift", data=np.full(n, 0.5, dtype=np.float32))
+        for band in ("flux_w1", "flux_w2", "flux_w3"):
+            handle.create_dataset(band, data=rng.normal(size=n).astype(np.float32))
+        handle.create_dataset("ml_flux_1", data=np.full(n, 1e-13, dtype=np.float32))
+        handle.create_dataset("log_ml_flux_1", data=np.full(n, -13.0, dtype=np.float32))
+        handle.create_dataset("log_lx", data=np.full(n, 43.0, dtype=np.float32))
+        handle.create_dataset(
+            "image_flux",
+            data=rng.normal(size=(n, vs.IMAGE_BANDS, vs.IMAGE_SIZE, vs.IMAGE_SIZE)).astype(np.float32),
+        )
+        if extras:
+            handle.create_dataset("flux_sig_lo", data=np.full(n, sig_lo, dtype=np.float32))
+            handle.create_dataset("flux_sig_hi", data=np.full(n, 0.15, dtype=np.float32))
+            handle.create_dataset("logmstar", data=np.full(n, 10.5, dtype=np.float32))
+            handle.create_dataset("logmstar_sig", data=np.full(n, 0.2, dtype=np.float32))
+            handle.create_dataset("hr32_u", data=np.full(n, 0.1, dtype=np.float32))
+            handle.create_dataset("hr32_u_sig", data=np.full(n, 0.3, dtype=np.float32))
+
+
+def build_staged(tmp_path: Path, *, ids: dict[str, np.ndarray] | None = None, **kwargs) -> Path:
+    staged = tmp_path / "staged"
+    staged.mkdir(exist_ok=True)
+    if ids is None:
+        cursor = 0
+        ids = {}
+        for split, size in SPLIT_SIZES.items():
+            ids[split] = np.arange(cursor, cursor + size, dtype=np.int64)
+            cursor += size
+    for split, targetids in ids.items():
+        write_split(staged / f"desi_{split}.hdf5", targetids, **kwargs)
+    return staged
+
+
+def run_checks(staged: Path, *, match_quality_csv: Path | None = None, expect_clean: bool = False) -> vs.Report:
+    rep = vs.Report()
+    handles = {split: h5py.File(staged / f"desi_{split}.hdf5", "r") for split in vs.SPLITS}
+    try:
+        vs.check_schema(rep, handles)
+        vs.check_splits(rep, handles, expect_rows=None, limited=False)
+        vs.check_clean(rep, handles, match_quality_csv, expect_clean)
+        vs.check_values(rep, handles)
+    finally:
+        for handle in handles.values():
+            handle.close()
+    return rep
+
+
+def failed_names(rep: vs.Report) -> list[str]:
+    return [name for status, name, _ in rep.rows if status == "FAIL"]
+
+
+def test_wellformed_staged_dir_passes(tmp_path: Path) -> None:
+    rep = run_checks(build_staged(tmp_path))
+    assert rep.failed == 0, f"unexpected failures: {failed_names(rep)}"
+
+
+def test_split_fraction_check_fires(tmp_path: Path) -> None:
+    """The default 16/2/2 is exactly 80/10/10; a lopsided split must be caught."""
+    ids = {
+        "train": np.arange(0, 5, dtype=np.int64),
+        "val": np.arange(5, 12, dtype=np.int64),
+        "test": np.arange(12, 20, dtype=np.int64),
+    }
+    rep = run_checks(build_staged(tmp_path, ids=ids))
+    assert "split fractions 80/10/10" in failed_names(rep)
+
+
+def test_leakage_between_splits_is_caught(tmp_path: Path) -> None:
+    ids = {
+        "train": np.arange(0, 16, dtype=np.int64),
+        "val": np.array([3, 100], dtype=np.int64),  # 3 also lives in train
+        "test": np.array([101, 102], dtype=np.int64),
+    }
+    rep = run_checks(build_staged(tmp_path, ids=ids))
+    assert "leakage train/val" in failed_names(rep)
+
+
+def test_duplicate_targetids_within_split_are_caught(tmp_path: Path) -> None:
+    ids = {
+        "train": np.array([1, 1] + list(range(2, 16)), dtype=np.int64),
+        "val": np.array([100, 101], dtype=np.int64),
+        "test": np.array([102, 103], dtype=np.int64),
+    }
+    rep = run_checks(build_staged(tmp_path, ids=ids))
+    assert "[train] targetids unique" in failed_names(rep)
+
+
+def test_nonpositive_sigma_is_caught(tmp_path: Path) -> None:
+    """A zero-width kernel breaks the convolution likelihood, so it must fail."""
+    rep = run_checks(build_staged(tmp_path, sig_lo=0.0))
+    assert any("sigma > 0" in name for name in failed_names(rep))
+
+
+def test_missing_required_dataset_is_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        del handle["log_lx"]
+    rep = run_checks(staged)
+    assert "[train] required datasets" in failed_names(rep)
+
+
+def test_misaligned_row_counts_are_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        del handle["flux_w1"]
+        handle.create_dataset("flux_w1", data=np.zeros(3, dtype=np.float32))
+    rep = run_checks(staged)
+    assert "[train] row counts aligned" in failed_names(rep)
+
+
+def test_clean_filter_catches_surviving_bad_match(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    all_ids = np.arange(0, 20, dtype=np.int64)
+    keep = np.ones(len(all_ids), dtype=bool)
+    keep[3] = False  # targetid 3 is an NWAY-rejected match but sits in train
+    csv_path = tmp_path / "match_quality.csv"
+    pd.DataFrame({"targetid": all_ids, "keep": keep}).to_csv(csv_path, index=False)
+
+    rep = run_checks(staged, match_quality_csv=csv_path, expect_clean=True)
+    assert "clean filter applied" in failed_names(rep)
+
+    # Same data, filter not asserted -> a warning, not a failure.
+    rep_lenient = run_checks(staged, match_quality_csv=csv_path, expect_clean=False)
+    assert "clean filter applied" not in failed_names(rep_lenient)
+
+
+def test_clean_filter_passes_when_all_matches_are_kept(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    all_ids = np.arange(0, 20, dtype=np.int64)
+    csv_path = tmp_path / "match_quality.csv"
+    pd.DataFrame({"targetid": all_ids, "keep": np.ones(len(all_ids), dtype=bool)}).to_csv(csv_path, index=False)
+    rep = run_checks(staged, match_quality_csv=csv_path, expect_clean=True)
+    assert rep.failed == 0, f"unexpected failures: {failed_names(rep)}"
+
+
+def test_bad_image_shape_is_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_val.hdf5", "a") as handle:
+        n = handle["desi_targetid"].shape[0]
+        del handle["image_flux"]
+        handle.create_dataset("image_flux", data=np.zeros((n, 3, 64, 64), dtype=np.float32))
+    rep = run_checks(staged)
+    assert "[val] image shape" in failed_names(rep)
+
+
+def test_nonfinite_redshift_is_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_test.hdf5", "a") as handle:
+        handle["redshift"][0] = np.nan
+    rep = run_checks(staged)
+    assert "[test] redshift valid" in failed_names(rep)
+
+
+@pytest.mark.parametrize("target", ["log_ml_flux_1", "log_lx"])
+def test_nonfinite_target_is_caught(tmp_path: Path, target: str) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        handle[target][0] = np.nan
+    rep = run_checks(staged)
+    assert f"[train] {target} all finite" in failed_names(rep)

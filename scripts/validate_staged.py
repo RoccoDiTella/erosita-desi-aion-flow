@@ -97,6 +97,10 @@ def check_schema(rep: Report, handles: dict[str, h5py.File]) -> None:
         missing = [name for name in REQUIRED if name not in handle]
         rep.check(not missing, f"[{split}] required datasets", f"missing: {missing}" if missing else "all present")
 
+        if "desi_targetid" not in handle:
+            rep.fail(f"[{split}] row counts aligned", "no desi_targetid to align against")
+            continue
+
         # Every per-source dataset must agree on N. spectra_lambda is the shared
         # wavelength grid and attrs are not datasets, so both are excluded.
         n = handle["desi_targetid"].shape[0]
@@ -183,14 +187,19 @@ def check_clean(rep: Report, handles: dict[str, h5py.File], match_quality_csv: P
 
 def check_values(rep: Report, handles: dict[str, h5py.File]) -> None:
     for split, handle in handles.items():
-        z = handle["redshift"][:]
-        rep.check(
-            bool(np.all(np.isfinite(z))) and float(z.min()) > 0,
-            f"[{split}] redshift valid",
-            f"min={z.min():.4f} max={z.max():.4f}",
-        )
+        # Absent datasets are already reported by check_schema; skip them here so
+        # one missing column cannot abort the remaining value checks.
+        if "redshift" in handle:
+            z = handle["redshift"][:]
+            rep.check(
+                bool(np.all(np.isfinite(z))) and float(z.min()) > 0,
+                f"[{split}] redshift valid",
+                f"min={z.min():.4f} max={z.max():.4f}",
+            )
 
         for target in ("log_ml_flux_1", "log_lx"):
+            if target not in handle:
+                continue
             frac = finite_frac(handle[target][:])
             rep.check(frac == 1.0, f"[{split}] {target} all finite", f"finite={frac:.4%}")
 
@@ -223,15 +232,19 @@ def check_values(rep: Report, handles: dict[str, h5py.File]) -> None:
                 f"[{split}] {target} sigma coverage", f"{cov:.2%} of finite targets have sigma"
             )
 
-        images = handle["image_flux"]
-        sample = images[: min(64, images.shape[0])]
-        frac = finite_frac(sample)
-        rep.check(frac > 0.99, f"[{split}] images finite", f"finite={frac:.4%} (first {len(sample)})")
-        allzero = int((np.abs(sample).sum(axis=(1, 2, 3)) == 0).sum())
-        (rep.ok if allzero == 0 else rep.warn)(f"[{split}] images non-empty", f"{allzero} all-zero cutouts in sample")
+        if "image_flux" in handle:
+            images = handle["image_flux"]
+            sample = images[: min(64, images.shape[0])]
+            frac = finite_frac(sample)
+            rep.check(frac > 0.99, f"[{split}] images finite", f"finite={frac:.4%} (first {len(sample)})")
+            allzero = int((np.abs(sample).sum(axis=tuple(range(1, sample.ndim))) == 0).sum())
+            (rep.ok if allzero == 0 else rep.warn)(
+                f"[{split}] images non-empty", f"{allzero} all-zero cutouts in sample"
+            )
 
-        spec = handle["spectra"][: min(64, handle["spectra"].shape[0])]
-        rep.check(finite_frac(spec) > 0.99, f"[{split}] spectra finite", f"finite={finite_frac(spec):.4%}")
+        if "spectra" in handle:
+            spec = handle["spectra"][: min(64, handle["spectra"].shape[0])]
+            rep.check(finite_frac(spec) > 0.99, f"[{split}] spectra finite", f"finite={finite_frac(spec):.4%}")
 
 
 def check_model_contract(rep: Report, staged_dir: Path, target: str, run_forward: bool) -> None:
