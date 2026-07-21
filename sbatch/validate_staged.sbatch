@@ -22,7 +22,8 @@ EXPECT_ROWS="${AIONFLOW_EXPECT_ROWS:-25200}"
 # Set AIONFLOW_VALIDATE_CLEAN=0 for paper-repro dirs: they intentionally keep
 # the NWAY-rejected matches, so asserting the clean filter would always fail.
 CLEAN_FLAG="--expect-clean"
-[ "${AIONFLOW_VALIDATE_CLEAN:-1}" = "0" ] && CLEAN_FLAG=""
+DUP_FLAG=""
+[ "${AIONFLOW_VALIDATE_CLEAN:-1}" = "0" ] && { CLEAN_FLAG=""; DUP_FLAG="--allow-duplicates"; }
 status=0
 
 validate() {
@@ -36,7 +37,7 @@ validate() {
     --staged-dir "$dir" \
     --match-quality-csv "$AIONFLOW_DATA/match_quality.csv" \
     --paper-manifest-csv "$AIONFLOW_DATA/manifests/aion_tvsplit_manifest.csv" \
-    $CLEAN_FLAG \
+    $CLEAN_FLAG $DUP_FLAG \
     --check-model \
     "$@" || status=1
   echo

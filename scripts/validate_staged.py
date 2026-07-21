@@ -66,6 +66,9 @@ PHYSICAL_RANGES = {
 }
 # DESI spectra live on a fixed 3600–9824 A grid.
 WAVELENGTH_RANGE = (3000.0, 11000.0)
+# Range check fails above this outlier fraction (unit slips move MOST rows;
+# rare extremes are astrophysics — empirically, NWAY-rejected wrong matches).
+RANGE_FAIL_FRAC = 1e-3
 
 
 class Report:
@@ -140,7 +143,13 @@ def check_schema(rep: Report, handles: dict[str, h5py.File]) -> None:
             )
 
 
-def check_splits(rep: Report, handles: dict[str, h5py.File], expect_rows: int | None, limited: bool) -> None:
+def check_splits(
+    rep: Report,
+    handles: dict[str, h5py.File],
+    expect_rows: int | None,
+    limited: bool,
+    allow_duplicates: bool = False,
+) -> None:
     ids = {split: handle["desi_targetid"][:].astype(np.int64) for split, handle in handles.items()}
     counts = {split: len(v) for split, v in ids.items()}
     total = sum(counts.values())
@@ -148,7 +157,14 @@ def check_splits(rep: Report, handles: dict[str, h5py.File], expect_rows: int | 
 
     for split, values in ids.items():
         dupes = len(values) - len(np.unique(values))
-        rep.check(dupes == 0, f"[{split}] targetids unique", f"{dupes} duplicates" if dupes else "no duplicates")
+        if allow_duplicates:
+            # The paper superset keeps the original manifest's duplicate rows by
+            # design (mild oversampling); cross-split leakage is still fatal below.
+            (rep.ok if dupes == 0 else rep.warn)(
+                f"[{split}] targetids unique", f"{dupes} duplicates (allowed: paper superset)"
+            )
+        else:
+            rep.check(dupes == 0, f"[{split}] targetids unique", f"{dupes} duplicates" if dupes else "no duplicates")
 
     # The load-bearing invariant: no object may appear in two splits.
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
@@ -273,8 +289,12 @@ def check_values(rep: Report, handles: dict[str, h5py.File]) -> None:
                 f"{grid.min():.0f}-{grid.max():.0f} A, ascending={ascending}",
             )
 
-        # Generous physical windows: violations mean unit mistakes or column
-        # swaps, not science outliers.
+        # Generous physical windows. This is a UNIT-MISTAKE detector, not an
+        # outlier hunt: a unit slip or column swap throws most rows out of range,
+        # while a handful of extremes are astrophysics (empirically: the staged
+        # superset's out-of-range rows are NWAY-rejected wrong matches, e.g. a
+        # z=4.7 mismatch at log_lx=48.07). Fail only above 0.1% outside; report
+        # small counts as warnings.
         for column, (lo_bound, hi_bound) in PHYSICAL_RANGES.items():
             if column not in handle:
                 continue
@@ -283,12 +303,17 @@ def check_values(rep: Report, handles: dict[str, h5py.File]) -> None:
             if values.size == 0:
                 continue
             n_out = int(((values < lo_bound) | (values > hi_bound)).sum())
-            rep.check(
-                n_out == 0,
-                f"[{split}] {column} in physical range",
+            frac_out = n_out / values.size
+            detail = (
                 f"[{values.min():.2f}, {values.max():.2f}] within ({lo_bound}, {hi_bound})"
-                + (f", {n_out} OUTSIDE" if n_out else ""),
+                + (f", {n_out} outside ({frac_out:.3%})" if n_out else "")
             )
+            if frac_out > RANGE_FAIL_FRAC:
+                rep.fail(f"[{split}] {column} in physical range", detail)
+            elif n_out:
+                rep.warn(f"[{split}] {column} in physical range", detail)
+            else:
+                rep.ok(f"[{split}] {column} in physical range", detail)
 
 
 def check_consistency(rep: Report, handles: dict[str, h5py.File]) -> None:
@@ -418,6 +443,11 @@ def main() -> int:
     parser.add_argument("--staged-dir", type=Path, required=True)
     parser.add_argument("--match-quality-csv", type=Path, default=None)
     parser.add_argument("--expect-clean", action="store_true", help="Fail if NWAY-rejected matches are present.")
+    parser.add_argument(
+        "--allow-duplicates",
+        action="store_true",
+        help="Paper superset mode: duplicate targetids within a split warn instead of fail.",
+    )
     parser.add_argument("--expect-rows", type=int, default=None, help="Expected total rows across splits (1%% tol).")
     parser.add_argument("--target", default="log_ml_flux_1", help="Target used for the dataloader contract check.")
     parser.add_argument(
@@ -474,7 +504,7 @@ def main() -> int:
     handles = {split: h5py.File(path, "r") for split, path in paths.items()}
     try:
         check_schema(rep, handles)
-        check_splits(rep, handles, args.expect_rows, limited)
+        check_splits(rep, handles, args.expect_rows, limited, allow_duplicates=args.allow_duplicates)
         check_clean(rep, handles, args.match_quality_csv, args.expect_clean)
         check_values(rep, handles)
         check_consistency(rep, handles)

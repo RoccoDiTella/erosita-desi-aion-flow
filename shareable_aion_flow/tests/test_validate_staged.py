@@ -251,3 +251,37 @@ def test_descending_wavelength_grid_is_caught(tmp_path: Path) -> None:
         handle.create_dataset("spectra_lambda", data=grid[::-1].copy())
     rep = run_checks(staged)
     assert "[train] wavelength grid" in failed_names(rep)
+
+
+def test_rare_outliers_warn_but_mass_violations_fail(tmp_path: Path, monkeypatch) -> None:
+    """The range check is a unit-slip detector: one extreme row warns (below the
+    fraction threshold), while most-rows-out still fails."""
+    monkeypatch.setattr(vs, "RANGE_FAIL_FRAC", 0.5)  # tiny test sets: 1/16 row ~ 6%
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        handle["log_lx"][0] = 48.5  # a single wrong-match-like extreme
+    rep = run_checks(staged)
+    assert "[train] log_lx in physical range" not in failed_names(rep)
+    warned = [name for status, name, _ in rep.rows if status == "WARN"]
+    assert "[train] log_lx in physical range" in warned
+
+
+def test_duplicates_allowed_in_superset_mode(tmp_path: Path) -> None:
+    ids = {
+        "train": np.array([1, 1] + list(range(2, 16)), dtype=np.int64),
+        "val": np.array([100, 101], dtype=np.int64),
+        "test": np.array([102, 103], dtype=np.int64),
+    }
+    staged = build_staged(tmp_path, ids=ids)
+    rep = vs.Report()
+    handles = {split: h5py.File(staged / f"desi_{split}.hdf5", "r") for split in vs.SPLITS}
+    try:
+        vs.check_splits(rep, handles, expect_rows=None, limited=False, allow_duplicates=True)
+    finally:
+        for handle in handles.values():
+            handle.close()
+    assert "[train] targetids unique" not in failed_names(rep)
+    warned = [name for status, name, _ in rep.rows if status == "WARN"]
+    assert "[train] targetids unique" in warned
+    # Leakage stays fatal even in superset mode.
+    assert not [n for n in failed_names(rep) if n.startswith("leakage")]
