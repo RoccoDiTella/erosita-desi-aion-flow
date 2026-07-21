@@ -2,6 +2,11 @@
 
 Working notes for running this repo on the Harvard FASRC cluster (SLURM).
 
+## GPU plan (authoritative, per Doug / FASRC)
+- **Destination: `siag_gpu`** — 32× A100-SXM4-**40GB** (4/node), dedicated to siag_lab. Requires **`siag_lab` group membership** (request at portal.rc.fas.harvard.edu; PI approves). Verified 2026-07-21: not yet granted — `-A siag_lab` has no association and `-A finkbeiner_lab` is not permitted on the partition.
+- **Until then**: smokes on `gpu_test`; real runs on **`gpu_h200`** (H200 141GB, eligibility verified via `--test-only`, much lighter queue than `gpu`: ~124 vs ~440 pending) or `gpu` (A100-80GB, busy).
+- When siag_lab lands: flip `.fasrc.env` `FASRC_PART=siag_gpu`, `FASRC_ACCOUNT=siag_lab`, and retune batch size for 40GB cards.
+
 ## Cluster etiquette (we are guests on finkbeiner_lab's allocation)
 - **No login-node compute, ever** — arbiter2 kills it, and half-finished work masquerades as done. Everything through `sbatch`.
 - **Validate before GPU**: `scripts/validate_staged.py` gates `train.sbatch`; smokes go to `gpu_test` (shared MIG slices, small batch), never to `gpu`.
