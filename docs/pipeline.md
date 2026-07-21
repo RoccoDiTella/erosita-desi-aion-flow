@@ -82,8 +82,10 @@ Frozen **AION-base** tokenizer + backbone → per-modality token sequences (`spe
 - ✅ **Clean → dedup → re-split** implemented + tested (`build_clean_manifest`; 25,200 clean rows, exact 80/10/10, leakage-safe, deterministic).
 - ✅ **Full wiring done + validated locally**: `prepare-data --clean` cleans/dedups/re-splits + writes extra target & error columns; `AIONHDF5Dataset` emits per-source σ (10-tuple); `main.py` `--target {…,logmstar,hr32_u} / --error-mode {none,inject,convolve} / --clean`; `batch_nll` uses `log_prob_convolved`. 14/14 tests; a real `prepare-data --clean --limit 12` produced correct columns.
 - ✅ **FASRC ready**: 17 GB data staged + `fits_pool` unzipped (10,355 cutouts); conda env built and verified (torch 2.6.0+cu124, aion, zuko all import); repo is a real git clone of `multitarget-clean-errors`; account `finkbeiner_lab` confirmed via `sbatch --test-only`.
-- ✅ **W&B tracking** wired into `train` (opt-in `--wandb`, offline-safe, no-op if absent).
-- ⏳ Next: `prepare-data --clean` (CPU job) → V1 `log_ml_flux_1` smoke (`--error-mode convolve`, `--wandb`) on `gpu_test`.
+- ✅ **W&B tracking** wired into `train` (opt-in `--wandb`, offline-safe, no-op if absent). First live run confirmed end-to-end on `gpu_test`.
+- ✅ **Staged-data validation** (`scripts/validate_staged.py` + 13 tests + `sbatch/validate_staged.sbatch`), wired as a hard gate in `train.sbatch`: schema, row-count alignment, dedup/leakage/split-fractions, NWAY clean filter, σ positivity & coverage, value ranges, fits coverage, and the dataloader 10-tuple contract.
+- ⚠️ **Caught by that validation:** the `fits_pool` unzip had been interrupted (10,355 of 27,373 cutouts on disk). Because staging drops any object lacking a cutout, the first full run staged **9,592 rows instead of ~22k** with no error. Fixed (count-based unzip idempotency + a coverage check that fails above 20% loss); re-staging.
+- ⏳ Next: complete unzip → re-run `prepare-data --clean` → validate → V1 `log_ml_flux_1` full run.
 - ⚠️ `siag_lab` membership pending (Coldfront) → `siag_gpu` invisible for now; using `gpu_test` (smokes) / `gpu` (real runs) under `finkbeiner_lab`.
 - Known refinement: `hr32_u` piles at the arctanh clip for low-S/N HR (huge σ) — fine for flux/lx/logmstar; the HR run wants an S/N gate/clip.
 
