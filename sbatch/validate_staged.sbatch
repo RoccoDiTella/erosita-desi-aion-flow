@@ -19,6 +19,10 @@ source scripts/fasrc_env.sh
 
 # The full cleaned sample is 25,200 rows (NWAY keep + one row per targetid).
 EXPECT_ROWS="${AIONFLOW_EXPECT_ROWS:-25200}"
+# Set AIONFLOW_VALIDATE_CLEAN=0 for paper-repro dirs: they intentionally keep
+# the NWAY-rejected matches, so asserting the clean filter would always fail.
+CLEAN_FLAG="--expect-clean"
+[ "${AIONFLOW_VALIDATE_CLEAN:-1}" = "0" ] && CLEAN_FLAG=""
 status=0
 
 validate() {
@@ -32,7 +36,7 @@ validate() {
     --staged-dir "$dir" \
     --match-quality-csv "$AIONFLOW_DATA/match_quality.csv" \
     --paper-manifest-csv "$AIONFLOW_DATA/manifests/aion_tvsplit_manifest.csv" \
-    --expect-clean \
+    $CLEAN_FLAG \
     --check-model \
     "$@" || status=1
   echo

@@ -85,7 +85,11 @@ Frozen **AION-base** tokenizer + backbone → per-modality token sequences (`spe
 - ✅ **W&B tracking** wired into `train` (opt-in `--wandb`, offline-safe, no-op if absent). First live run confirmed end-to-end on `gpu_test`.
 - ✅ **Staged-data validation** (`scripts/validate_staged.py` + 13 tests + `sbatch/validate_staged.sbatch`), wired as a hard gate in `train.sbatch`: schema, row-count alignment, dedup/leakage/split-fractions, NWAY clean filter, σ positivity & coverage, value ranges, fits coverage, and the dataloader 10-tuple contract.
 - ⚠️ **Caught by that validation:** the `fits_pool` unzip had been interrupted (10,355 of 27,373 cutouts on disk). Because staging drops any object lacking a cutout, the first full run staged **9,592 rows instead of ~22k** with no error. Fixed (count-based unzip idempotency + a coverage check that fails above 20% loss); re-staging.
-- ⏳ Next: complete unzip → re-run `prepare-data --clean` → validate → V1 `log_ml_flux_1` full run.
+- ⏳ Next (reproduction-first ladder — every change we made is flag-gated with paper defaults, so the baseline runs from this branch with no rollback):
+  1. finish re-staging (`staged/` cleaned+re-split, `staged_paper{,_smoke}/` = original manifest, no clean, no error columns) + validate both;
+  2. **repro smoke** on `gpu_test` (paper q4/l2 head, `--error-mode none`, `staged_paper_smoke`);
+  3. **paper-table reproduction** on `gpu` (50 epochs, batch 448, paper config exactly) → compare to the published table (all-inputs R² 0.549 expected; our re-staged sample may differ slightly from the paper's exact rows — the provenance report quantifies this);
+  4. then the new-science runs (cleaned + convolve, V1 head) — the clean-vs-paper delta is the first result.
 - ⚠️ `siag_lab` membership pending (Coldfront) → `siag_gpu` invisible for now; using `gpu_test` (smokes) / `gpu` (real runs) under `finkbeiner_lab`.
 - Known refinement: `hr32_u` piles at the arctanh clip for low-S/N HR (huge σ) — fine for flux/lx/logmstar; the HR run wants an S/N gate/clip.
 

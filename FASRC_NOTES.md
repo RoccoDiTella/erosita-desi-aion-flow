@@ -2,6 +2,24 @@
 
 Working notes for running this repo on the Harvard FASRC cluster (SLURM).
 
+## Cluster etiquette (we are guests on finkbeiner_lab's allocation)
+- **No login-node compute, ever** — arbiter2 kills it, and half-finished work masquerades as done. Everything through `sbatch`.
+- **Validate before GPU**: `scripts/validate_staged.py` gates `train.sbatch`; smokes go to `gpu_test` (shared MIG slices, small batch), never to `gpu`.
+- **One full GPU run at a time** until we're on our own `siag_gpu` allocation; inspect smoke output before queueing a long run — don't chain a 12 h job blind.
+- **Right-size requests** (time/mem/CPUs) so the scheduler can backfill around us; chain stages with `--dependency=afterok` instead of holding resources idle.
+- Copy keeper checkpoints/results off **netscratch** (purged!) to holylabs/home after each real run.
+
+## Lessons learned (each cost us real time — don't relearn them)
+1. **Idempotency by count, not existence.** An arbiter2-killed unzip left `fits_pool` at 10,355/27,373 files; a `[ -d dir ]` check skipped the repair forever, and staging silently dropped every imageless object → 9,592 rows staged instead of ~22k. Compare on-disk counts to the archive manifest.
+2. **Silent row loss is the default failure mode.** Every filtering step must account loudly for what it dropped (`missing_fits_count` was sitting in summary.json all along; the validator now fails on >20% loss).
+3. **Trust probes, not bookkeeping.** `sacctmgr show assoc` said we had no account; `sbatch --test-only` proved `finkbeiner_lab` works.
+4. **RHEL unzip's zip-bomb heuristic false-positives** on big self-built zip64 archives ("overlapped components"). Verify integrity independently (byte-compare + local `unzip -t`), then `UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE` for that one extraction.
+5. **`gpu_test` slices are shared** — a neighbor held 15 GB of "our" A100 and batch 256 OOM'd. Smoke batch sizes say nothing about `gpu` runs.
+6. **Compute nodes have outbound internet** (pip, wandb online both work from jobs).
+7. **netscratch small-file I/O is slow** — stage into HDF5, never loose-file datasets.
+8. **Keep the socket dumb**: submit/squeue/tail/rsync only, with `ServerAliveInterval=60`. A dropped socket then costs nothing.
+9. **Train/eval likelihoods are one contract**: convolve-trained flows must be eval'd through the same measurement kernel or IG is understated (fixed in `evals.py`; `error_mode` read from the checkpoint config).
+
 ## Workflow (adopted): develop locally, git for code, FASRC only for jobs + data
 - **Local (pop-os):** edit + run tests in `stanford_deadline/.venv`; commit to a branch; `git push`. Source of truth. Working branch: `multitarget-clean-errors`.
 - **Code → FASRC via git** (repo is PUBLIC → HTTPS clone/pull needs no auth on the cluster):
