@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J aionflow-v1
+#SBATCH -J aionflow-train
 #SBATCH -p gpu
 #SBATCH --gpus 1
 #SBATCH -c 16
@@ -8,45 +8,51 @@
 #SBATCH -o logs/train_%j.out
 #SBATCH -e logs/train_%j.err
 #SBATCH --open-mode=append
-# Full V1 training. Runs on `gpu` (full A100s) under finkbeiner_lab; switch to
-# `-p siag_gpu` once siag_lab membership lands. Head flags default to the V1
-# minimal head; override via env (HEAD_ARGS) for other variants.
-#   scripts/submit.sh sbatch/train.sbatch
-#   TARGET=log_lx scripts/submit.sh sbatch/train.sbatch
-#   scripts/submit.sh -p gpu_requeue sbatch/train.sbatch      # override partition
+# Full training over the CANONICAL staged superset ($AIONFLOW_STAGED=staged_paper).
+# Runs on `gpu` (A100-80GB) under finkbeiner_lab; move to `-p siag_gpu` once
+# siag_lab membership lands.
+#
+# Defaults = the new-science config: V1 head + cleaned VIEW + convolution.
+#   EPOCHS=15 scripts/submit.sh --export=ALL -t 06:00:00 sbatch/train.sbatch
+# Paper reproduction = native paper splits, paper head, no error handling:
+#   HEAD_ARGS="" ERROR_MODE=none CLEAN_SPLIT_CSV="" RUN_TAG=repro \
+#     scripts/submit.sh --export=ALL sbatch/train.sbatch
 set -eo pipefail
 cd "$SLURM_SUBMIT_DIR"
 source scripts/fasrc_env.sh
 
-# Defaults = the new-science config (cleaned data, V1 head, convolution).
-# Paper reproduction = STAGED_DIR=$AIONFLOW_DATA/staged_paper HEAD_ARGS="" \
-#   ERROR_MODE=none VALIDATE_CLEAN=0 RUN_TAG=repro scripts/submit.sh --export=ALL sbatch/train.sbatch
 HEAD_ARGS="${HEAD_ARGS---num-queries 1 --num-layers 1 --context-hidden 128}"
 TARGET="${TARGET:-log_ml_flux_1}"
 ERROR_MODE="${ERROR_MODE:-convolve}"
 STAGED_DIR="${STAGED_DIR:-$AIONFLOW_STAGED}"
-RUN_TAG="${RUN_TAG:-v1}"
+# Cleaned re-split view over the superset; set CLEAN_SPLIT_CSV="" for native (paper) splits.
+CLEAN_SPLIT_CSV="${CLEAN_SPLIT_CSV-$AIONFLOW_DATA/clean_split.csv}"
+RUN_TAG="${RUN_TAG:-v1-clean}"
+EPOCHS="${EPOCHS:-50}"
 
 # Gate: never burn GPU-hours on bad data. Any FAIL aborts before training.
-# Paper-repro dirs keep the NWAY-rejected matches on purpose -> VALIDATE_CLEAN=0
-# drops the clean assertion and the cleaned-sample row-count expectation.
-GATE_ARGS=(--expect-clean --expect-rows "${AIONFLOW_EXPECT_ROWS:-25200}")
-[ "${VALIDATE_CLEAN:-1}" = "0" ] && GATE_ARGS=()
+# The superset legitimately contains duplicates + NWAY rejects (paper design),
+# so the gate runs in superset mode; the cleaned config is a view on top.
 echo "=== validating $STAGED_DIR ==="
 python scripts/validate_staged.py \
   --staged-dir "$STAGED_DIR" \
   --match-quality-csv "$AIONFLOW_DATA/match_quality.csv" \
   --paper-manifest-csv "$AIONFLOW_DATA/manifests/aion_tvsplit_manifest.csv" \
-  "${GATE_ARGS[@]}" \
+  --allow-duplicates \
+  --expect-rows "${AIONFLOW_EXPECT_ROWS:-30762}" \
   --target "$TARGET"
 echo "=== validation passed, starting training ==="
+
+VIEW_ARGS=()
+[ -n "$CLEAN_SPLIT_CSV" ] && VIEW_ARGS=(--clean-split-csv "$CLEAN_SPLIT_CSV")
 
 python -m shareable_aion_flow.main train \
   --staged-dir "$STAGED_DIR" \
   --target "$TARGET" \
   --error-mode "$ERROR_MODE" \
+  "${VIEW_ARGS[@]}" \
   $HEAD_ARGS \
-  --epochs 50 --batch-size "${BATCH_SIZE:-448}" --eval-batch-size "${BATCH_SIZE:-448}" --num-workers 16 \
+  --epochs "$EPOCHS" --batch-size "${BATCH_SIZE:-448}" --eval-batch-size "${BATCH_SIZE:-448}" --num-workers 16 \
   --run-id "${RUN_TAG}-${TARGET}-${SLURM_JOB_ID}" \
   --output-dir "$AIONFLOW_ROOT/outputs" \
   --eval-after-train \
