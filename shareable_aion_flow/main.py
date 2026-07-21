@@ -36,6 +36,7 @@ try:
     )
     from .evals import build_results_table, evaluate_all_combos, save_results_table_pdf
     from .normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer, sample_split_normal
+    from .tracking import init_tracking
 except ImportError:
     from attention_pooling_head import (
         MODALITIES,
@@ -56,6 +57,7 @@ except ImportError:
     )
     from evals import build_results_table, evaluate_all_combos, save_results_table_pdf
     from normalizing_flow import ConditionalNSFFlow, KDEPrior, TargetStandardizer, sample_split_normal
+    from tracking import init_tracking
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -284,10 +286,22 @@ def train(args: argparse.Namespace) -> None:
     }
     write_json(run_dir / "config.json", config)
 
+    tracker = init_tracking(
+        enabled=args.wandb,
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        run_name=args.wandb_run_name or run_dir.name,
+        mode=args.wandb_mode,
+        config={**config, "run_dir": str(run_dir), "seed": args.seed, "device": str(device)},
+        run_dir=run_dir,
+        tags=[args.target, args.error_mode, "V1" if not is_paper_head else "paper"],
+    )
+
     best_val = float("inf")
     metrics_path = run_dir / "epoch_metrics.jsonl"
     generator = torch.Generator()
     generator.manual_seed(args.seed)
+    global_step = 0
 
     for epoch in range(1, args.epochs + 1):
         encoder.eval()
@@ -317,6 +331,16 @@ def train(args: argparse.Namespace) -> None:
 
             train_losses.append(float(loss.item()))
             train_counts.append(int(batch[6].shape[0]))
+            global_step += 1
+            if tracker.enabled and global_step % args.log_every == 0:
+                tracker.log(
+                    {
+                        "train/batch_nll": float(loss.item()),
+                        "train/combo_size": len(combo),
+                        "epoch": epoch,
+                    },
+                    step=global_step,
+                )
 
         val_nll = validation_all_inputs_nll(
             encoder=encoder,
@@ -332,6 +356,15 @@ def train(args: argparse.Namespace) -> None:
         with metrics_path.open("a") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
         print(f"epoch={epoch} train_nll={train_nll:.4f} val_all_inputs_nll={val_nll:.4f}", flush=True)
+        tracker.log(
+            {
+                "epoch": epoch,
+                "train/nll": train_nll,
+                "val/all_inputs_nll": val_nll,
+                "val/best_all_inputs_nll": min(best_val, val_nll),
+            },
+            step=global_step,
+        )
 
         save_checkpoint(
             run_dir / "last.pt",
@@ -356,6 +389,8 @@ def train(args: argparse.Namespace) -> None:
                 val_all_inputs_nll=val_nll,
             )
 
+    tracker.summary({"val/best_all_inputs_nll": best_val, "epochs_run": args.epochs})
+
     if args.eval_after_train:
         eval_args = argparse.Namespace(
             checkpoint=run_dir / "best.pt",
@@ -370,6 +405,30 @@ def train(args: argparse.Namespace) -> None:
             allow_target_override=False,
         )
         evaluate(eval_args)
+        log_eval_metrics(tracker, run_dir / "test_flow_metrics.csv")
+
+    tracker.finish()
+
+
+def log_eval_metrics(tracker: Any, metrics_csv: Path) -> None:
+    """Push the per-combination test metrics table + all-inputs headline to wandb."""
+    if not tracker.enabled or not metrics_csv.exists():
+        return
+    table = pd.read_csv(metrics_csv)
+    tracker.log_table("test/metrics", table)
+    combo_col = next((c for c in ("combo", "combination", "modalities") if c in table.columns), None)
+    if combo_col is None:
+        return
+    # The all-inputs row is the headline number the paper reports.
+    all_inputs = table.loc[table[combo_col].astype(str).str.count(r"[+,]") == len(MODALITIES) - 1]
+    if all_inputs.empty:
+        return
+    summary = {
+        f"test/all_inputs_{col}": float(all_inputs.iloc[0][col])
+        for col in table.columns
+        if col != combo_col and pd.api.types.is_numeric_dtype(table[col])
+    }
+    tracker.summary(summary)
 
 
 def evaluate(args: argparse.Namespace) -> None:
@@ -523,6 +582,17 @@ def parse_args() -> argparse.Namespace:
         "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
+    train_parser.add_argument("--wandb", action="store_true", help="Track this run with Weights & Biases.")
+    train_parser.add_argument("--wandb-project", default="erosita-desi-aion-flow")
+    train_parser.add_argument("--wandb-entity", default=None)
+    train_parser.add_argument("--wandb-run-name", default=None, help="Defaults to the run id.")
+    train_parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+        help="Falls back to offline automatically if the compute node has no internet.",
+    )
+    train_parser.add_argument("--log-every", type=int, default=10, help="Log batch NLL every N steps.")
 
     eval_parser = subparsers.add_parser(
         "eval", help="Evaluate all 15 modality combinations from a checkpoint."

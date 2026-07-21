@@ -17,12 +17,15 @@ source scripts/fasrc_env.sh
 
 STAGED="${AIONFLOW_STAGED_SMOKE:-$AIONFLOW_STAGED}"
 echo "V1 smoke on staged dir: $STAGED"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 python -m shareable_aion_flow.main train \
   --staged-dir "$STAGED" \
   --target log_ml_flux_1 \
+  --error-mode convolve \
   --num-queries 1 --num-layers 1 --context-hidden 128 \
   --epochs 2 --batch-size 256 --eval-batch-size 256 --num-workers 8 \
-  --run-id v1-minimal-smoke \
-  --output-dir outputs \
-  --eval-after-train
+  --run-id "v1-minimal-smoke-${SLURM_JOB_ID}" \
+  --output-dir "$AIONFLOW_ROOT/outputs" \
+  --eval-after-train \
+  --wandb --wandb-mode "${AIONFLOW_WANDB_MODE:-online}" --log-every 5

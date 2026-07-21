@@ -18,6 +18,8 @@ pip install --quiet -e "$REPO_ROOT"
 # flow + AION: install light deps explicitly, then aion --no-deps (avoids re-pulling torch).
 pip install --quiet zuko safetensors einops jaxtyping huggingface_hub tokenizers
 pip install --quiet --no-deps polymathic-aion
+# experiment tracking (optional at runtime; --wandb is opt-in)
+pip install --quiet wandb
 
 python - <<'PY'
 import torch, zuko, safetensors, aion  # noqa: F401
