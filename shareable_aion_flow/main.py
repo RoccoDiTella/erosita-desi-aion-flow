@@ -496,6 +496,10 @@ def evaluate(args: argparse.Namespace) -> None:
         eval_batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    # Score with the same likelihood the checkpoint was trained with: a
+    # convolve-trained flow models the deconvolved density and must be evaluated
+    # through the measurement kernel, or its info gain is understated.
+    eval_error_mode = str(_config.get("error_mode", "none"))
     metrics, predictions = evaluate_all_combos(
         encoder=encoder,
         context_encoder=context_encoder,
@@ -506,6 +510,7 @@ def evaluate(args: argparse.Namespace) -> None:
         device=device,
         num_samples=args.num_samples,
         combos=all_nonempty_modality_combos(),
+        error_mode=eval_error_mode,
     )
     metrics.to_csv(output_dir / "test_flow_metrics.csv", index=False)
     predictions.to_csv(output_dir / "test_predictions.csv", index=False)
@@ -518,6 +523,7 @@ def evaluate(args: argparse.Namespace) -> None:
             "checkpoint": str(args.checkpoint),
             "target": resolved_target,
             "prior_path": str(prior_path),
+            "error_mode": eval_error_mode,
         },
     )
     print(table.drop(columns=["input_group"]).to_string(index=False), flush=True)

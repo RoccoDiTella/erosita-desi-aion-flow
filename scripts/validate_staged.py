@@ -55,6 +55,18 @@ TARGET_ERRORS = {
 IMAGE_BANDS = 4
 IMAGE_SIZE = 160
 
+# Physically plausible ranges (generous — these catch unit mistakes, column
+# swaps, and row misalignment, not marginal science outliers).
+PHYSICAL_RANGES = {
+    "log_ml_flux_1": (-17.0, -9.0),   # log10 erg/s/cm^2, eRASS1 broad band
+    "log_lx": (38.0, 48.0),           # log10 erg/s
+    "logmstar": (5.0, 14.0),          # log10 Msun
+    "hr32_u": (-6.0, 6.0),            # arctanh(HR), clipped upstream
+    "redshift": (0.0, 7.0),
+}
+# DESI spectra live on a fixed 3600–9824 A grid.
+WAVELENGTH_RANGE = (3000.0, 11000.0)
+
 
 class Report:
     """Collects PASS/WARN/FAIL lines and decides the exit code."""
@@ -246,6 +258,100 @@ def check_values(rep: Report, handles: dict[str, h5py.File]) -> None:
             spec = handle["spectra"][: min(64, handle["spectra"].shape[0])]
             rep.check(finite_frac(spec) > 0.99, f"[{split}] spectra finite", f"finite={finite_frac(spec):.4%}")
 
+        if "spectra_ivar" in handle:
+            ivar = handle["spectra_ivar"][: min(64, handle["spectra_ivar"].shape[0])]
+            neg = int((ivar < 0).sum())
+            rep.check(neg == 0, f"[{split}] ivar non-negative", f"{neg} negative values" if neg else "all >= 0")
+
+        if "spectra_lambda" in handle:
+            grid = handle["spectra_lambda"][:]
+            ascending = bool(np.all(np.diff(grid) > 0))
+            in_range = WAVELENGTH_RANGE[0] < float(grid.min()) and float(grid.max()) < WAVELENGTH_RANGE[1]
+            rep.check(
+                ascending and in_range,
+                f"[{split}] wavelength grid",
+                f"{grid.min():.0f}-{grid.max():.0f} A, ascending={ascending}",
+            )
+
+        # Generous physical windows: violations mean unit mistakes or column
+        # swaps, not science outliers.
+        for column, (lo_bound, hi_bound) in PHYSICAL_RANGES.items():
+            if column not in handle:
+                continue
+            values = handle[column][:]
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            n_out = int(((values < lo_bound) | (values > hi_bound)).sum())
+            rep.check(
+                n_out == 0,
+                f"[{split}] {column} in physical range",
+                f"[{values.min():.2f}, {values.max():.2f}] within ({lo_bound}, {hi_bound})"
+                + (f", {n_out} OUTSIDE" if n_out else ""),
+            )
+
+
+def check_consistency(rep: Report, handles: dict[str, h5py.File]) -> None:
+    """Recompute derived targets from their inputs and compare to what's stored.
+
+    log_ml_flux_1 must equal log10(ml_flux_1) and log_lx must equal
+    log10(4 pi D_L(z)^2 ml_flux_1) row by row. A mismatch means the columns were
+    written from misaligned rows — the silent failure mode of any indexed copy —
+    which no schema or range check can see.
+    """
+    try:
+        from astropy.cosmology import Planck18
+    except ImportError:
+        rep.warn("derived-column consistency", "skipped: astropy not available")
+        return
+
+    for split, handle in handles.items():
+        needed = ("ml_flux_1", "redshift", "log_ml_flux_1", "log_lx")
+        if any(name not in handle for name in needed):
+            continue
+        n = handle["ml_flux_1"].shape[0]
+        idx = np.linspace(0, n - 1, min(256, n)).astype(int)
+        flux = handle["ml_flux_1"][idx].astype(np.float64)
+        z = handle["redshift"][idx].astype(np.float64)
+        stored_logf = handle["log_ml_flux_1"][idx].astype(np.float64)
+        stored_loglx = handle["log_lx"][idx].astype(np.float64)
+
+        valid = np.isfinite(flux) & (flux > 0) & np.isfinite(z)
+        expect_logf = np.log10(flux[valid])
+        d_l_cm = Planck18.luminosity_distance(z[valid]).to("cm").value
+        expect_loglx = np.log10(4.0 * np.pi * d_l_cm**2 * flux[valid])
+
+        err_f = float(np.max(np.abs(expect_logf - stored_logf[valid]))) if valid.any() else 0.0
+        err_lx = float(np.max(np.abs(expect_loglx - stored_loglx[valid]))) if valid.any() else 0.0
+        # float32 storage: ~1e-6 relative; anything above 1e-3 dex is misalignment.
+        rep.check(err_f < 1e-3, f"[{split}] log_flux consistent", f"max |Δ|={err_f:.2e} dex ({valid.sum()} rows)")
+        rep.check(err_lx < 1e-3, f"[{split}] log_lx consistent w/ z+flux", f"max |Δ|={err_lx:.2e} dex")
+
+
+def check_split_provenance(rep: Report, handles: dict[str, h5py.File], paper_manifest_csv: Path | None) -> None:
+    """Report how our cleaned re-split relates to the paper's original split.
+
+    Informational: after clean+dedup we re-derive the split, so our test set is
+    NOT the paper's test set and published numbers are not row-for-row
+    comparable. This surfaces the overlap so nobody is surprised later.
+    """
+    if paper_manifest_csv is None or not paper_manifest_csv.exists():
+        rep.warn("paper-split provenance", "skipped: no --paper-manifest-csv")
+        return
+    import pandas as pd
+
+    paper = pd.read_csv(paper_manifest_csv)
+    paper_split = dict(zip(paper["targetid"].astype(np.int64), paper["split"].astype(str)))
+    test_ids = handles["test"]["desi_targetid"][:].astype(np.int64)
+    from_paper_train = sum(1 for i in test_ids if paper_split.get(int(i)) == "train")
+    from_paper_test = sum(1 for i in test_ids if paper_split.get(int(i)) == "test")
+    unknown = sum(1 for i in test_ids if int(i) not in paper_split)
+    rep.warn(
+        "paper-split provenance",
+        f"new test set: {from_paper_test} were paper-test, {from_paper_train} were paper-train, "
+        f"{unknown} not in paper manifest (n={len(test_ids)}) — paper numbers not row-comparable",
+    )
+
 
 def check_model_contract(rep: Report, staged_dir: Path, target: str, run_forward: bool) -> None:
     """Confirm the dataloader emits exactly what train()/batch_nll() destructure."""
@@ -312,6 +418,12 @@ def main() -> int:
         default=0.20,
         help="Fail if more than this fraction of manifest rows lacked a Legacy Survey cutout.",
     )
+    parser.add_argument(
+        "--paper-manifest-csv",
+        type=Path,
+        default=None,
+        help="Original paper split manifest; reports (informationally) how the re-split relates to it.",
+    )
     parser.add_argument("--check-model", action="store_true", help="Also run AION + head forward on one batch.")
     parser.add_argument("--skip-dataloader", action="store_true")
     args = parser.parse_args()
@@ -357,6 +469,8 @@ def main() -> int:
         check_splits(rep, handles, args.expect_rows, limited)
         check_clean(rep, handles, args.match_quality_csv, args.expect_clean)
         check_values(rep, handles)
+        check_consistency(rep, handles)
+        check_split_provenance(rep, handles, args.paper_manifest_csv)
     finally:
         for handle in handles.values():
             handle.close()

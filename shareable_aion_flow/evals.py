@@ -99,12 +99,21 @@ def evaluate_all_combos(
     num_samples: int = 256,
     near_zero_threshold: float = 0.05,
     combos: list[tuple[str, ...]] | None = None,
+    error_mode: str = "none",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Evaluate posterior metrics for every requested modality combination.
 
     Returns ``(metrics, predictions)``. ``metrics`` carries one row per combination
     in the canonical ``METRIC_COLUMNS`` schema; ``predictions`` is the per-source
     posterior summary (mean, 16/50/84th percentiles, log-probs, info gain).
+
+    ``error_mode="convolve"`` keeps eval consistent with convolution training: a
+    flow trained on the deconvolved (latent) density must be scored on observed
+    noisy values through the same measurement kernel, ``log p(y|x) =
+    log \\int p_flow(t|x) K(y|t) dt``. Scoring the deconvolved density directly at
+    noisy ``y`` (the ``none`` behaviour) systematically understates the info gain
+    of exactly the models the convolution loss trains, because the KDE prior is
+    fit on noisy values and therefore already models the noise.
     """
 
     combos = combos or all_nonempty_modality_combos()
@@ -140,7 +149,17 @@ def evaluate_all_combos(
 
             tokens, group_ids = encoder.encode_tokens(batch, combo)
             context = context_encoder(tokens, group_ids)
-            posterior_ll = flow.log_prob(target_std, context)
+            has_err = (
+                error_mode == "convolve"
+                and len(batch) >= 10
+                and float((batch[8].abs() + batch[9].abs()).max()) > 1e-8
+            )
+            if has_err:
+                sig_lo = (batch[8].abs() / standardizer.std).clamp_min(1e-6)
+                sig_hi = (batch[9].abs() / standardizer.std).clamp_min(1e-6)
+                posterior_ll = flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
+            else:
+                posterior_ll = flow.log_prob(target_std, context)
             prior_ll = prior.log_prob_tensor(target_std)
             if not torch.isfinite(posterior_ll).all():
                 raise FloatingPointError(

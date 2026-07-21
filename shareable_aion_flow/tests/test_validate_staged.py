@@ -29,6 +29,13 @@ N_PIX = 32
 SPLIT_SIZES = {"train": 16, "val": 2, "test": 2}
 
 
+def _log_lx(z: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    from astropy.cosmology import Planck18
+
+    d_l_cm = Planck18.luminosity_distance(z).to("cm").value
+    return np.log10(4.0 * np.pi * d_l_cm**2 * flux)
+
+
 def write_split(path: Path, targetids: np.ndarray, *, sig_lo: float = 0.1, extras: bool = True) -> None:
     n = len(targetids)
     rng = np.random.default_rng(len(targetids))
@@ -38,12 +45,15 @@ def write_split(path: Path, targetids: np.ndarray, *, sig_lo: float = 0.1, extra
         handle.create_dataset("spectra", data=rng.normal(size=(n, N_PIX)).astype(np.float32))
         handle.create_dataset("spectra_ivar", data=np.ones((n, N_PIX), dtype=np.float32))
         handle.create_dataset("spectra_lambda", data=np.linspace(3600, 9800, N_PIX).astype(np.float32))
-        handle.create_dataset("redshift", data=np.full(n, 0.5, dtype=np.float32))
+        # Varying z and flux so derived-column consistency is a real constraint.
+        z = rng.uniform(0.1, 2.0, size=n)
+        flux = 10 ** rng.uniform(-14.0, -12.0, size=n)
+        handle.create_dataset("redshift", data=z.astype(np.float64))
         for band in ("flux_w1", "flux_w2", "flux_w3"):
             handle.create_dataset(band, data=rng.normal(size=n).astype(np.float32))
-        handle.create_dataset("ml_flux_1", data=np.full(n, 1e-13, dtype=np.float32))
-        handle.create_dataset("log_ml_flux_1", data=np.full(n, -13.0, dtype=np.float32))
-        handle.create_dataset("log_lx", data=np.full(n, 43.0, dtype=np.float32))
+        handle.create_dataset("ml_flux_1", data=flux.astype(np.float64))
+        handle.create_dataset("log_ml_flux_1", data=np.log10(flux).astype(np.float64))
+        handle.create_dataset("log_lx", data=_log_lx(z, flux).astype(np.float64))
         handle.create_dataset(
             "image_flux",
             data=rng.normal(size=(n, vs.IMAGE_BANDS, vs.IMAGE_SIZE, vs.IMAGE_SIZE)).astype(np.float32),
@@ -79,6 +89,7 @@ def run_checks(staged: Path, *, match_quality_csv: Path | None = None, expect_cl
         vs.check_splits(rep, handles, expect_rows=None, limited=False)
         vs.check_clean(rep, handles, match_quality_csv, expect_clean)
         vs.check_values(rep, handles)
+        vs.check_consistency(rep, handles)
     finally:
         for handle in handles.values():
             handle.close()
@@ -198,3 +209,45 @@ def test_nonfinite_target_is_caught(tmp_path: Path, target: str) -> None:
         handle[target][0] = np.nan
     rep = run_checks(staged)
     assert f"[train] {target} all finite" in failed_names(rep)
+
+
+def test_row_misalignment_is_caught_by_consistency(tmp_path: Path) -> None:
+    """Roll redshift by one row: every schema/range check still passes, but
+    log_lx no longer matches z+flux — the misalignment only consistency sees."""
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        z = handle["redshift"][:]
+        del handle["redshift"]
+        handle.create_dataset("redshift", data=np.roll(z, 1))
+    rep = run_checks(staged)
+    assert "[train] log_lx consistent w/ z+flux" in failed_names(rep)
+    assert "[train] log_flux consistent" not in failed_names(rep)  # flux itself untouched
+
+
+def test_unit_mistake_is_caught_by_physical_range(tmp_path: Path) -> None:
+    """Linear flux written where log flux belongs (a classic unit slip)."""
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_val.hdf5", "a") as handle:
+        n = handle["desi_targetid"].shape[0]
+        del handle["log_ml_flux_1"]
+        handle.create_dataset("log_ml_flux_1", data=np.full(n, 1e-13, dtype=np.float64))
+    rep = run_checks(staged)
+    assert "[val] log_ml_flux_1 in physical range" in failed_names(rep)
+
+
+def test_negative_ivar_is_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_test.hdf5", "a") as handle:
+        handle["spectra_ivar"][0, 0] = -1.0
+    rep = run_checks(staged)
+    assert "[test] ivar non-negative" in failed_names(rep)
+
+
+def test_descending_wavelength_grid_is_caught(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        grid = handle["spectra_lambda"][:]
+        del handle["spectra_lambda"]
+        handle.create_dataset("spectra_lambda", data=grid[::-1].copy())
+    rep = run_checks(staged)
+    assert "[train] wavelength grid" in failed_names(rep)

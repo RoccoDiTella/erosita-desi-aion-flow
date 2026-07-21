@@ -27,6 +27,7 @@ echo "=== validating $AIONFLOW_STAGED ==="
 python scripts/validate_staged.py \
   --staged-dir "$AIONFLOW_STAGED" \
   --match-quality-csv "$AIONFLOW_DATA/match_quality.csv" \
+  --paper-manifest-csv "$AIONFLOW_DATA/manifests/aion_tvsplit_manifest.csv" \
   --expect-clean \
   --expect-rows "${AIONFLOW_EXPECT_ROWS:-25200}" \
   --target "$TARGET"
