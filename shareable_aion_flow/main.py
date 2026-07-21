@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -192,6 +193,64 @@ def batch_nll(
 
 
 @torch.no_grad()
+def validation_metrics(
+    *,
+    encoder: AIONTokenEncoder,
+    context_encoder: AIONAttentionContext,
+    flow: ConditionalNSFFlow,
+    val_loader,
+    standardizer: TargetStandardizer,
+    device: torch.device,
+    error_mode: str = "none",
+    r2_samples: int = 64,
+) -> dict[str, float]:
+    """Per-epoch validation panel: all-inputs + per-single-modality NLL and R².
+
+    ``val/all_inputs_nll`` stays the checkpoint criterion. The singles make the
+    modality story watchable during training, and ``val/r2_all_inputs`` (from the
+    posterior mean of ``r2_samples`` flow draws; R² is affine-invariant so it is
+    computed in standardized space) tracks the headline point metric per epoch.
+    Costs ~5 extra val-set forwards per epoch — small next to a training epoch.
+    """
+    encoder.eval()
+    context_encoder.eval()
+    flow.eval()
+    combos: dict[str, tuple[str, ...]] = {"all_inputs": tuple(MODALITIES)}
+    combos.update({modality: (modality,) for modality in MODALITIES})
+    nll_sums = {name: 0.0 for name in combos}
+    total = 0
+    preds: list[np.ndarray] = []
+    trues: list[np.ndarray] = []
+    for batch in val_loader:
+        batch = tuple(item.to(device, non_blocking=True) for item in batch)
+        n = int(batch[6].shape[0])
+        total += n
+        for name, combo in combos.items():
+            loss = batch_nll(
+                encoder=encoder,
+                context_encoder=context_encoder,
+                flow=flow,
+                batch=batch,
+                combo=combo,
+                standardizer=standardizer,
+                error_mode=error_mode,
+            )
+            nll_sums[name] += float(loss.item()) * n
+        tokens, group_ids = encoder.encode_tokens(batch, combos["all_inputs"])
+        context = context_encoder(tokens, group_ids)
+        samples = flow.sample(context, num_samples=r2_samples)
+        preds.append(samples.mean(dim=0).detach().cpu().numpy().ravel())
+        trues.append(standardizer.transform_tensor(batch[6]).detach().cpu().numpy().ravel())
+    y_pred = np.concatenate(preds)
+    y_true = np.concatenate(trues)
+    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+    r2 = 1.0 - float(np.sum((y_true - y_pred) ** 2)) / ss_tot if ss_tot > 0 else float("nan")
+    metrics = {f"val/{name}_nll" if name != "all_inputs" else "val/all_inputs_nll": s / total for name, s in nll_sums.items()}
+    metrics["val/r2_all_inputs"] = r2
+    return metrics
+
+
+@torch.no_grad()
 def validation_all_inputs_nll(
     *,
     encoder: AIONTokenEncoder,
@@ -315,11 +374,13 @@ def train(args: argparse.Namespace) -> None:
     global_step = 0
 
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.monotonic()
         encoder.eval()
         context_encoder.train()
         flow.train()
         train_losses: list[float] = []
         train_counts: list[int] = []
+        size_losses: dict[int, list[float]] = {1: [], 2: [], 3: [], 4: []}
 
         for batch in train_loader:
             batch = tuple(item.to(device, non_blocking=True) for item in batch)
@@ -342,6 +403,7 @@ def train(args: argparse.Namespace) -> None:
 
             train_losses.append(float(loss.item()))
             train_counts.append(int(batch[6].shape[0]))
+            size_losses[len(combo)].append(float(loss.item()))
             global_step += 1
             if tracker.enabled and global_step % args.log_every == 0:
                 tracker.log(
@@ -353,7 +415,7 @@ def train(args: argparse.Namespace) -> None:
                     step=global_step,
                 )
 
-        val_nll = validation_all_inputs_nll(
+        val_metrics = validation_metrics(
             encoder=encoder,
             context_encoder=context_encoder,
             flow=flow,
@@ -362,20 +424,38 @@ def train(args: argparse.Namespace) -> None:
             device=device,
             error_mode=args.error_mode,
         )
+        val_nll = val_metrics["val/all_inputs_nll"]
         train_nll = float(np.average(train_losses, weights=train_counts))
-        row = {"epoch": epoch, "train_nll": train_nll, "val_all_inputs_nll": val_nll}
+        epoch_seconds = time.monotonic() - epoch_start
+        row = {
+            "epoch": epoch,
+            "train_nll": train_nll,
+            "val_all_inputs_nll": val_nll,
+            "val_r2_all_inputs": val_metrics["val/r2_all_inputs"],
+            "epoch_seconds": round(epoch_seconds, 1),
+        }
         with metrics_path.open("a") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
-        print(f"epoch={epoch} train_nll={train_nll:.4f} val_all_inputs_nll={val_nll:.4f}", flush=True)
-        tracker.log(
-            {
-                "epoch": epoch,
-                "train/nll": train_nll,
-                "val/all_inputs_nll": val_nll,
-                "val/best_all_inputs_nll": min(best_val, val_nll),
-            },
-            step=global_step,
+        print(
+            f"epoch={epoch} train_nll={train_nll:.4f} val_all_inputs_nll={val_nll:.4f} "
+            f"val_r2={val_metrics['val/r2_all_inputs']:.4f} ({epoch_seconds:.0f}s)",
+            flush=True,
         )
+        # train/nll mixes modality combos (mostly harder, fewer-input ones), so it
+        # is NOT comparable to the all-inputs val NLL; the per-size curves and
+        # train/nll_all_inputs are the comparable views.
+        log_payload = {
+            "epoch": epoch,
+            "train/nll": train_nll,
+            "val/best_all_inputs_nll": min(best_val, val_nll),
+            "epoch_seconds": epoch_seconds,
+            **val_metrics,
+        }
+        for size, losses in size_losses.items():
+            if losses:
+                key = "train/nll_all_inputs" if size == 4 else f"train/nll_combo_size_{size}"
+                log_payload[key] = float(np.mean(losses))
+        tracker.log(log_payload, step=global_step)
 
         save_checkpoint(
             run_dir / "last.pt",
