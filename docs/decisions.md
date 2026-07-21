@@ -140,10 +140,16 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | smoke v1 | V1, convolve | clean view, 667 rows | 2 | 0.29 (plumbing only) | — | done |
 | smoke repro | q4/l2, none | paper subset, 667 rows | 2 | 0.02 (plumbing only) | — | done |
 | `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | *pending* | *pending* | running |
-| `v1-clean-log_lx-34084808` | V1, convolve | clean view | 15 | *pending* | *pending* | queued |
-| `v1-clean-logmstar-34085205` | V1, convolve | clean view | 15 | *pending* | *pending* | queued |
-| `v1-clean-hr32_u-34085220` | V1, convolve | clean view | 15 | *pending* | *pending* | queued |
+| `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | *pending* | *pending* | queued |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
+| other targets (log_lx, logmstar, hr32_u) | V1, convolve | clean view | 15 | | | deferred (first runs cancelled) |
+
+**Queue decision (2026-07-21):** compare **V1 vs paper head, everything else
+identical** (clean view, convolve, flux, 15 epochs) — the head A/B informs what
+to try next. Per-target runs resume after. Every completed run gets the standard
+**evaluation packet** (`scripts/make_run_packet.py`, ported from the RunPod
+packet-v5): diagnostics PDF (scatter grid + IG histograms + calibration),
+upset-style combo figure, per-spectype and per-redshift slices.
 
 Comparison caveats: the cleaned-view test set (2,520 cleaned rows) ≠ the paper
 test set (3,054 noisy rows) — deltas vs the paper are indicative, not
