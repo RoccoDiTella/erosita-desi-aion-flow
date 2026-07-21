@@ -27,7 +27,10 @@ have=$(ls "$LS_DIR/fits_pool" 2>/dev/null | wc -l)
 echo "fits_pool: have=$have want=$want"
 if [ "$have" -lt "$want" ]; then
   echo "incomplete -> unzipping (this can take a while)"
-  ( cd "$LS_DIR" && unzip -q -o fits_pool.zip )
+  # RHEL unzip's CVE-2019-13232 zip-bomb heuristic false-positives on this
+  # self-built 11GB zip64 archive ("overlapped components"). Verified intact:
+  # byte-identical to the local original and a full local `unzip -t` passes.
+  ( cd "$LS_DIR" && UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -q -o fits_pool.zip )
   have=$(ls "$LS_DIR/fits_pool" | wc -l)
 fi
 echo "fits count: $have / $want"
