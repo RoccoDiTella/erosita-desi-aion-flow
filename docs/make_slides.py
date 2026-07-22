@@ -140,7 +140,7 @@ def main() -> None:
         bullets(ax2, [
             "in NWAY, ~95% of our sources have a\n     confirmed optical match",
             "3.3%: z mismatch > 0.01",
-            "3.4%: no z — no way to check",
+            "3.4%: no z, so no way to check",
             "we keep only NWAY-confirmed sources",
             "PAI performance: R² 0.549",
             "PAI on mismatched objects: R² 0.29",
@@ -152,10 +152,10 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_split_normal.png", (0.04, 0.08, 0.55, 0.66))
         ax2 = fig.add_axes([0.62, 0.15, 0.36, 0.55]); ax2.axis("off")
         bullets(ax2, [
-            "catalog gives the error borders F−LOWERR,\n     F+UPERR → they ARE the ±1σ borders\n     of the split normal (in log space)",
+            "the catalog reports the error borders;\n     in log space these are the ±1σ\n     points of the split normal",
             "draws truncated at 1.5σ per side",
             "logM★ has no catalog σ →\n     class floor: 0.2 (GALAXY) / 0.3 (QSO) dex",
-            "eval: plain likelihood at observed y — no σ",
+            "eval: plain likelihood at observed y,\n     no σ involved",
         ], fontsize=12.5, dy=0.17)
         pdf.savefig(fig); plt.close(fig)
 
@@ -175,9 +175,10 @@ def main() -> None:
             "HR32 = (P3−P2) / (P3+P2), from rates",
             "both HR bands measured: 86%;\n     both detected: 30%",
         ], fontsize=14, dy=0.26)
-        fig.text(0.05, 0.115, "measured: forced PSF-fit rate > 0 in the band     "
-                 "detected: DET_LIKE ≥ 6 — the eRASS1 catalog threshold\n"
-                 "(P(spurious) ≈ 14% at DET_LIKE = 6, → 4% at ≥ 8; Seppi+2022, Salvato+2025)",
+        fig.text(0.05, 0.115,
+                 "measured: forced photometry gives a positive rate in this band\n"
+                 "detected: DET_LIKE ≥ 6, the catalog threshold. About 14% of sources at the "
+                 "threshold are spurious, 4% at ≥ 8 (Seppi+2022)",
                  fontsize=10.5, color=MUTED)
         pdf.savefig(fig); plt.close(fig)
 
@@ -190,7 +191,7 @@ def main() -> None:
         ]
         available = [(label, path) for label, path in runs if load_marker_table(path) is not None]
         detail = [r for r in available if "inject" in r[0]] or available
-        fig, ax = new_slide("Results — log flux, cleaned data",
+        fig, ax = new_slide("Results: log flux, cleaned data",
                             "paper anchors: 0.549 published · 0.567 on clean rows")
         if len(detail) >= 2:
             (label_a, path_a), (label_b, path_b) = detail[0], detail[1]
@@ -214,7 +215,7 @@ def main() -> None:
                 {"run": label, "R² (all)": f"{allinputs_numbers(path)[0]:.3f}", "exp(IG)": f"{allinputs_numbers(path)[1]:.2f}"}
                 for label, path in available
             ])
-            fig2, ax_s = new_slide("Results — cross-run summary (all inputs)")
+            fig2, ax_s = new_slide("Results: cross-run summary (all inputs)")
             metric_table(ax_s, summary, rect=(0.15, 0.30, 0.60, 0.45), fontsize=14)
             pdf.savefig(fig); plt.close(fig)
             pdf.savefig(fig2); plt.close(fig2)
