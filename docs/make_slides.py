@@ -158,6 +158,18 @@ def main() -> None:
         ], fontsize=13, dy=0.22)
         pdf.savefig(fig); plt.close(fig)
 
+        # ---- 5b Band coverage
+        fig, ax = new_slide("X-ray band coverage", "keV energy ranges; selection is in the broad band")
+        image_panel(fig, FIGS / "fig_band_coverage.png", (0.05, 0.08, 0.55, 0.66))
+        ax2 = fig.add_axes([0.63, 0.15, 0.35, 0.55]); ax2.axis("off")
+        bullets(ax2, [
+            "HR32 = (P3−P2) / (P3+P2), from rates",
+            "both HR bands measured: 86%;\n     both detected: 30%",
+            "forced photometry gives a rate even\n     without detection → huge σ tails",
+            "sub-band non-detections are upper\n     limits → censored likelihood (later)",
+        ], fontsize=13, dy=0.18)
+        pdf.savefig(fig); plt.close(fig)
+
         # ---- 6 Results
         runs = [
             ("V_2 · convolve", args.v1_metrics),
