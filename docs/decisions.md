@@ -170,7 +170,7 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | `v1-clean-inject-hr32_u-34185558` | V_simple, inject(8), **σ_u≤1.0 gate** | clean view (n_test 2,121) | 15 | ≈0.00 (no point signal, as expected) | 1.13–1.14 flat across combos (IG +0.13) | ✅ done |
 | `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | **0.648** (S-only 0.383, S+W 0.561 — WISE is the big adder) | 2.98 (IG +1.090) | ✅ done |
 | `v1-spec-mask-log_ml_flux_1-34193770` | V_simple, none, spectra-only + token-mask augment | clean view | 12 | spectra-only 0.529 (vs 0.541 unmasked full model → surrogate faithful, augment costs ~0.01) | 1.34 | ✅ done (Shapley surrogate) |
-| shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | outputs: shapley_table.csv, heatmap, line table | | running |
+| shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | 7 lines Σφ 0.007 nats vs continuum 0.070; MgII top line | | ✅ done (33 min) |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
 
 **Queue decision (2026-07-21):** compare **V1 vs paper head, everything else
@@ -233,6 +233,36 @@ the per-target sweep configuration (already in flight).
 - Flux Shapley surrogate (34193770): spectra-only 0.529 with mask augmentation
   vs 0.541 unmasked (full model) — augmentation costs ~0.012 R², surrogate is
   faithful enough to attribute.
+
+**Line/continuum Shapley findings (2026-07-22, job 34193771, 33 min):** total
+attributed (unmasked vs fully-median-filtered spectrum) 0.077 nats of the
+0.291-nat spectra IG → **~74% of the spectral flux information survives 80 Å
+median smoothing** (broad SED/colors); fine structure carries ~26%, of which the
+7 named lines are ~10% (Σφ 0.0073 nats). Line ranking: **MgII 0.0027±0.0005**,
+then OIII 0.0013, Hβ 0.0011, NeV 0.0010, OII 0.0008; Hα and HeII consistent
+with zero (Hα null is z<0.5-specific — coverage). Hottest continuum bins:
+1098–1213 Å (Lyα region, z>1.7 only, 0.020±0.010), 5970–6596 Å, 2205–2691 Å
+(UV FeII / small-blue-bump territory). Caveat as designed: line availability is
+a z-window, so per-line φ conditions on coverage.
+
+**Modality Shapley (exact, 16 coalitions from the test tables — no extra
+compute):** share of all-inputs IG — flux: S 44 / I 28 / W 21 / z 8%.
+Lx: S 46 / z 34 / I 17 / W 2% (distance info split between S and z — the
+spectrum carries z). M★: S 42 / I 24 / W 22 / z 12%. HR: flat 23–26%×4
+(population-shape gain evenly credited = no modality-specific signal).
+
+**HR verdict (2026-07-22): not learnable at eRASS1 depth — do NOT re-run on the
+detected-only subset.** Noise-floor analysis (clean sample, hr32_u/σ_u
+sidecars): at the σ_u≤1.0 gate, Var(u)=0.16 < E[σ_u²]=0.25 → the observed HR
+spread is entirely explainable by measurement noise (R² ceiling negative). The
+both-detected subset (`hr32_ok`, 4,485 = 16.9% of clean, 87% QSO) is *also*
+ceiling-negative (Var 0.047 vs noise 0.059). Ceiling only turns positive at
+σ_u≤0.3 (14% kept, ceiling 0.07) and reaches ~0.4 only at σ_u≤0.2 (n=1,290 —
+too few, and corr(σ_u,|u|)=0.65 means tight gates also truncate the signal:
+extreme HRs are exactly the low-count sources). Measured R²≈0 + flat IG 1.13
+is therefore the *expected* outcome, not a modeling failure. Paths that could
+work later: eRASS:4 depth, stacked/binned HR, or the deferred censored
+band-rate likelihood (predict P2/P3 rates with upper limits, not their ratio).
 
 **Error-treatment decisions (2026-07-21, post-calibration-check):**
 - **σ-conditioning is ruled out** (p(y|x,σ)): σ is metadata of the measurement

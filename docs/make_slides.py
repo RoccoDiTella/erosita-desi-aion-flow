@@ -261,13 +261,33 @@ def main() -> None:
                 fig.text(x, 0.795, label, fontsize=14, fontweight="bold", ha="center", color=INK)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6c Modality Shapley
+        if (FIGS / "fig_modality_shapley.png").exists():
+            fig, ax = new_slide("Information by input type",
+                                "exact Shapley over the 4 inputs, from the 16-coalition test tables")
+            image_panel(fig, FIGS / "fig_modality_shapley.png", (0.08, 0.08, 0.84, 0.72))
+            pdf.savefig(fig); plt.close(fig)
+
+        # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
+        if (FIGS / "fig_shapley_heatmap.png").exists():
+            fig, ax = new_slide("Where in the spectrum is the flux information?",
+                                "line/continuum Shapley on the spectra-only model · masked tokens replaced by own smoothed continuum")
+            image_panel(fig, FIGS / "fig_shapley_heatmap.png", (0.03, 0.42, 0.94, 0.40))
+            image_panel(fig, FIGS / "fig_shapley_lines.png", (0.16, 0.01, 0.48, 0.40))
+            ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
+            bullets(ax2, [
+                "7 lines: 10% of fine-structure info",
+                "MgII strongest line",
+                "smooth SED carries most of it",
+            ], fontsize=12, dy=0.30)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- 7 Next
         fig, ax = new_slide("Next")
         bullets(ax, [
-            "line/continuum Shapley attribution of flux information",
             "50-epoch paper reproduction",
             "token cache → 5–15× faster epochs",
-            "V_3 head; self-trained encoder",
+            "V_3 head; CLS-token fine-tune; self-trained encoder",
         ], fontsize=17, dy=0.14)
         pdf.savefig(fig); plt.close(fig)
 
