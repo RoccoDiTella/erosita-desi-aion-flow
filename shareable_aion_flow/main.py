@@ -158,6 +158,7 @@ def batch_nll(
     standardizer: TargetStandardizer,
     error_mode: str = "none",
     inject_samples: int = 1,
+    spectrum_token_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Negative log-likelihood of one batch under the flow for a given modality combo.
 
@@ -171,7 +172,7 @@ def batch_nll(
         bad = int((~torch.isfinite(target)).sum().item())
         raise FloatingPointError(f"Encountered {bad} non-finite target values in a training/eval batch.")
     target_std = standardizer.transform_tensor(target)
-    tokens, group_ids = encoder.encode_tokens(batch, combo)
+    tokens, group_ids = encoder.encode_tokens(batch, combo, spectrum_token_mask=spectrum_token_mask)
     context = context_encoder(tokens, group_ids)
     log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode, inject_samples)
     loss = -log_prob.mean()
@@ -394,6 +395,14 @@ def train(args: argparse.Namespace) -> None:
         tags=[args.target, args.error_mode, "V1" if not is_paper_head else "paper"],
     )
 
+    fixed_combo = tuple(args.fixed_combo.split("+")) if args.fixed_combo else None
+    shapley_players = None
+    mask_rng = None
+    if args.token_mask_augment:
+        from .line_shapley import player_catalog, sample_training_mask  # noqa: F401
+        shapley_players = player_catalog()
+        mask_rng = np.random.default_rng(args.seed + 7)
+
     best_val = float("inf")
     metrics_path = run_dir / "epoch_metrics.jsonl"
     generator = torch.Generator()
@@ -411,7 +420,13 @@ def train(args: argparse.Namespace) -> None:
 
         for batch in train_loader:
             batch = tuple(item.to(device, non_blocking=True) for item in batch)
-            combo = sampler.sample(generator)
+            combo = fixed_combo if fixed_combo else sampler.sample(generator)
+            token_mask = None
+            if args.token_mask_augment:
+                mask_np = sample_training_mask(
+                    batch[3].detach().cpu().numpy().ravel(), shapley_players, mask_rng
+                )
+                token_mask = torch.from_numpy(mask_np).to(device)
             loss = batch_nll(
                 encoder=encoder,
                 context_encoder=context_encoder,
@@ -421,6 +436,7 @@ def train(args: argparse.Namespace) -> None:
                 standardizer=standardizer,
                 error_mode=args.error_mode,
                 inject_samples=args.inject_samples,
+                spectrum_token_mask=token_mask,
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -725,6 +741,10 @@ def parse_args() -> argparse.Namespace:
         "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
+    train_parser.add_argument("--fixed-combo", default=None,
+                              help="Train on one fixed modality combo, e.g. 'spectra'.")
+    train_parser.add_argument("--token-mask-augment", action="store_true",
+                              help="Random rest-frame coalition masking of spectrum tokens (Shapley prep).")
     train_parser.add_argument(
         "--max-target-sigma",
         type=float,

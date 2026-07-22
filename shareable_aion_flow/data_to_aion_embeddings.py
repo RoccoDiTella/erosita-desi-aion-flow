@@ -692,15 +692,70 @@ class AIONTokenEncoder(nn.Module):
             raise RuntimeError("AION returned token ids that are not mapped to spectra, z, WISE, or image.")
         return group_ids
 
+    def _spec_key(self, token_dict: dict) -> str:
+        for key in token_dict:
+            if "spectrum" in key:
+                return key
+        raise KeyError(f"No spectrum token key in {list(token_dict)}")
+
+    def _locate_spec_columns(self, device: torch.device, wavelength: torch.Tensor) -> int:
+        """Column offset of wavelength-token 0 inside the spectrum code tensor.
+
+        Probed once: tokenize a flat spectrum and one with a spike inside
+        wavelength-token block 10; the changed code column reveals the offset
+        (the extra normalization token may sit before or after the 272).
+        """
+        if getattr(self, "_spec_col_offset", None) is not None:
+            return self._spec_col_offset
+        codec = self._codec(device)
+        base = torch.ones(1, wavelength.shape[-1], device=device)
+        spike = base.clone()
+        spike[0, 10 * 32 : 11 * 32] = 25.0
+        ivar1 = torch.ones_like(base)
+        wl = wavelength[:1] if wavelength.dim() > 1 else wavelength.unsqueeze(0)
+        outs = []
+        for fl in (base, spike):
+            td = codec.encode(self.spectrum_cls(flux=fl, ivar=ivar1, mask=ivar1 <= 0, wavelength=wl))
+            outs.append(td[self._spec_key(td)])
+        changed = (outs[0] != outs[1]).nonzero()
+        cols = sorted(set(changed[:, -1].tolist()))
+        # spike lives in wavelength-token 10 (+ possibly the norm token changing)
+        candidates = [c - 10 for c in cols if 0 <= c - 10]
+        offset = min(candidates) if candidates else 0
+        self._spec_col_offset = int(offset)
+        return self._spec_col_offset
+
     def encode_tokens(
         self,
         batch: tuple[torch.Tensor, ...],
         combo: tuple[str, ...],
+        spectrum_token_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         flux, ivar, wavelength, redshift, wise, image = batch[:6]
         codec = self._codec(flux.device)
         modalities = self._modalities(flux, ivar, wavelength, redshift, wise, image, combo)
         token_dict = codec.encode(*modalities)
+        if spectrum_token_mask is not None and "spectra" in combo:
+            # Replace masked wavelength-token codes with the codes of this
+            # source's own median-filtered continuum: "remove the line, keep
+            # the continuum", applied before the backbone so the information
+            # is genuinely absent. The normalization token stays original.
+            k = 101  # ~80 A median window, wide enough to erase lines
+            pad = k // 2
+            padded = torch.nn.functional.pad(flux.unsqueeze(1), (pad, pad), mode="reflect").squeeze(1)
+            cont = padded.unfold(-1, k, 1).median(dim=-1).values
+            cont_dict = codec.encode(
+                self.spectrum_cls(flux=cont, ivar=ivar, mask=ivar <= 0.0, wavelength=wavelength)
+            )
+            key = self._spec_key(token_dict)
+            offset = self._locate_spec_columns(flux.device, wavelength)
+            codes = token_dict[key].clone()
+            cont_codes = cont_dict[self._spec_key(cont_dict)]
+            n_tok = spectrum_token_mask.shape[1]
+            sub = codes[:, offset : offset + n_tok]
+            sub[spectrum_token_mask] = cont_codes[:, offset : offset + n_tok][spectrum_token_mask]
+            codes[:, offset : offset + n_tok] = sub
+            token_dict[key] = codes
         num_tokens = self._num_tokens(token_dict)
 
         context_manager = torch.no_grad() if self.freeze else torch.enable_grad()
