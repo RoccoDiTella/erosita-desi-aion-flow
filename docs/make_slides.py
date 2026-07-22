@@ -131,13 +131,12 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_dz_log.png", (0.04, 0.08, 0.52, 0.62))
         ax2 = fig.add_axes([0.58, 0.08, 0.40, 0.66]); ax2.axis("off")
         bullets(ax2, [
-            "wrong (3.3%): different optical object",
-            "spurious (5.0%): X-ray detection itself\n     likely not real — no counterpart exists",
-            "ambiguous (3.4%): no single secure match",
-            "we keep NWAY-confirmed only (87.5%)",
-            "z_ours: DESI z of our 5″ match;\n     z_NWAY: spec-z of NWAY's counterpart",
-            "paper model 2× worse on rejects;\n     dropping them: R² 0.549 → 0.567",
-        ], fontsize=12.5, dy=0.155)
+            "same-object test: Δz < 0.01 between our\n     counterpart's z and NWAY's (valley of\n     the bimodal distribution)",
+            "wrong (3.3%): Δz ≥ 0.01 — different object",
+            "ambiguous (3.4%): NWAY match has no\n     spec-z — unverifiable",
+            "spurious (5.0%): NWAY assigns no\n     counterpart at all",
+            "keep = correct only (87.5%); paper model\n     2× worse on rejects (0.549 → 0.567)",
+        ], fontsize=12.5, dy=0.175)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 4 Buchner comment (screenshot only)

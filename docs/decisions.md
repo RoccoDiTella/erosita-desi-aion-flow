@@ -16,15 +16,20 @@ wrong counterparts.
 
 **Cleaning (this branch):** join the Salvato et al. 2025 NWAY Bayesian
 counterpart catalog (A&A 704 A344, VizieR `J/A+A/704/A344/dr1ls10`) on
-`IAUName`, compare NWAY's chosen LS10 counterpart with ours per `targetid`.
-Classes in `match_quality.csv` (30,441 targetids):
+`IAUName`, compare NWAY's chosen counterpart with ours per `targetid`.
+**Operational same-object test = spec-z agreement** (our `ls_id` vs their
+`LS10objid` packing could not be reconciled reliably): dz < 0.01, sitting in the
+valley of a strongly bimodal distribution (88.7% at dz<1e-4, ~3% at dz>0.1).
+Caveat: z-agreement is an identity *proxy* — distinct objects at equal z (pairs,
+group members) would pass as `correct`. Classes in `match_quality.csv`
+(30,441 targetids):
 
-| class | n | meaning | kept? |
+| class | n | actual rule | kept? |
 |---|---|---|---|
-| `correct` | 26,632 (87.5%) | our counterpart = NWAY's secure counterpart | ✅ |
-| `spurious` | 1,514 | NWAY flags the X-ray detection itself as likely spurious | ❌ |
-| `ambiguous` | 1,033 | NWAY has no single secure counterpart | ❌ |
-| `wrong` | 1,017 | NWAY picks a *different* optical object | ❌ |
+| `correct` | 26,632 (87.5%) | NWAY counterpart has spec-z and dz < 0.01 | ✅ |
+| `spurious` | 1,514 | NWAY assigns NO counterpart (below reliability cut; consistent with spurious detection) | ❌ |
+| `ambiguous` | 1,033 | NWAY counterpart exists but has no spec-z — unverifiable | ❌ |
+| `wrong` | 1,017 | NWAY counterpart has spec-z and dz ≥ 0.01 — different object | ❌ |
 | `not_in_NWAY` | 245 | X-ray source absent from the NWAY DR1 sample | ❌ |
 
 **`keep = (class == correct)` only** — conservative by design.
