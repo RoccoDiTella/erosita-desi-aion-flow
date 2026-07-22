@@ -73,6 +73,25 @@ def test_batch_nll_all_error_modes():
         assert torch.isfinite(loss), (mode, k)
 
 
+class StubPrior:
+    def log_prob_tensor(self, target_std):
+        return torch.full_like(target_std, -1.2)
+
+
+def test_validation_info_gain_sign():
+    """IG must be (-nll) - prior_mean: a model matching the prior has IG ~ 0,
+    not ~ -2*prior (the sign bug that shipped to two runs' live panels)."""
+    encoder, ctx, flow, std = parts()
+    loader = Loader([make_batch()])
+    metrics = validation_metrics(
+        encoder=encoder, context_encoder=ctx, flow=flow, val_loader=loader,
+        standardizer=std, prior=StubPrior(), device=torch.device("cpu"), error_mode="none",
+    )
+    expected = -metrics["val/all_inputs_nll"] - (-1.2)
+    assert abs(metrics["val/all_inputs_info_gain"] - expected) < 1e-9
+    assert metrics["val/all_inputs_info_gain"] > -1.0  # sane scale, not ~ -2.4
+
+
 def test_validation_metrics_full_path_every_mode():
     """The exact call path that died on the GPU: every mode, with inject_samples."""
     encoder, ctx, flow, std = parts()

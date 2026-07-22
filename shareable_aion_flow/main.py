@@ -269,7 +269,8 @@ def validation_metrics(
         metrics[f"val/{name}_r2"] = r2
         metrics[f"val/{name}_rmse"] = float(np.sqrt(np.mean((y_true - y_pred) ** 2))) * standardizer.std
         if prior_mean_lp is not None:
-            metrics[f"val/{name}_info_gain"] = prior_mean_lp - nll
+            # IG = E[log p_post] - E[log p_prior] = (-nll) - prior_mean_lp
+            metrics[f"val/{name}_info_gain"] = -nll - prior_mean_lp
     return metrics
 
 
