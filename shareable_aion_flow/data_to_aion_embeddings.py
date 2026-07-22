@@ -609,6 +609,36 @@ def move_batch_to_device(batch: tuple[torch.Tensor, ...], device: torch.device) 
     return tuple(item.to(device, non_blocking=True) for item in batch)
 
 
+def resolve_column_offset(changed_by_probe: dict[int, list[int]], n_cols: int) -> int:
+    """Column offset of codec wavelength-token 0 inside the code tensor.
+
+    The 272 wavelength tokens occupy a contiguous block of the ``n_cols`` code
+    columns, so the offset is one of 0..(n_cols - 272) (typically {0, 1}: the
+    normalization token sits before or after the block). Each candidate is
+    scored by the summed distance of the probe-changed columns to their spiked
+    token position; the minimum wins. Robust to receptive-field leakage
+    flipping asymmetric neighbours (which biases mean/median estimates).
+    """
+    n_candidates = n_cols - N_SPEC_TOKENS_EXPECTED
+    if n_candidates < 0:
+        raise RuntimeError(f"Code tensor has {n_cols} columns < {N_SPEC_TOKENS_EXPECTED} wavelength tokens.")
+    if not any(changed_by_probe.values()):
+        raise RuntimeError("Spectrum-code column probe found no changed columns.")
+    best_offset, best_score = 0, float("inf")
+    for offset in range(n_candidates + 1):
+        score = sum(
+            abs(c - (offset + q_probe))
+            for q_probe, cols in changed_by_probe.items()
+            for c in cols
+        )
+        if score < best_score:
+            best_offset, best_score = offset, score
+    return best_offset
+
+
+N_SPEC_TOKENS_EXPECTED = 272  # codec grid: 8704 px / 32 px per token
+
+
 class AIONTokenEncoder(nn.Module):
     """Frozen AION encoder wrapped to return tokens and per-token modality ids.
 
@@ -719,8 +749,10 @@ class AIONTokenEncoder(nn.Module):
         Probed once with two spikes placed at raw pixels of two KNOWN codec
         tokens (the codec grid starts at 3500 A, the raw DESI grid at 3600 A,
         so codec token q covers raw pixels [32q - 125, 32q - 93)). The offset
-        is the median of (changed column - spiked token) over both probes,
-        which is robust to receptive-field leakage into neighbouring columns.
+        is geometrically constrained to 0..(n_cols - 272) (the norm token sits
+        before or after the contiguous wavelength block), so it is resolved by
+        scoring those few candidates against the changed columns -- robust to
+        asymmetric receptive-field leakage that biased a median estimate.
         """
         if getattr(self, "_spec_col_offset", None) is not None:
             return self._spec_col_offset
@@ -740,16 +772,14 @@ class AIONTokenEncoder(nn.Module):
             return td[self._spec_key(td)]
 
         base_code = code_of(base)
-        diffs: list[int] = []
+        changed_by_probe: dict[int, list[int]] = {}
         for q_probe in (20, 60):
             p_lo, p_hi = token_to_raw_pixels(q_probe)
             spike = base.clone()
             spike[0, p_lo:p_hi] = 25.0
             changed = (base_code != code_of(spike)).nonzero()
-            diffs.extend(int(c) - q_probe for c in sorted(set(changed[:, -1].tolist())))
-        if not diffs:
-            raise RuntimeError("Spectrum-code column probe found no changed columns.")
-        self._spec_col_offset = int(np.median(diffs))
+            changed_by_probe[q_probe] = sorted(set(int(c) for c in changed[:, -1].tolist()))
+        self._spec_col_offset = resolve_column_offset(changed_by_probe, int(base_code.shape[-1]))
         return self._spec_col_offset
 
     def encode_tokens(
@@ -785,6 +815,12 @@ class AIONTokenEncoder(nn.Module):
             key = self._spec_key(token_dict)
             offset = self._locate_spec_columns(flux.device, wavelength)
             n_tok = spectrum_token_mask.shape[1]
+            n_cols = int(token_dict[key].shape[1])
+            if offset + n_tok > n_cols:
+                raise RuntimeError(
+                    f"Spectrum-code offset {offset} + {n_tok} tokens exceeds the "
+                    f"{n_cols}-column code tensor -- column probe misresolved."
+                )
             if mask_mode == "drop":
                 col_mask = torch.zeros(
                     token_dict[key].shape[:2], dtype=torch.bool, device=flux.device

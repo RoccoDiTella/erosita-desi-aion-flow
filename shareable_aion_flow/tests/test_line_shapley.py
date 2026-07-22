@@ -113,3 +113,15 @@ def test_pair_accumulator_symmetry() -> None:
     mean, se, count = acc.table()
     assert mean[0, 2] == mean[2, 0] == 0.5
     assert count[1, 0] == 0
+
+
+def test_resolve_column_offset_robust_to_asymmetric_leak() -> None:
+    from shareable_aion_flow.data_to_aion_embeddings import resolve_column_offset
+
+    # norm token first (offset 1), leakage flips a heavily one-sided neighbour
+    # cluster -- the exact failure that broke job 34278949 (median gave ~7)
+    changed = {20: [21, 22, 23, 24, 25, 26, 27], 60: [61, 62, 63, 64, 65, 66, 67]}
+    assert resolve_column_offset(changed, 273) == 1
+    # norm token last (offset 0), symmetric leak
+    changed = {20: [19, 20, 21], 60: [59, 60, 61]}
+    assert resolve_column_offset(changed, 273) == 0
