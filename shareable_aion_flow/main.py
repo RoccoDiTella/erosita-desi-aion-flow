@@ -221,6 +221,7 @@ def validation_metrics(
     prior: KDEPrior | None = None,
     device: torch.device,
     error_mode: str = "none",
+    inject_samples: int = 1,
     r2_samples: int = 64,
 ) -> dict[str, float]:
     """Per-epoch validation panel (RunPod-era standard): per-combo NLL, R², IG.
@@ -450,6 +451,7 @@ def train(args: argparse.Namespace) -> None:
             prior=prior,
             device=device,
             error_mode=args.error_mode,
+            inject_samples=args.inject_samples,
         )
         val_nll = val_metrics["val/all_inputs_nll"]
         train_nll = float(np.average(train_losses, weights=train_counts))
