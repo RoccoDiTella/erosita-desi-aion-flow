@@ -713,32 +713,6 @@ class AIONTokenEncoder(nn.Module):
         padded = torch.nn.functional.pad(flux.unsqueeze(1), (pad, pad), mode="reflect").squeeze(1)
         return padded.unfold(-1, k, 1).median(dim=-1).values
 
-    def _sanitize_masked_pixels(
-        self, flux: torch.Tensor, spectrum_token_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Fill the raw pixels under masked CODEC tokens with the median continuum.
-
-        The codec token grid starts at 3500 A while the raw DESI grid starts at
-        3600 A, so codec token q covers raw pixels [32q - 125, 32q - 93).
-        """
-        try:
-            from .line_shapley import token_to_raw_pixels
-        except ImportError:
-            from line_shapley import token_to_raw_pixels
-
-        cont = self._median_continuum(flux)
-        n_raw = flux.shape[-1]
-        pixel_mask = torch.zeros_like(flux, dtype=torch.bool)
-        for q in range(spectrum_token_mask.shape[1]):
-            col = spectrum_token_mask[:, q]
-            if not bool(col.any()):
-                continue
-            p_lo, p_hi = token_to_raw_pixels(q)
-            p_lo, p_hi = max(p_lo, 0), min(p_hi, n_raw)
-            if p_lo < p_hi:
-                pixel_mask[col, p_lo:p_hi] = True
-        return torch.where(pixel_mask, cont, flux)
-
     def _locate_spec_columns(self, device: torch.device, wavelength: torch.Tensor) -> int:
         """Code-column offset of CODEC wavelength-token 0 in the code tensor.
 
@@ -790,22 +764,18 @@ class AIONTokenEncoder(nn.Module):
         ``mask_mode="drop"`` (default) removes masked tokens the AION-native way:
         they are marked invalid in the encoder input mask, so backbone attention
         never sees them (partial input is the pretraining task) and they come
-        back as group id -1 (padding) for the head to skip. ``"replace"`` is the
-        legacy behaviour: swap the masked token codes for the source's own
-        101-px median-filtered continuum codes. The normalization token is never
-        masked in either mode, so both variants condition on overall brightness.
+        back as group id -1 (padding) for the head to skip. Nothing is replaced
+        or imputed; codec receptive-field leakage into neighbouring KEPT tokens
+        is handled upstream by the guard band in ``player_token_map``.
+        ``"replace"`` is the legacy behaviour: swap the masked token codes for
+        the source's own 101-px median-filtered continuum codes. The
+        normalization token is never masked in either mode, so both variants
+        condition on overall brightness.
         """
         flux, ivar, wavelength, redshift, wise, image = batch[:6]
         codec = self._codec(flux.device)
-        if spectrum_token_mask is not None and "spectra" in combo and mask_mode == "drop":
-            # Sanitize the masked pixel windows BEFORE the codec: its ConvNeXt
-            # encoder has a multi-token receptive field, so codes of KEPT
-            # neighbouring tokens would otherwise still see the masked line.
-            # The sanitized fill is this source's own 101-px median continuum;
-            # the filled tokens themselves are then dropped from the encoder
-            # input below, so the fill only controls what neighbours see.
+        if spectrum_token_mask is not None:
             spectrum_token_mask = spectrum_token_mask.to(flux.device)
-            flux = self._sanitize_masked_pixels(flux, spectrum_token_mask)
         modalities = self._modalities(flux, ivar, wavelength, redshift, wise, image, combo)
         token_dict = codec.encode(*modalities)
         input_mask_dict = None

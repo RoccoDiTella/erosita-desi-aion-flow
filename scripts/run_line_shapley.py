@@ -43,7 +43,7 @@ ACCENT, LINEC = "#0072B2", "#D55E00"
 
 @torch.no_grad()
 def coalition_summary(*, encoder, context_encoder, flow, loader, standardizer,
-                      players, device, mask_mode) -> pd.DataFrame:
+                      players, device, mask_mode, line_guard_tokens=1) -> pd.DataFrame:
     """Mean test log-likelihood of four fixed coalitions.
 
     full = no mask; lines_only = drop all continuum tokens; continuum_only =
@@ -64,7 +64,7 @@ def coalition_summary(*, encoder, context_encoder, flow, loader, standardizer,
             "norm_only": np.ones((B, N_SPEC_TOKENS), dtype=bool),
         }
         for b in range(B):
-            tok = player_token_map(float(z_np[b]), players)
+            tok = player_token_map(float(z_np[b]), players, line_guard_tokens)
             for j, t in enumerate(tok):
                 if not len(t):
                     continue
@@ -85,16 +85,18 @@ def coalition_summary(*, encoder, context_encoder, flow, loader, standardizer,
     )
 
 
-def mean_tokens_per_player(loader, players) -> np.ndarray:
+def mean_tokens_per_player(loader, players, line_guard_tokens=1) -> tuple[np.ndarray, np.ndarray]:
     counts = np.zeros(len(players))
     avail = np.zeros(len(players))
+    total = 0
     for batch in loader:
         for z in batch[3].detach().cpu().numpy().ravel():
-            for j, t in enumerate(player_token_map(float(z), players)):
+            total += 1
+            for j, t in enumerate(player_token_map(float(z), players, line_guard_tokens)):
                 if len(t):
                     counts[j] += len(t)
                     avail[j] += 1
-    return counts / np.maximum(avail, 1)
+    return counts / np.maximum(avail, 1), avail / max(total, 1)
 
 
 def main() -> None:
@@ -107,6 +109,9 @@ def main() -> None:
     ap.add_argument("--pair-sweeps", type=int, default=3)
     ap.add_argument("--mask-mode", choices=["drop", "replace"], default=None,
                     help="Defaults to the checkpoint config's mask_mode, else drop.")
+    ap.add_argument("--line-guard-tokens", type=int, default=1,
+                    help="Extra tokens dropped on each side of a line window "
+                    "(codec effective receptive field; see codec_leakage_probe.py).")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
@@ -131,7 +136,7 @@ def main() -> None:
     summary = coalition_summary(
         encoder=encoder, context_encoder=context_encoder, flow=flow,
         loader=test_loader, standardizer=standardizer, players=players,
-        device=device, mask_mode=mask_mode,
+        device=device, mask_mode=mask_mode, line_guard_tokens=args.line_guard_tokens,
     )
     summary.to_csv(out_dir / "coalition_summary.csv", index=False)
     print(summary.to_string(index=False), flush=True)
@@ -140,11 +145,12 @@ def main() -> None:
         encoder=encoder, context_encoder=context_encoder, flow=flow,
         loader=test_loader, standardizer=standardizer, players=players,
         device=device, n_full_sweeps=args.full_sweeps, n_line_sweeps=args.line_sweeps,
-        n_pair_sweeps=args.pair_sweeps, mask_mode=mask_mode, seed=args.seed,
+        n_pair_sweeps=args.pair_sweeps, mask_mode=mask_mode,
+        line_guard_tokens=args.line_guard_tokens, seed=args.seed,
     )
 
     phi, se, count = acc.table()
-    mean_tok = mean_tokens_per_player(test_loader, players)
+    mean_tok, avail_frac = mean_tokens_per_player(test_loader, players, args.line_guard_tokens)
     table = pd.DataFrame({
         "player": [p["name"] for p in players],
         "kind": [p["kind"] for p in players],
@@ -152,6 +158,9 @@ def main() -> None:
         "phi_nats": phi, "se_nats": se, "n_samples": count,
         "mean_tokens": mean_tok,
         "phi_per_token": phi / np.maximum(mean_tok, 1e-9),
+        # phi is conditional on availability; the population view weights by it
+        "availability_frac": avail_frac,
+        "phi_population": phi * avail_frac,
     })
     table.to_csv(out_dir / "shapley_table.csv", index=False)
 

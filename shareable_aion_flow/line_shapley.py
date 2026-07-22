@@ -92,12 +92,19 @@ def player_catalog(n_cont_bins: int = 24) -> list[dict]:
     return players
 
 
-def player_token_map(z: float, players: list[dict]) -> list[np.ndarray]:
+def player_token_map(
+    z: float, players: list[dict], line_guard_tokens: int = 1
+) -> list[np.ndarray]:
     """Codec-token indices (0..271) claimed by each player at this z.
 
     A token belongs to a player when its observed-wavelength CENTRE falls in
     the player's rest window; line players (first in the catalog) claim first.
-    Tokens outside the DESI observed coverage are unusable for everyone.
+    Line claims are dilated by ``line_guard_tokens`` on each side: the codec's
+    ConvNeXt encoder has a multi-token effective receptive field, so codes of
+    tokens adjacent to a line carry line information -- the guard band removes
+    them together with the line (measured by scripts/codec_leakage_probe.py).
+    Continuum bins get no guard (10-20 tokens wide; boundary blur is a small
+    fractional effect there). Tokens outside DESI coverage are unusable.
     """
     lo, hi = token_obs_wavelength_edges()
     rest_center = (0.5 * (lo + hi)) / (1.0 + z)
@@ -106,6 +113,11 @@ def player_token_map(z: float, players: list[dict]) -> list[np.ndarray]:
     for p in players:
         sel = (rest_center >= p["rest_lo"]) & (rest_center <= p["rest_hi"]) & ~claimed
         idx = np.flatnonzero(sel)
+        if len(idx) and p["kind"] == "line" and line_guard_tokens > 0:
+            g = int(line_guard_tokens)
+            widened = np.arange(idx.min() - g, idx.max() + g + 1)
+            widened = widened[(widened >= 0) & (widened < N_SPEC_TOKENS)]
+            idx = widened[~claimed[widened]]
         claimed[idx] = True
         out.append(idx.astype(np.int64))
     return out
@@ -210,6 +222,7 @@ def run_sweeps(
     n_line_sweeps: int = 4,
     n_pair_sweeps: int = 3,
     mask_mode: str = "drop",
+    line_guard_tokens: int = 1,
     seed: int = 0,
     z_edges: tuple[float, ...] = (0.0, 0.5, 1.0, 1.7, 99.0),
 ) -> tuple[ShapleyAccumulator, PairInteractionAccumulator]:
@@ -226,7 +239,7 @@ def run_sweeps(
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
             z_np = batch[3].detach().cpu().numpy().ravel()
             B = len(z_np)
-            tok_maps = [player_token_map(float(z), players) for z in z_np]
+            tok_maps = [player_token_map(float(z), players, line_guard_tokens) for z in z_np]
             avail = [[j for j, t in enumerate(m) if len(t)] for m in tok_maps]
             z_bins = np.clip(np.searchsorted(z_edges, z_np, side="right") - 1, 0, len(z_edges) - 2)
 

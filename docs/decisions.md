@@ -276,10 +276,12 @@ defects found in v1, all fixed for the v2 re-run (commit 26219e5):**
 1. *Replace-mode leakage:* the 101-px (~81 Å observed) median filter fails to
    erase BROAD lines at low z (broad Hα FWHM 5–10k km/s = 140–290 Å observed at
    z≈0.3), so "removed" Hα left a smoothed line bump → φ(Hα) biased low. Fix:
-   **mask_mode=drop** — masked pixel windows sanitized (median fill) BEFORE the
-   codec, then tokens dropped via AION's native `embed_inputs` input mask
-   (partial input = the pretraining task); dropped positions become group id −1
-   and the head skips them via key_padding_mask (pad-invariance unit-tested).
+   **mask_mode=drop, pure removal (user's design)** — tokens dropped via AION's
+   native `embed_inputs` input mask (partial input = the pretraining task);
+   dropped positions become group id −1 and the head skips them via
+   key_padding_mask (pad-invariance unit-tested). NOTHING is replaced or
+   imputed in pixel space (an earlier sanitize-fill variant was rejected: the
+   fill is synthetic and coalition-dependent, contaminating every marginal).
 2. *Codec-grid misalignment:* token wavelengths assumed the DESI 3600 Å grid but
    the codec latent grid starts at 3500 Å (aion/codecs/spectrum.py) — 100 Å =
    3.9 tokens; the integer probe absorbed 3, leaving all masks ~23 Å blueshifted
@@ -287,8 +289,14 @@ defects found in v1, all fixed for the v2 re-run (commit 26219e5):**
    dual-spike median-offset probe.
 3. *Codec receptive field:* the spectrum codec encoder is a ConvNeXt (k7
    depthwise, 4 scales) — theoretical RF ≈ ±26 tokens, so KEPT neighbour codes
-   see the line; pixel sanitization before encoding closes this channel.
-   `scripts/codec_leakage_probe.py` measures the empirical radius.
+   see the line. Fix (user's design): `scripts/codec_leakage_probe.py` injects
+   synthetic lines and measures the EFFECTIVE leak radius empirically; line
+   windows are then dropped with a **guard band** of that radius
+   (`--line-guard-tokens`, auto-set from the probe's RECOMMENDED_GUARD output
+   in the launch chain; default 1). Guard applies to line players only —
+   continuum bins are 10–20 tokens wide, boundary blur is fractionally small.
+   Cost: guard-band continuum info is attributed to the line (bias up, bounded
+   by 2·guard·(per-token continuum density) ≈ 0.6 mnats/side at v1 densities).
    Broad-line windows widened ±80→±120 Å (BLR wings).
 Fairness note (per-token view of v1): lines 0.215 vs continuum 0.293
 mnats/token — the continuum's 10× total dominance is mostly token count
@@ -296,7 +304,10 @@ mnats/token — the continuum's 10× total dominance is mostly token count
 v2 sweeps add: line-PAIR Shapley interactions (Owen base + 29 flip configs =
 all 21 pairs + bonus single marginals; estimator verified against an analytic
 stub) and a direct coalition summary (full / lines-only / continuum-only /
-norm-only). Hα caveat stands regardless: available only at z<0.5 (33% of
+norm-only). Prevalence accounting (user request): shapley_table now carries
+`phi_per_token` (window-size fairness) and `availability_frac` +
+`phi_population` = φ·P(available) (population-level importance vs the
+conditional φ). Hα caveat stands regardless: available only at z<0.5 (33% of
 sources), so φ(Hα) is conditioned on that subpopulation and its SE (±0.5 mnats
 in v1) cannot separate 0 from Hβ-level.
 

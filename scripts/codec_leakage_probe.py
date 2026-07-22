@@ -1,18 +1,17 @@
 #!/usr/bin/env python
-"""Quantify spectrum-codec leakage of line information into neighbouring tokens.
+"""Measure the spectrum codec's EFFECTIVE receptive field at the token level.
 
 The codec encoder is a ConvNeXt (kernel-7 depthwise convs over 4 scales,
 theoretical receptive field ~1,700 px = ~26 tokens per side), so token CODES
 near a line can carry line information even when the line's own tokens are
-dropped. This probe measures it empirically:
+dropped. Remedy (user-chosen design): drop the line window PLUS a guard band of
+the empirically measured effective radius -- nothing is replaced or imputed.
 
-A. Add a Gaussian emission line at a known codec token to a realistic smooth
-   continuum; report which code columns change vs the line-free spectrum, as a
-   function of distance from the line (leakage radius).
-B. Same spectrum, but with the line's pixel window sanitized (median-continuum
-   fill, as done by mask_mode=drop before encoding): count surviving changed
-   columns outside the window (should be ~none).
-C. Report whether the normalization token changes (a line shifts total flux).
+This probe injects a Gaussian emission line at known codec tokens on a smooth
+continuum and reports which code columns change relative to the line-free
+spectrum, as a function of distance from the line. The last line of output is
+machine-readable: RECOMMENDED_GUARD=<n> (max observed leak distance beyond the
+line's own 3-sigma token window, over all probed positions and widths).
 
 Runs on CPU in ~a minute. Usage: python scripts/codec_leakage_probe.py
 """
@@ -64,6 +63,7 @@ def main() -> None:
     offset = encoder._locate_spec_columns(device, wave)
     print(f"code columns: {base_code.shape[-1]}, wavelength-token column offset: {offset}")
 
+    max_leak = 0
     for q_line in (30, 120, 200):
         p_lo, p_hi = token_to_raw_pixels(q_line)
         center = float(wave_np[(p_lo + p_hi) // 2])
@@ -71,34 +71,22 @@ def main() -> None:
             line = torch.tensor(
                 gaussian_line(wave_np, center, fwhm, amp), dtype=torch.float32
             ).unsqueeze(0)
-            spec = cont + line
-
-            # A: raw leakage radius
-            changed = (base_code != code_of(spec))[0].nonzero().ravel().tolist()
+            changed = (base_code != code_of(cont + line))[0].nonzero().ravel().tolist()
             wl_cols = [c - offset for c in changed if 0 <= c - offset]
             norm_changed = len(wl_cols) != len(changed)
             dists = sorted(c - q_line for c in wl_cols)
-            # window tokens the line SHOULD occupy (3 sigma)
             sig_tok = center * (fwhm / 299792.458) / 2.355 / (GRID_STEP * PIX_PER_TOKEN)
-            in_window = [d for d in dists if abs(d) <= max(1, int(np.ceil(3 * sig_tok)))]
-            out_window = [d for d in dists if d not in in_window]
+            window = max(1, int(np.ceil(3 * sig_tok)))
+            leaked = [d for d in dists if abs(d) > window]
+            leak_radius = max((abs(d) - window for d in leaked), default=0)
+            max_leak = max(max_leak, leak_radius)
             print(
                 f"token {q_line} fwhm={fwhm:6.0f} km/s amp={amp}: "
-                f"{len(dists)} cols changed, window +-{max(1, int(np.ceil(3 * sig_tok)))}: "
-                f"{len(in_window)} inside, LEAKED outside: {sorted(set(out_window))} "
+                f"{len(dists)} cols changed, 3-sigma window +-{window}: "
+                f"leaked outside at {sorted(set(leaked))} -> radius {leak_radius} "
                 f"(norm token changed: {norm_changed})"
             )
-
-            # B: sanitized-drop residual leakage
-            mask_tokens = [q for q in range(256) if abs(q - q_line) <= max(1, int(np.ceil(3 * sig_tok)))]
-            sanitized = spec.clone()
-            for q in mask_tokens:
-                a, b = token_to_raw_pixels(q)
-                a, b = max(a, 0), min(b, N_RAW)
-                sanitized[0, a:b] = cont[0, a:b]
-            resid = (base_code != code_of(sanitized))[0].nonzero().ravel().tolist()
-            resid_wl = [c - offset - q_line for c in resid if 0 <= c - offset]
-            print(f"    after pixel-sanitize of the window: changed cols rel line = {sorted(set(resid_wl))}")
+    print(f"RECOMMENDED_GUARD={max(1, max_leak)}")
 
 
 if __name__ == "__main__":
