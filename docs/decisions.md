@@ -139,7 +139,7 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | paper (published) | q4/l2, none | noisy, paper split (n_test 3,054) | 50 | **0.549** (best combo 0.554) | 1.40 | reference |
 | smoke v1 | V1, convolve | clean view, 667 rows | 2 | 0.29 (plumbing only) | — | done |
 | smoke repro | q4/l2, none | paper subset, 667 rows | 2 | 0.02 (plumbing only) | — | done |
-| `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | *pending* | *pending* | running |
+| `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | **0.569** (best combo S+z+I: 0.572) | 1.23 (IG +0.205) | ✅ done (1:34 wall) |
 | `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | *pending* | *pending* | queued |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
 | other targets (log_lx, logmstar, hr32_u) | V1, convolve | clean view | 15 | | | deferred (first runs cancelled) |
@@ -154,4 +154,14 @@ upset-style combo figure, per-spectype and per-redshift slices.
 Comparison caveats: the cleaned-view test set (2,520 cleaned rows) ≠ the paper
 test set (3,054 noisy rows) — deltas vs the paper are indicative, not
 row-comparable (the provenance report quantifies overlap). HR reports
-IG as primary (R² is not meaningful near the clip).
+IG as primary (R² is not meaningful near the clip). Convolved IG is
+systematically smaller than plain IG for the same model (the predictive
+includes measurement noise), so IG is only comparable within an error mode.
+
+**First result (2026-07-21): V1 + clean + convolve reaches all-inputs R² 0.569
+in 15 epochs** — above the published 0.549 (noisy test) and at the level of the
+paper-model-on-clean anchor 0.567, with 2× fewer head parameters and 3× fewer
+epochs. Modality ordering matches the paper qualitatively (z < wise < image <
+spectra < multi-modal); spectra-only 0.512 (paper 0.480), z-only 0.199 (paper
+0.140). z adds ~nothing on top of S+I (0.572 → 0.569 all-inputs), echoing the
+paper's z-drop quirk.
