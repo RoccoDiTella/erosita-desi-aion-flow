@@ -174,3 +174,18 @@ density sharpness (IG 0.218 vs 0.205 nats); both deltas ≈1σ of test-set noise
 Kernel-misspecification note: observation-space eval is proper (wrong σ cannot
 inflate it), but the *latent* decomposition is not certified by it — the
 σ-stratified calibration panel must be flat before any intrinsic-scatter claim.
+
+**Error-treatment decisions (2026-07-21, post-calibration-check):**
+- **σ-conditioning is ruled out** (p(y|x,σ)): σ is metadata of the measurement
+  being predicted — unavailable at deployment and it leaks the target
+  (σ ∝ 1/√counts ∝ flux). Error info may enter the LOSS, never the conditioning
+  set; convolve/inject keep the model σ-free at inference by design.
+- σ-stratified predictive coverage (both heads, identical pattern): mid/high-σ
+  over-coverage is partly an artifact (the 15-epoch flow barely deconvolves, and
+  the widened-interval diagnostic then double-counts noise); the surviving real
+  signal is **low-σ under-coverage 0.56±0.02 vs 0.68** — overconfidence on
+  precise sources, consistent with an epoch-mismatch AGN-variability floor
+  missing from the kernel. Not a blocker for point metrics or model comparisons.
+- Queued fixes, in order: residual regression Var(y−p50)=a·σ²+b (free, decisive
+  on kernel scale + floor); one learned noise-floor scalar in the kernel (still
+  σ-free at inference); reassess after a 50-epoch run (does the latent sharpen?).
