@@ -140,7 +140,7 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | smoke v1 | V1, convolve | clean view, 667 rows | 2 | 0.29 (plumbing only) | — | done |
 | smoke repro | q4/l2, none | paper subset, 667 rows | 2 | 0.02 (plumbing only) | — | done |
 | `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | **0.569** (best combo S+z+I: 0.572) | 1.23 (IG +0.205) | ✅ done (1:34 wall) |
-| `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | *pending* | *pending* | queued |
+| `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | 0.555 (best combo S+I: 0.556) | **1.24 (IG +0.218)** | ✅ done (1:43 wall) |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
 | other targets (log_lx, logmstar, hr32_u) | V1, convolve | clean view | 15 | | | deferred (first runs cancelled) |
 
@@ -165,3 +165,12 @@ epochs. Modality ordering matches the paper qualitatively (z < wise < image <
 spectra < multi-modal); spectra-only 0.512 (paper 0.480), z-only 0.199 (paper
 0.140). z adds ~nothing on top of S+I (0.572 → 0.569 all-inputs), echoing the
 paper's z-drop quirk.
+
+**Head A/B verdict (2026-07-21):** on identical clean data + convolve, V1 vs
+paper q4/l2: V1 better point prediction (R² 0.569 vs 0.555), paper head better
+density sharpness (IG 0.218 vs 0.205 nats); both deltas ≈1σ of test-set noise.
+**Decision: the V1 head is not the bottleneck → use V1 for the per-target sweep**
+(2× cheaper head; paper head kept for the eventual paper-config reproduction).
+Kernel-misspecification note: observation-space eval is proper (wrong σ cannot
+inflate it), but the *latent* decomposition is not certified by it — the
+σ-stratified calibration panel must be flat before any intrinsic-scatter claim.

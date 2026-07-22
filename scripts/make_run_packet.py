@@ -42,8 +42,17 @@ def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
 
-def attach_metadata(predictions: pd.DataFrame, staged_dir: Path) -> pd.DataFrame:
-    """Join redshift + spectype by targetid from the staged files (dedup'd)."""
+TARGET_SIG_COLS = {
+    "log_ml_flux_1": ("flux_sig_lo", "flux_sig_hi"),
+    "log_lx": ("flux_sig_lo", "flux_sig_hi"),
+    "logmstar": ("logmstar_sig", "logmstar_sig"),
+    "hr32_u": ("hr32_u_sig", "hr32_u_sig"),
+}
+
+
+def attach_metadata(predictions: pd.DataFrame, staged_dir: Path, target: str) -> pd.DataFrame:
+    """Join redshift + spectype + per-source sigma by targetid (dedup'd)."""
+    sig_cols = TARGET_SIG_COLS.get(target)
     frames = []
     for split in ("train", "val", "test"):
         with h5py.File(staged_dir / f"desi_{split}.hdf5", "r") as handle:
@@ -53,6 +62,10 @@ def attach_metadata(predictions: pd.DataFrame, staged_dir: Path) -> pd.DataFrame
             }
             if "spectype" in handle:
                 data["spectype"] = [s.decode() for s in handle["spectype"][:]]
+            if sig_cols and all(c in handle for c in sig_cols):
+                data["sigma"] = 0.5 * (
+                    handle[sig_cols[0]][:].astype(np.float64) + handle[sig_cols[1]][:].astype(np.float64)
+                )
             frames.append(pd.DataFrame(data))
     meta = pd.concat(frames, ignore_index=True).drop_duplicates("targetid")
     return predictions.merge(meta, on="targetid", how="left")
@@ -148,6 +161,44 @@ def page_calibration(pdf: PdfPages, predictions: pd.DataFrame, order: list[str])
     ax2.set_yticks(y, table["input_group"], fontsize=8)
     ax2.set_xlabel("fraction below median (nominal 0.50)")
     fig.suptitle("Posterior calibration")
+    fig.tight_layout()
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+
+def page_coverage_by_sigma(pdf: PdfPages, predictions: pd.DataFrame, n_bins: int = 5) -> None:
+    """Kernel-consistency diagnostic: 68% coverage stratified by measurement σ.
+
+    If the assumed kernel widths are systematically wrong, no single latent flow
+    can be calibrated at every noise level — coverage then trends with σ instead
+    of sitting flat at 0.68. A flat panel is a precondition for interpreting the
+    flow as the intrinsic (deconvolved) distribution.
+    """
+    frame = predictions.loc[predictions["input_group"].eq("spectra+z+wise+image")]
+    if "sigma" not in frame.columns or frame["sigma"].isna().all() or frame.empty:
+        return
+    frame = frame.dropna(subset=["sigma"])
+    edges = np.quantile(frame["sigma"], np.linspace(0, 1, n_bins + 1))
+    rows = []
+    for k in range(n_bins):
+        sub = frame.loc[(frame["sigma"] >= edges[k]) & (frame["sigma"] <= edges[k + 1])]
+        if len(sub) < 30:
+            continue
+        rows.append({
+            "sigma_mid": float(sub["sigma"].median()),
+            "n": len(sub),
+            "cov68": float(((sub["y_true"] >= sub["posterior_p16"]) & (sub["y_true"] <= sub["posterior_p84"])).mean()),
+        })
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    err = np.sqrt(table["cov68"] * (1 - table["cov68"]) / table["n"])
+    ax.errorbar(table["sigma_mid"], table["cov68"], yerr=err, marker="o", capsize=3)
+    ax.axhline(0.68, color="black", linestyle="--", linewidth=1)
+    ax.set_xlabel("measurement σ (dex, split-normal mean width)")
+    ax.set_ylabel("coverage of [p16, p84]")
+    ax.set_title("Kernel consistency: coverage vs measurement σ (all-inputs)\nflat at 0.68 ⇒ kernel scale consistent across noise levels")
     fig.tight_layout()
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
@@ -254,13 +305,14 @@ def main() -> None:
 
     packet_dir = run_dir / "packet"
     packet_dir.mkdir(exist_ok=True)
-    predictions = attach_metadata(predictions, args.staged_dir)
+    predictions = attach_metadata(predictions, args.staged_dir, target)
     order = combo_sort_order(metrics)
 
     with PdfPages(packet_dir / "test_diagnostics.pdf") as pdf:
         page_scatter(pdf, predictions, order, target)
         page_info_gain_hist(pdf, predictions, order)
         page_calibration(pdf, predictions, order)
+        page_coverage_by_sigma(pdf, predictions)
     upset_plot(metrics, packet_dir / "upset_metrics.pdf")
     slice_tables(predictions, order, packet_dir)
     print(f"packet written to {packet_dir}: test_diagnostics.pdf, upset_metrics.pdf, "
