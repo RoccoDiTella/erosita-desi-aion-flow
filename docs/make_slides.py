@@ -182,6 +182,12 @@ def main() -> None:
                  fontsize=10.5, color=MUTED)
         pdf.savefig(fig); plt.close(fig)
 
+        # ---- 5c Line coverage
+        fig, ax = new_slide("Emission-line coverage",
+                            "each spectrum covers 3600-9824 A observed; in rest frame that window slides with z")
+        image_panel(fig, FIGS / "fig_line_coverage.png", (0.06, 0.05, 0.88, 0.72))
+        pdf.savefig(fig); plt.close(fig)
+
         # ---- 6 Results
         runs = [
             ("V_simple · convolve", args.v1_metrics),
