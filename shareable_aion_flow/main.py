@@ -172,24 +172,32 @@ def batch_nll(
     target_std = standardizer.transform_tensor(target)
     tokens, group_ids = encoder.encode_tokens(batch, combo)
     context = context_encoder(tokens, group_ids)
+    log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode)
+    loss = -log_prob.mean()
+    if not torch.isfinite(loss):
+        raise FloatingPointError(f"Non-finite NLL for combo={'+'.join(combo)}.")
+    return loss
 
+
+def _log_prob_with_error(
+    flow: ConditionalNSFFlow,
+    target_std: torch.Tensor,
+    context: torch.Tensor,
+    batch: tuple[torch.Tensor, ...],
+    standardizer: TargetStandardizer,
+    error_mode: str,
+) -> torch.Tensor:
+    """Flow log-prob under the run's error mode, given a precomputed context."""
     has_err = error_mode != "none" and len(batch) >= 10 and float((batch[8].abs() + batch[9].abs()).max()) > 1e-8
     if has_err:
         sig_lo = (batch[8].abs() / standardizer.std).clamp_min(1e-6)
         sig_hi = (batch[9].abs() / standardizer.std).clamp_min(1e-6)
         if error_mode == "convolve":
-            log_prob = flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
-        elif error_mode == "inject":
-            log_prob = flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
-        else:
-            raise ValueError(f"Unknown error_mode {error_mode!r}.")
-    else:
-        log_prob = flow.log_prob(target_std, context)
-
-    loss = -log_prob.mean()
-    if not torch.isfinite(loss):
-        raise FloatingPointError(f"Non-finite NLL for combo={'+'.join(combo)}.")
-    return loss
+            return flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
+        if error_mode == "inject":
+            return flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
+        raise ValueError(f"Unknown error_mode {error_mode!r}.")
+    return flow.log_prob(target_std, context)
 
 
 @torch.no_grad()
@@ -200,17 +208,17 @@ def validation_metrics(
     flow: ConditionalNSFFlow,
     val_loader,
     standardizer: TargetStandardizer,
+    prior: KDEPrior | None = None,
     device: torch.device,
     error_mode: str = "none",
     r2_samples: int = 64,
 ) -> dict[str, float]:
-    """Per-epoch validation panel: all-inputs + per-single-modality NLL and R².
+    """Per-epoch validation panel (RunPod-era standard): per-combo NLL, R², IG.
 
-    ``val/all_inputs_nll`` stays the checkpoint criterion. The singles make the
-    modality story watchable during training, and ``val/r2_all_inputs`` (from the
-    posterior mean of ``r2_samples`` flow draws; R² is affine-invariant so it is
-    computed in standardized space) tracks the headline point metric per epoch.
-    Costs ~5 extra val-set forwards per epoch — small next to a training epoch.
+    For all-inputs and each single modality: one AION encode per combo per batch,
+    from which NLL (error-mode consistent), posterior-mean R²/RMSE (affine-
+    invariant, computed in standardized space), and info gain vs the KDE prior
+    all follow. ``val/all_inputs_nll`` stays the checkpoint criterion.
     """
     encoder.eval()
     context_encoder.eval()
@@ -218,35 +226,39 @@ def validation_metrics(
     combos: dict[str, tuple[str, ...]] = {"all_inputs": tuple(MODALITIES)}
     combos.update({modality: (modality,) for modality in MODALITIES})
     nll_sums = {name: 0.0 for name in combos}
-    total = 0
-    preds: list[np.ndarray] = []
+    preds: dict[str, list[np.ndarray]] = {name: [] for name in combos}
     trues: list[np.ndarray] = []
+    prior_lp_sum = 0.0
+    total = 0
     for batch in val_loader:
         batch = tuple(item.to(device, non_blocking=True) for item in batch)
-        n = int(batch[6].shape[0])
+        target_std = standardizer.transform_tensor(batch[6])
+        n = int(target_std.shape[0])
         total += n
+        trues.append(target_std.detach().cpu().numpy().ravel())
+        if prior is not None:
+            prior_lp_sum += float(prior.log_prob_tensor(target_std).sum().item())
         for name, combo in combos.items():
-            loss = batch_nll(
-                encoder=encoder,
-                context_encoder=context_encoder,
-                flow=flow,
-                batch=batch,
-                combo=combo,
-                standardizer=standardizer,
-                error_mode=error_mode,
-            )
-            nll_sums[name] += float(loss.item()) * n
-        tokens, group_ids = encoder.encode_tokens(batch, combos["all_inputs"])
-        context = context_encoder(tokens, group_ids)
-        samples = flow.sample(context, num_samples=r2_samples)
-        preds.append(samples.mean(dim=0).detach().cpu().numpy().ravel())
-        trues.append(standardizer.transform_tensor(batch[6]).detach().cpu().numpy().ravel())
-    y_pred = np.concatenate(preds)
+            tokens, group_ids = encoder.encode_tokens(batch, combo)
+            context = context_encoder(tokens, group_ids)
+            log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode)
+            nll_sums[name] += float(-log_prob.mean().item()) * n
+            samples = flow.sample(context, num_samples=r2_samples)
+            preds[name].append(samples.mean(dim=0).detach().cpu().numpy().ravel())
+
     y_true = np.concatenate(trues)
     ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
-    r2 = 1.0 - float(np.sum((y_true - y_pred) ** 2)) / ss_tot if ss_tot > 0 else float("nan")
-    metrics = {f"val/{name}_nll" if name != "all_inputs" else "val/all_inputs_nll": s / total for name, s in nll_sums.items()}
-    metrics["val/r2_all_inputs"] = r2
+    prior_mean_lp = prior_lp_sum / total if prior is not None else None
+    metrics: dict[str, float] = {}
+    for name in combos:
+        nll = nll_sums[name] / total
+        y_pred = np.concatenate(preds[name])
+        r2 = 1.0 - float(np.sum((y_true - y_pred) ** 2)) / ss_tot if ss_tot > 0 else float("nan")
+        metrics[f"val/{name}_nll"] = nll
+        metrics[f"val/{name}_r2"] = r2
+        metrics[f"val/{name}_rmse"] = float(np.sqrt(np.mean((y_true - y_pred) ** 2))) * standardizer.std
+        if prior_mean_lp is not None:
+            metrics[f"val/{name}_info_gain"] = prior_mean_lp - nll
     return metrics
 
 
@@ -396,7 +408,7 @@ def train(args: argparse.Namespace) -> None:
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(context_encoder.parameters()) + list(flow.parameters()), args.grad_clip
             )
             optimizer.step()
@@ -410,6 +422,8 @@ def train(args: argparse.Namespace) -> None:
                     {
                         "train/batch_nll": float(loss.item()),
                         "train/combo_size": len(combo),
+                        "train/grad_norm": float(grad_norm),
+                        "train/lr": float(optimizer.param_groups[0]["lr"]),
                         "epoch": epoch,
                     },
                     step=global_step,
@@ -421,6 +435,7 @@ def train(args: argparse.Namespace) -> None:
             flow=flow,
             val_loader=val_loader,
             standardizer=standardizer,
+            prior=prior,
             device=device,
             error_mode=args.error_mode,
         )
@@ -431,14 +446,14 @@ def train(args: argparse.Namespace) -> None:
             "epoch": epoch,
             "train_nll": train_nll,
             "val_all_inputs_nll": val_nll,
-            "val_r2_all_inputs": val_metrics["val/r2_all_inputs"],
+            "val_r2_all_inputs": val_metrics["val/all_inputs_r2"],
             "epoch_seconds": round(epoch_seconds, 1),
         }
         with metrics_path.open("a") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
         print(
             f"epoch={epoch} train_nll={train_nll:.4f} val_all_inputs_nll={val_nll:.4f} "
-            f"val_r2={val_metrics['val/r2_all_inputs']:.4f} ({epoch_seconds:.0f}s)",
+            f"val_r2={val_metrics['val/all_inputs_r2']:.4f} ig={val_metrics.get('val/all_inputs_info_gain', float('nan')):.3f} ({epoch_seconds:.0f}s)",
             flush=True,
         )
         # train/nll mixes modality combos (mostly harder, fewer-input ones), so it
@@ -449,6 +464,7 @@ def train(args: argparse.Namespace) -> None:
             "train/nll": train_nll,
             "val/best_all_inputs_nll": min(best_val, val_nll),
             "epoch_seconds": epoch_seconds,
+            "throughput/samples_per_second": float(sum(train_counts) / max(epoch_seconds, 1e-6)),
             **val_metrics,
         }
         for size, losses in size_losses.items():
