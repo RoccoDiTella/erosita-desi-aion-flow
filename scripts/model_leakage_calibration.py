@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Model-level leakage: how much injected-line information survives token drops?
+"""Model-level leakage: line info carried by tokens BEYOND the guard band.
 
 The codec-level probe (codec_leakage_probe.py) counts CODE flips, which
 saturates: a flipped code is not extractable information. This calibration
@@ -109,15 +109,29 @@ def main() -> None:
             lp_orig_full = lp(batch, None)
             lp_inj_full = lp(batch_inj, None)
             full_effect[fwhm].extend(np.abs(lp_inj_full - lp_orig_full).tolist())
-            for g in GUARDS:
+
+            def guard_mask(g):
                 mask = np.zeros((B, N_SPEC_TOKENS), dtype=bool)
                 for b in range(B):
-                    q = int(sites[b])
                     lo = min(window_tokens[b]) - g
                     hi = max(window_tokens[b]) + g
                     mask[b, max(lo, 0): min(hi + 1, N_SPEC_TOKENS)] = True
-                d = np.abs(lp(batch_inj, mask) - lp(batch, mask))
-                abs_leak[(g, fwhm)].extend(d.tolist())
+                return mask
+
+            # Sweep-relevant leak: both sides of a Shapley marginal share ONE
+            # encoding, so the injection's global-normalization shift cancels.
+            # Double difference vs a +-RFMAX drop isolates line info carried by
+            # tokens in the rings between guard g and RFMAX (continuum-loss and
+            # norm effects cancel between the injected and clean spectra).
+            RFMAX = 26
+            m26 = guard_mask(RFMAX)
+            lp_inj_26, lp_cln_26 = lp(batch_inj, m26), lp(batch, m26)
+            for g in GUARDS:
+                mask = guard_mask(g)
+                lp_inj_g, lp_cln_g = lp(batch_inj, mask), lp(batch, mask)
+                abs_leak[(g, fwhm)].extend(
+                    np.abs((lp_inj_g - lp_inj_26) - (lp_cln_g - lp_cln_26)).tolist()
+                )
 
     print(f"{'guard':>6} " + "".join(f"{f'leak fwhm={int(f)}':>18}" for f, _ in LINE_SHAPES)
           + f"{'(mnats, mean |dLL|)':>22}")
