@@ -1,12 +1,11 @@
 #!/usr/bin/env python
-"""Render the project summary as a 16:9 slide deck -> docs/slides.pdf.
+"""Render the project summary deck -> docs/slides.pdf (16:9, minimal text).
 
-Each slide is one matplotlib figure page. Content pulls from the living docs
-(pipeline.md / decisions.md are the sources of truth), the generated figures in
-docs/figures/, and per-run metrics CSVs when present. Regenerate with:
+    python docs/make_slides.py [--v1-metrics …] [--paperhead-metrics …]
+                               [--v1-inject-metrics …] [--paperhead-inject-metrics …]
 
-    python docs/make_slides.py [--v1-metrics <test_flow_metrics.csv>]
-                               [--paperhead-metrics <test_flow_metrics.csv>]
+Naming: V_PAI = paper head (4 queries, 2 layers); V_2 = minimal head (1 query,
+1 layer); V_3 reserved.
 """
 
 from __future__ import annotations
@@ -24,48 +23,46 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 DOCS = Path(__file__).resolve().parent
 FIGS = DOCS / "figures"
-SLIDE = (13.333, 7.5)  # 16:9 inches
+ASSETS = DOCS.parent / "assets"
+SLIDE = (13.333, 7.5)
 
 INK = "#1a1a1a"
-ACCENT = "#0072B2"  # Okabe-Ito blue, matching the figure palette
+ACCENT = "#0072B2"
 MUTED = "#6a6a6a"
 
+MODALITY_ORDER = [("spectra", "S"), ("z", "Z"), ("wise", "W"), ("image", "I")]
 
-def new_slide(title: str, subtitle: str = "") -> tuple[plt.Figure, plt.Axes]:
+
+def new_slide(title: str = "", subtitle: str = "") -> tuple[plt.Figure, plt.Axes]:
     fig = plt.figure(figsize=SLIDE)
     fig.patch.set_facecolor("white")
-    fig.text(0.045, 0.935, title, fontsize=24, fontweight="bold", color=INK, va="top")
+    if title:
+        fig.text(0.045, 0.935, title, fontsize=24, fontweight="bold", color=INK, va="top")
+        fig.add_artist(plt.Line2D([0.045, 0.955], [0.875, 0.875], color=ACCENT, lw=2.5, transform=fig.transFigure))
     if subtitle:
-        fig.text(0.045, 0.858, subtitle, fontsize=13, color=MUTED, va="top")
-    fig.add_artist(plt.Line2D([0.045, 0.955], [0.88, 0.88], color=ACCENT, lw=2.5, transform=fig.transFigure))
-    ax = fig.add_axes([0.045, 0.05, 0.91, 0.78])
+        fig.text(0.045, 0.855, subtitle, fontsize=12, color=MUTED, va="top")
+    ax = fig.add_axes([0.045, 0.05, 0.91, 0.77])
     ax.axis("off")
     return fig, ax
 
 
-def bullets(ax: plt.Axes, items: list[str], *, x: float = 0.0, y: float = 0.97, dy: float = 0.088, fontsize: int = 15) -> None:
+def bullets(ax: plt.Axes, items: list[str], *, x: float = 0.0, y: float = 0.97, dy: float = 0.11, fontsize: int = 14) -> None:
     for i, item in enumerate(items):
-        indent = item.startswith("  ")
-        ax.text(
-            x + (0.03 if indent else 0.0), y - i * dy,
-            ("◦  " if indent else "•  ") + item.strip(),
-            fontsize=fontsize - (1 if indent else 0), color=INK, va="top", transform=ax.transAxes, wrap=True,
-        )
+        ax.text(x, y - i * dy, "•  " + item, fontsize=fontsize, color=INK, va="top",
+                transform=ax.transAxes, wrap=True)
 
 
-def image_panel(fig: plt.Figure, path: Path, rect: tuple[float, float, float, float]) -> None:
+def image_panel(fig: plt.Figure, path: Path, rect: tuple[float, float, float, float]) -> bool:
     if not path.exists():
-        return
+        return False
     ax = fig.add_axes(rect)
     ax.imshow(mpimg.imread(path))
     ax.axis("off")
+    return True
 
 
-def metric_table(ax: plt.Axes, frame: pd.DataFrame, *, rect: tuple[float, float, float, float], fontsize: int = 11) -> None:
-    table = ax.table(
-        cellText=frame.values.tolist(), colLabels=frame.columns.tolist(),
-        cellLoc="center", bbox=rect,
-    )
+def metric_table(ax: plt.Axes, frame: pd.DataFrame, *, rect: tuple[float, float, float, float], fontsize: int = 12) -> None:
+    table = ax.table(cellText=frame.values.tolist(), colLabels=frame.columns.tolist(), cellLoc="center", bbox=rect)
     table.auto_set_font_size(False)
     table.set_fontsize(fontsize)
     for (row, _col), cell in table.get_celld().items():
@@ -75,137 +72,125 @@ def metric_table(ax: plt.Axes, frame: pd.DataFrame, *, rect: tuple[float, float,
             cell.set_text_props(color="white", fontweight="bold")
 
 
-def load_headline(metrics_csv: Path | None) -> pd.DataFrame | None:
+def load_marker_table(metrics_csv: Path | None) -> pd.DataFrame | None:
+    """Compact S/Z/W/I indicator table, R^2 + exp(IG) only, sorted by R^2."""
+    if metrics_csv is None or not Path(metrics_csv).exists():
+        return None
+    t = pd.read_csv(metrics_csv).sort_values("r2")
+    rows = []
+    for _, r in t.iterrows():
+        parts = set(str(r.input_group).split("+"))
+        row = {short: ("●" if name in parts else "·") for name, short in MODALITY_ORDER}
+        row["R²"] = f"{r.r2:.3f}"
+        row["exp(IG)"] = f"{r.exp_info_gain:.2f}"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def allinputs_numbers(metrics_csv: Path | None) -> tuple[float, float] | None:
     if metrics_csv is None or not Path(metrics_csv).exists():
         return None
     t = pd.read_csv(metrics_csv)
-    keep = ["z", "wise", "image", "spectra", "spectra+z+image", "spectra+z+wise+image"]
-    t = t[t.input_group.isin(keep)].copy()
-    t["order"] = t.input_group.map({k: i for i, k in enumerate(keep)})
-    t = t.sort_values("order")
-    out = pd.DataFrame({
-        "inputs": t.input_group,
-        "R²": t.r2.round(3),
-        "exp(IG)": t.exp_info_gain.round(2),
-        "RMSE (dex)": t.rmse.round(3),
-    })
-    return out
+    r = t[t.input_group == "spectra+z+wise+image"].iloc[0]
+    return float(r.r2), float(r.exp_info_gain)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--v1-metrics", type=Path, default=None, help="V1 + convolve run")
-    parser.add_argument("--paperhead-metrics", type=Path, default=None, help="paper head + convolve run")
-    parser.add_argument("--v1-inject-metrics", type=Path, default=None)
-    parser.add_argument("--paperhead-inject-metrics", type=Path, default=None)
+    parser.add_argument("--v1-metrics", type=Path, default=None, help="V_2 + convolve")
+    parser.add_argument("--paperhead-metrics", type=Path, default=None, help="V_PAI + convolve")
+    parser.add_argument("--v1-inject-metrics", type=Path, default=None, help="V_2 + inject")
+    parser.add_argument("--paperhead-inject-metrics", type=Path, default=None, help="V_PAI + inject")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
     args = parser.parse_args()
 
     with PdfPages(args.output) as pdf:
-        # ---- 1. Title
+        # ---- 1 Title
         fig = plt.figure(figsize=SLIDE)
-        fig.text(0.5, 0.62, "Predicting X-ray Properties from\nOptical/IR with AION + Normalizing Flows",
+        fig.text(0.5, 0.60, "Predicting X-ray Properties from Optical/IR\nwith AION + Normalizing Flows",
                  fontsize=30, fontweight="bold", ha="center", color=INK)
-        fig.text(0.5, 0.42, "Cleaned crossmatch · uncertainty-aware likelihoods · per-target flows",
-                 fontsize=16, ha="center", color=ACCENT)
-        fig.text(0.5, 0.30, "eROSITA eRASS1 × DESI DR1 × Legacy Survey  |  FASRC  |  extends the PAI26 paper",
-                 fontsize=12, ha="center", color=MUTED)
+        fig.text(0.5, 0.40, "eROSITA eRASS1 × DESI DR1 × Legacy Survey", fontsize=15, ha="center", color=ACCENT)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 2. Architecture
-        fig, ax = new_slide("Architecture", "Frozen AION-1 base (318M + codecs) → attention pooling → conditional NSF flow")
-        image_panel(fig, FIGS / "fig_architecture.png", (0.06, 0.10, 0.60, 0.66))
-        ax2 = fig.add_axes([0.68, 0.10, 0.29, 0.66]); ax2.axis("off")
+        # ---- 2 Architecture
+        fig, ax = new_slide("Architecture")
+        arch = FIGS / "fig_architecture_poster.png"
+        placed = image_panel(fig, arch, (0.03, 0.08, 0.70, 0.72)) or image_panel(fig, ASSETS / "architecture.png", (0.03, 0.08, 0.70, 0.72))
+        ax2 = fig.add_axes([0.75, 0.15, 0.23, 0.60]); ax2.axis("off")
         bullets(ax2, [
-            "Per batch: one modality combo (25% singles / pairs / triples / all)",
-            "Paper head: 4 queries, 2 layers (~16.8M)",
-            "V1 head: 1 query, 1 layer (~7.8M)",
-            "Flow: 1-D neural spline, KDE prior anchors info gain",
-            "Per-target runs: flux, Lx, logM*, HR",
-        ], fontsize=13, dy=0.14)
+            "frozen AION-1 base",
+            "attention pooling → NSF flow",
+            "V_PAI: 2 layers, 4 queries",
+            "V_2: 1 layer, 1 query",
+        ], fontsize=14, dy=0.16)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 3. Data & cleaning
-        fig, ax = new_slide("Data & NWAY cleaning", "32,092 paper rows → keep NWAY-correct only → dedup → re-split (25,200)")
-        image_panel(fig, FIGS / "fig_cleanup.png", (0.05, 0.10, 0.62, 0.66))
-        ax2 = fig.add_axes([0.69, 0.10, 0.28, 0.66]); ax2.axis("off")
+        # ---- 3 NWAY cleaning
+        fig, ax = new_slide("Crossmatch cleaning with NWAY",
+                            "Salvato+2025 (A&A 704 A344): Bayesian matching of eRASS1 X-ray sources to optical counterparts")
+        image_panel(fig, FIGS / "fig_dz_log.png", (0.04, 0.08, 0.52, 0.62))
+        ax2 = fig.add_axes([0.58, 0.08, 0.40, 0.66]); ax2.axis("off")
         bullets(ax2, [
-            "Naive 5″ match: 12.5% not confirmed",
-            "correct 26,632 · wrong 1,017 ·",
-            "  ambiguous 1,033 · spurious 1,514",
-            "Paper model 2× worse on rejects",
-            "Impossible values (log Lx=48.1)",
-            "  are all NWAY rejects",
-            "One staged copy + runtime view",
-        ], fontsize=13, dy=0.105)
+            "wrong (3.3%): different optical object",
+            "spurious (5.0%): X-ray detection itself\n     likely not real — no counterpart exists",
+            "ambiguous (3.4%): no single secure match",
+            "we keep NWAY-confirmed only (87.5%)",
+            "z_ours: DESI z of our 5″ match;\n     z_NWAY: spec-z of NWAY's counterpart",
+            "paper model 2× worse on rejects;\n     dropping them: R² 0.549 → 0.567",
+        ], fontsize=12.5, dy=0.155)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 4. Errors
-        fig, ax = new_slide("Measurement-error-aware training", "Split-normal kernel; flow learns the deconvolved density")
-        image_panel(fig, FIGS / "fig_errors.png", (0.05, 0.10, 0.62, 0.66))
-        ax2 = fig.add_axes([0.69, 0.10, 0.28, 0.66]); ax2.axis("off")
+        # ---- 4 Buchner comment (screenshot only)
+        fig = plt.figure(figsize=SLIDE)
+        fig.patch.set_facecolor("white")
+        image_panel(fig, FIGS / "johannes_buchner_comment.png", (0.05, 0.28, 0.90, 0.44))
+        pdf.savefig(fig); plt.close(fig)
+
+        # ---- 5 Errors
+        fig, ax = new_slide("Measurement errors: per-source split normal")
+        image_panel(fig, FIGS / "fig_split_normal.png", (0.04, 0.08, 0.55, 0.66))
+        ax2 = fig.add_axes([0.62, 0.15, 0.36, 0.55]); ax2.axis("off")
         bullets(ax2, [
-            "log p(y|x) = log ∫ p(t|x) K(y|t) dt",
-            "41-node quadrature, ±5σ",
-            "flux σ: −log₁₀(1−LO/F), log₁₀(1+UP/F)",
-            "HR: u = arctanh(HR), σᵤ = σ/(1−HR²)",
-            "logM*: spectype floor 0.2/0.3 dex",
-            "Eval scores through the same kernel",
-        ], fontsize=13, dy=0.105)
+            "built from catalog lo/hi limits;\n     central 68.3% exact by construction",
+            "logM★ has no catalog σ →\n     class floor: 0.2 (GALAXY) / 0.3 (QSO) dex",
+            "eval: plain likelihood at observed y —\n     no σ used at evaluation",
+        ], fontsize=13, dy=0.22)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 5. Validation & lessons
-        fig, ax = new_slide("Validation gates (and what they caught)", "No GPU-hour runs on unvalidated data")
-        bullets(ax, [
-            "validate_staged.py: schema · leakage · clean filter · σ>0 · physical ranges · derived-column consistency · fits coverage · model contract — hard gate in train.sbatch",
-            "Caught: interrupted unzip had silently dropped 62% of the sample (10,355/27,373 cutouts on disk; no error anywhere)",
-            "Caught: 4 logmstar=0 sentinel rows; out-of-range Lx/logM* rows all trace to NWAY-rejected matches",
-            "Caught (by audit): convolve-trained flows were scored un-convolved — IG was structurally understated",
-            "Break-one-thing tests: every validator check has a negative test that proves it fires",
-            "Ops: count-based idempotency · sbatch-only compute · one canonical data copy · measured timings before submits",
-        ], fontsize=14, dy=0.145)
-        pdf.savefig(fig); plt.close(fig)
-
-        # ---- 6. Results: detailed tables for the current operating mode (inject
-        # if available, else convolve), plus a cross-run summary strip.
+        # ---- 6 Results
         runs = [
-            ("V1 + convolve", "V1", "convolve", load_headline(args.v1_metrics)),
-            ("paper head + convolve", "q4/l2", "convolve", load_headline(args.paperhead_metrics)),
-            ("V1 + inject(8)", "V1", "inject", load_headline(args.v1_inject_metrics)),
-            ("paper head + inject(8)", "q4/l2", "inject", load_headline(args.paperhead_inject_metrics)),
+            ("V_2 · convolve", args.v1_metrics),
+            ("V_PAI · convolve", args.paperhead_metrics),
+            ("V_2 · inject", args.v1_inject_metrics),
+            ("V_PAI · inject", args.paperhead_inject_metrics),
         ]
-        available = [r for r in runs if r[3] is not None]
-        detail = [r for r in available if r[2] == "inject"] or available
-        fig, ax = new_slide("Results — log flux (0.2–2.3 keV), cleaned data",
-                            "Anchors: paper published 0.549 (noisy test) · paper model on clean rows 0.567")
-        for i, (label, _h, _m, table) in enumerate(detail[:2]):
-            fig.text(0.075 + 0.48 * i, 0.80, f"{label} (15 ep)", fontsize=14, fontweight="bold", color=INK)
-            metric_table(ax, table, rect=(0.03 + 0.49 * i, 0.24, 0.44, 0.52), fontsize=11)
-        if len(available) > 1:
+        available = [(label, path) for label, path in runs if load_marker_table(path) is not None]
+        detail = [r for r in available if "inject" in r[0]] or available
+        fig, ax = new_slide("Results — log flux, cleaned data",
+                            "paper anchors: 0.549 published · 0.567 on clean rows")
+        for i, (label, path) in enumerate(detail[:2]):
+            fig.text(0.10 + 0.48 * i, 0.80, label, fontsize=15, fontweight="bold", color=INK)
+            metric_table(ax, load_marker_table(path), rect=(0.03 + 0.49 * i, 0.02, 0.44, 0.90), fontsize=11)
+        if len(available) > 2:
             summary = pd.DataFrame([
-                {
-                    "run": label, "head": head, "error mode": mode,
-                    "all-inputs R²": float(t.loc[t["inputs"] == "spectra+z+wise+image", "R²"].iloc[0]),
-                    "exp(IG)": float(t.loc[t["inputs"] == "spectra+z+wise+image", "exp(IG)"].iloc[0]),
-                }
-                for label, head, mode, t in available
+                {"run": label, "R² (all)": f"{allinputs_numbers(path)[0]:.3f}", "exp(IG)": f"{allinputs_numbers(path)[1]:.2f}"}
+                for label, path in available
             ])
-            fig.text(0.075, 0.24, "Cross-run summary (all-inputs)", fontsize=13, fontweight="bold", color=INK)
-            metric_table(ax, summary, rect=(0.03, -0.08, 0.70, 0.26), fontsize=11)
-        bullets(ax, [
-            "QSO R² 0.60 vs GALAXY 0.40; signal concentrated at z < 0.7",
-        ], y=-0.12, fontsize=11, dy=0.07)
-        pdf.savefig(fig); plt.close(fig)
+            fig2, ax_s = new_slide("Results — cross-run summary (all inputs)")
+            metric_table(ax_s, summary, rect=(0.15, 0.30, 0.60, 0.45), fontsize=14)
+            pdf.savefig(fig); plt.close(fig)
+            pdf.savefig(fig2); plt.close(fig2)
+        else:
+            pdf.savefig(fig); plt.close(fig)
 
-        # ---- 7. Next steps
-        fig, ax = new_slide("Next steps")
+        # ---- 7 Next
+        fig, ax = new_slide("Next")
         bullets(ax, [
-            "Finish V1 vs paper-head A/B on identical clean data (in flight) → pick the sweep head",
-            "Paper-table reproduction (paper head, error_mode=none, native split, 50 epochs)",
-            "Per-target runs: log Lx · logM* · HR (arctanh, IG-primary, S/N gate)",
-            "AION token cache (~185 GB per-combo): 5–15× epoch speedup for the sweep",
-            "siag_gpu (32×A100) once membership lands; V2 self-trained encoder; upper-limit censoring",
-        ], fontsize=15, dy=0.13)
+            "per-target sweep: log Lx · logM★ · HR",
+            "50-epoch paper reproduction",
+            "token cache → 5–15× faster epochs",
+            "V_3 head; self-trained encoder",
+        ], fontsize=17, dy=0.14)
         pdf.savefig(fig); plt.close(fig)
 
     print(f"wrote {args.output}")
