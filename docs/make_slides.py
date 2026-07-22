@@ -76,7 +76,7 @@ def metric_table(ax: plt.Axes, frame: pd.DataFrame, *, rect: tuple[float, float,
 
 
 def load_marker_table(metrics_csv: Path | None) -> pd.DataFrame | None:
-    """Single aligned 'S Z W I' column (spaces when absent), R^2 + exp(IG)."""
+    """Single aligned 'S Z W I' column (spaces when absent), R^2 + IG + exp(IG)."""
     if metrics_csv is None or not Path(metrics_csv).exists():
         return None
     t = pd.read_csv(metrics_csv).sort_values("r2")
@@ -84,7 +84,8 @@ def load_marker_table(metrics_csv: Path | None) -> pd.DataFrame | None:
     for _, r in t.iterrows():
         parts = set(str(r.input_group).split("+"))
         combo = " ".join(short if name in parts else " " for name, short in MODALITY_ORDER)
-        rows.append({"inputs": combo, "R²": f"{r.r2:.3f}", "exp(IG)": f"{r.exp_info_gain:.2f}"})
+        rows.append({"inputs": combo, "R²": f"{r.r2:.3f}",
+                     "IG (nats)": f"{r.info_gain_nats:.3f}", "exp(IG)": f"{r.exp_info_gain:.2f}"})
     return pd.DataFrame(rows)
 
 
@@ -266,7 +267,7 @@ def main() -> None:
         if mstar_table is not None:
             fig, ax = new_slide("Results: logM★, all input combinations",
                                 "V_simple, cleaned data, no error model · WISE drives the gains")
-            metric_table(ax, mstar_table, rect=(0.28, 0.02, 0.44, 0.90), fontsize=12)
+            metric_table(ax, mstar_table, rect=(0.24, 0.02, 0.52, 0.90), fontsize=12)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 6c Modality Shapley
