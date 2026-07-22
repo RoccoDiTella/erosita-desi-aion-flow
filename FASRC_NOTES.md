@@ -36,7 +36,9 @@ Working notes for running this repo on the Harvard FASRC cluster (SLURM).
 | staging, 25.2k rows (cleaned) | ~10 min | |
 | validator w/ model forward (gpu_test) | ~5 min | |
 | V1 smoke, 667 rows × 2 epochs (MIG, bs 32) | 6:16 | incl. 15-combo eval |
-| full 50-epoch train | **extrapolate from repro smoke first** | never submit blind |
+| 15-epoch train, 20k rows, bs 448, A100-80 | **V1 1:34 · paper head 1:43** | ~6–7 min/epoch incl. per-combo val; +eval |
+| run packet + backup (shared, 4c) | ~2 min | |
+| full 50-epoch train (est.) | ~5–6 h | from measured epoch times |
 
 ## Workflow (adopted): develop locally, git for code, FASRC only for jobs + data
 - **Local (pop-os):** edit + run tests in `stanford_deadline/.venv`; commit to a branch; `git push`. Source of truth. Working branch: `multitarget-clean-errors`.

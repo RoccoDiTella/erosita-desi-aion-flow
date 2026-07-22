@@ -141,8 +141,10 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | smoke repro | q4/l2, none | paper subset, 667 rows | 2 | 0.02 (plumbing only) | — | done |
 | `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | **0.569** (best combo S+z+I: 0.572) | 1.23 (IG +0.205) | ✅ done (1:34 wall) |
 | `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | 0.555 (best combo S+I: 0.556) | **1.24 (IG +0.218)** | ✅ done (1:43 wall) |
+| `v1-clean-inject-log_ml_flux_1-34146030` | V1, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
+| `paperhead-clean-inject-log_ml_flux_1-34150667` | q4/l2, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
-| other targets (log_lx, logmstar, hr32_u) | V1, convolve | clean view | 15 | | | deferred (first runs cancelled) |
+| other targets (log_lx, logmstar, hr32_u) | V1, inject | clean view | 15 | | | after the inject A/B |
 
 **Queue decision (2026-07-21):** compare **V1 vs paper head, everything else
 identical** (clean view, convolve, flux, 15 epochs) — the head A/B informs what
