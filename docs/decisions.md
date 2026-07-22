@@ -80,7 +80,10 @@ view ≡ the previously materialized version (verified targetid-exact).
 - Caveat (open): low-count rows have enormous σ_u (median 0.51 but max ~8×10³)
   and pile at the clip; an S/N gate is planned before the HR paper claim.
   Sub-band non-detections are really *upper limits* — censored-likelihood
-  treatment deferred (ref: Sacchi+2022, 2022A&A...661A...3S).
+  treatment deferred. (Citation fixed 2026-07-22: 2022A&A...661A...3S is
+  Salvato+2022, the eFEDS COUNTERPARTS paper — not an upper-limit method. For
+  upper limits use Tubín-Arenas+2024, the eROSITA-DE upper-limit database;
+  detection-threshold characterization is Seppi+2022.)
 
 **logmstar sentinels:** `logmstar ≤ 2` (exactly 0.0 in practice, 4 rows) are
 failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
