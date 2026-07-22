@@ -260,6 +260,51 @@ plus wise+image +0.097; but spectra+z −0.232. Flux: mild redundancy everywhere
 (all pairs negative, max spectra+image −0.118) — every input reads the same
 source brightness. HR: uniformly −0.03…−0.04, four redundant copies of the
 same population-shape gain. Figure: `docs/figures/fig_modality_interactions.png`.
+Relation to the naive synergy IG(A∪B)−IG(A)−IG(B): that is the empty-background
+Harsanyi dividend m(AB); the index averages the same contrast over all
+backgrounds, I_AB = m(AB) + ½[m(ABC)+m(ABD)] + ⅓m(ABCD).
+
+**Full Möbius/Harsanyi decomposition (exact):** net dividend by interaction
+order — flux +0.81/−0.84/+0.42/−0.07, Lx +2.65/−2.01/+0.63/−0.09, HR
++0.48/−0.71/+0.48/−0.13: the alternating, damping cascade of ONE shared signal
+read four ways (HR is the pure limit: every nonempty coalition ≈ 0.12 nats).
+**M★ breaks the pattern: order-2 net is POSITIVE (+0.67)** — the only target
+where inputs genuinely combine. Figure `docs/figures/fig_interaction_orders.png`.
+
+**Line-Shapley methodology audit (2026-07-22, user-prompted) — three real
+defects found in v1, all fixed for the v2 re-run (commit 26219e5):**
+1. *Replace-mode leakage:* the 101-px (~81 Å observed) median filter fails to
+   erase BROAD lines at low z (broad Hα FWHM 5–10k km/s = 140–290 Å observed at
+   z≈0.3), so "removed" Hα left a smoothed line bump → φ(Hα) biased low. Fix:
+   **mask_mode=drop** — masked pixel windows sanitized (median fill) BEFORE the
+   codec, then tokens dropped via AION's native `embed_inputs` input mask
+   (partial input = the pretraining task); dropped positions become group id −1
+   and the head skips them via key_padding_mask (pad-invariance unit-tested).
+2. *Codec-grid misalignment:* token wavelengths assumed the DESI 3600 Å grid but
+   the codec latent grid starts at 3500 Å (aion/codecs/spectrum.py) — 100 Å =
+   3.9 tokens; the integer probe absorbed 3, leaving all masks ~23 Å blueshifted
+   (cores still masked; red wing leaked). Fixed: geometry on the codec grid,
+   dual-spike median-offset probe.
+3. *Codec receptive field:* the spectrum codec encoder is a ConvNeXt (k7
+   depthwise, 4 scales) — theoretical RF ≈ ±26 tokens, so KEPT neighbour codes
+   see the line; pixel sanitization before encoding closes this channel.
+   `scripts/codec_leakage_probe.py` measures the empirical radius.
+   Broad-line windows widened ±80→±120 Å (BLR wings).
+Fairness note (per-token view of v1): lines 0.215 vs continuum 0.293
+mnats/token — the continuum's 10× total dominance is mostly token count
+(~238 vs ~34 tokens); OIII has the highest per-token density (0.34).
+v2 sweeps add: line-PAIR Shapley interactions (Owen base + 29 flip configs =
+all 21 pairs + bonus single marginals; estimator verified against an analytic
+stub) and a direct coalition summary (full / lines-only / continuum-only /
+norm-only). Hα caveat stands regardless: available only at z<0.5 (33% of
+sources), so φ(Hα) is conditioned on that subpopulation and its SE (±0.5 mnats
+in v1) cannot separate 0 from Hβ-level.
+
+**Both-detected bookkeeping:** slide's 30% = both bands DET_LIKE≥6 (7,984 —
+verified exact); the sidecar `hr32_ok` 16.9% = both rates > 2×err (stricter,
+strict subset). Slide is correct. HR noise-floor on the DET_LIKE≥6 subset is
+WORSE than on hr32_ok (Var 0.061 vs E[σ²] 0.095, ceiling −0.55; median σ_u
+0.31): detection likelihood ≠ rate precision. HR verdict unchanged.
 
 **HR verdict (2026-07-22): not learnable at eRASS1 depth — do NOT re-run on the
 detected-only subset.** Noise-floor analysis (clean sample, hr32_u/σ_u

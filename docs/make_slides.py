@@ -281,6 +281,17 @@ def main() -> None:
             ], fontsize=12, dy=0.28)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6c3 Interaction orders (Mobius / Harsanyi decomposition)
+        if (FIGS / "fig_interaction_orders.png").exists():
+            fig, ax = new_slide("Interaction structure by order",
+                                "exact Harsanyi decomposition: net contribution of singles, pairs, triples, quads")
+            image_panel(fig, FIGS / "fig_interaction_orders.png", (0.05, 0.10, 0.90, 0.68))
+            fig.text(0.045, 0.075,
+                     "alternating signs = one shared signal read four ways (HR is the pure limit); "
+                     "logM$_*$ is the exception: pairwise SYNERGY (spectra x WISE)",
+                     fontsize=11, color=MUTED)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
         if (FIGS / "fig_shapley_heatmap.png").exists():
             fig, ax = new_slide("Where in the spectrum is the flux information?",
