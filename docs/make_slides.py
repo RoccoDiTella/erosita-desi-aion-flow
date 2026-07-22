@@ -261,6 +261,14 @@ def main() -> None:
                 fig.text(x, 0.795, label, fontsize=14, fontweight="bold", ha="center", color=INK)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6b2 Full logMstar table (paper-style)
+        mstar_table = load_marker_table(args.mstar_metrics)
+        if mstar_table is not None:
+            fig, ax = new_slide("Results: logM★, all input combinations",
+                                "V_simple, cleaned data, no error model · WISE drives the gains")
+            metric_table(ax, mstar_table, rect=(0.28, 0.02, 0.44, 0.90), fontsize=12)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- 6c Modality Shapley
         if (FIGS / "fig_modality_shapley.png").exists():
             fig, ax = new_slide("Information by input type",
@@ -279,17 +287,6 @@ def main() -> None:
                 "logM$_*$: spectra + WISE\n   synergistic",
                 "flux: mild redundancy\n   everywhere",
             ], fontsize=12, dy=0.28)
-            pdf.savefig(fig); plt.close(fig)
-
-        # ---- 6c3 Interaction orders (Mobius / Harsanyi decomposition)
-        if (FIGS / "fig_interaction_orders.png").exists():
-            fig, ax = new_slide("Interaction structure by order",
-                                "exact Harsanyi decomposition: net contribution of singles, pairs, triples, quads")
-            image_panel(fig, FIGS / "fig_interaction_orders.png", (0.05, 0.10, 0.90, 0.68))
-            fig.text(0.045, 0.075,
-                     "alternating signs = one shared signal read four ways (HR is the pure limit); "
-                     "logM$_*$ is the exception: pairwise SYNERGY (spectra x WISE)",
-                     fontsize=11, color=MUTED)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
