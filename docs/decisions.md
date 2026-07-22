@@ -164,8 +164,8 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | smoke repro | q4/l2, none | paper subset, 667 rows | 2 | 0.02 (plumbing only) | — | done |
 | `v1-clean-log_ml_flux_1-34083239` | V1, convolve | clean view (25,200) | 15 | **0.569** (best combo S+z+I: 0.572) | 1.23 (IG +0.205) | ✅ done (1:34 wall) |
 | `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | 0.555 (best combo S+I: 0.556) | **1.24 (IG +0.218)** | ✅ done (1:43 wall) |
-| `v1-clean-inject-log_ml_flux_1-34146030` | V1, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
-| `paperhead-clean-inject-log_ml_flux_1-34150667` | q4/l2, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
+| `v1-clean-inject-log_ml_flux_1-34171110` | V_simple, **inject(8), 1.5σ trunc** | clean view | 15 | **0.572** (plain-LL eval; best combo = all-inputs) | 1.38 (IG +0.323, plain LL) | ✅ done |
+| `paperhead-clean-inject-log_ml_flux_1-34171111` | q4/l2, **inject(8), 1.5σ trunc** | clean view | 15 | 0.565 (best combo S+W+I: 0.568) | 1.36 (IG +0.306, plain LL) | ✅ done |
 | `v1-clean-inject-log_lx-34185556` | V_simple, inject(8) | clean view | 15 | *pending* | | running |
 | `v1-clean-inject-hr32_u-34185558` | V_simple, inject(8), **σ_u≤1.0 gate** | clean view (83.8%) | 15 | *pending* | | running |
 | `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | *pending* | | running |
@@ -204,6 +204,17 @@ density sharpness (IG 0.218 vs 0.205 nats); both deltas ≈1σ of test-set noise
 Kernel-misspecification note: observation-space eval is proper (wrong σ cannot
 inflate it), but the *latent* decomposition is not certified by it — the
 σ-stratified calibration panel must be flat before any intrinsic-scatter claim.
+
+**Inject A/B verdict (2026-07-22, jobs 34171110/34171111):** truncated inject(8)
+on clean flux, plain-LL test eval. V_simple all-inputs R² **0.572** / exp(IG)
+1.38, V_PAI 0.565 / 1.36 — V_simple wins both point AND density metrics this
+time (under convolve the density edge had gone to V_PAI). Same ~1σ scale, but
+now consistent across both metrics. Note: V_PAI led on *val* NLL throughout
+training (1.031 vs 1.035) yet lost on test plain LL — the val criterion under
+inject scores noise-perturbed draws, so small val edges do not transfer.
+Inject R² matches convolve (0.572 vs 0.569, same model class) → operating-mode
+choice costs nothing in point metrics, as expected. V_simple + inject stands as
+the per-target sweep configuration (already in flight).
 
 **Error-treatment decisions (2026-07-21, post-calibration-check):**
 - **σ-conditioning is ruled out** (p(y|x,σ)): σ is metadata of the measurement
