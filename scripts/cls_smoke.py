@@ -103,22 +103,30 @@ def main() -> None:
     )
     tv = read_view_target_values(args.staged_dir, "log_ml_flux_1", args.clean_split_csv, "train")
     standardizer = TargetStandardizer.fit(tv)
-    configs = [(r, sc) for r in RANKS for sc in (MODULE_SCOPES if r > 0 else ("attn",))]
-    for rank, scope in configs:
-        try:
-            row = run_config(rank, scope, train_loader, standardizer, device,
-                             args.steps, args.lr, args.encoder_lr, args.llrd_gamma)
-            row["batch_size"] = bs
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            print(f"rank={rank} modules={scope}: OOM at bs {bs}, retrying at 256", flush=True)
-            small_loader, _, _ = build_dataloaders(
-                staged_dir=args.staged_dir, target_name="log_ml_flux_1", batch_size=256,
+    loaders = {bs: train_loader}
+
+    def loader_for(size):
+        if size not in loaders:
+            loaders[size], _, _ = build_dataloaders(
+                staged_dir=args.staged_dir, target_name="log_ml_flux_1", batch_size=size,
                 num_workers=8, seed=0, clean_split_csv=args.clean_split_csv,
             )
-            row = run_config(rank, scope, small_loader, standardizer, device,
-                             args.steps, args.lr, args.encoder_lr, args.llrd_gamma)
-            row["batch_size"] = 256
+        return loaders[size]
+
+    configs = [(r, sc) for r in RANKS for sc in (MODULE_SCOPES if r > 0 else ("attn",))]
+    for rank, scope in configs:
+        row = None
+        for size in (bs, 256, 128):
+            try:
+                row = run_config(rank, scope, loader_for(size), standardizer, device,
+                                 args.steps, args.lr, args.encoder_lr, args.llrd_gamma)
+                row["batch_size"] = size
+                break
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                print(f"rank={rank} modules={scope}: OOM at bs {size}", flush=True)
+        if row is None:
+            row = {"rank": rank, "modules": scope, "batch_size": "OOM@128"}
         print(row, flush=True)
         rows.append(row)
     table = pd.DataFrame(rows)
