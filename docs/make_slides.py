@@ -4,8 +4,8 @@
     python docs/make_slides.py [--v1-metrics …] [--paperhead-metrics …]
                                [--v1-inject-metrics …] [--paperhead-inject-metrics …]
 
-Naming: V_PAI = paper head (4 queries, 2 layers); V_2 = minimal head (1 query,
-1 layer); V_3 reserved.
+Naming: V_PAI = paper head (4 queries, 2 layers); V_simple = minimal head
+(1 query, 1 layer).
 """
 
 from __future__ import annotations
@@ -98,9 +98,9 @@ def allinputs_numbers(metrics_csv: Path | None) -> tuple[float, float] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--v1-metrics", type=Path, default=None, help="V_2 + convolve")
+    parser.add_argument("--v1-metrics", type=Path, default=None, help="V_simple + convolve")
     parser.add_argument("--paperhead-metrics", type=Path, default=None, help="V_PAI + convolve")
-    parser.add_argument("--v1-inject-metrics", type=Path, default=None, help="V_2 + inject")
+    parser.add_argument("--v1-inject-metrics", type=Path, default=None, help="V_simple + inject")
     parser.add_argument("--paperhead-inject-metrics", type=Path, default=None, help="V_PAI + inject")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
     args = parser.parse_args()
@@ -122,7 +122,7 @@ def main() -> None:
             "frozen AION-1 base",
             "attention pooling → NSF flow",
             "V_PAI: 2 layers, 4 queries",
-            "V_2: 1 layer, 1 query",
+            "V_simple: 1 layer, 1 query",
         ], fontsize=14, dy=0.16)
         pdf.savefig(fig); plt.close(fig)
 
@@ -160,31 +160,51 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 5b Band coverage
-        fig, ax = new_slide("X-ray band coverage", "keV energy ranges; selection is in the broad band")
-        image_panel(fig, FIGS / "fig_band_coverage.png", (0.05, 0.08, 0.55, 0.66))
-        ax2 = fig.add_axes([0.63, 0.15, 0.35, 0.55]); ax2.axis("off")
+        fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632; selection is in the broad band")
+        band_table = pd.DataFrame([
+            {"band": "broad 0.2–2.3", "measured": "100%", "detected": "100%"},
+            {"band": "P1  0.2–0.6",   "measured": "79%",  "detected": "31%"},
+            {"band": "P2  0.6–2.3",   "measured": "94%",  "detected": "56%"},
+            {"band": "P3  2.3–5.0",   "measured": "92%",  "detected": "51%"},
+            {"band": "P4  5.0–8.0",   "measured": "48%",  "detected": "5%"},
+            {"band": "P5",             "measured": "22%",  "detected": "0.2%"},
+        ])
+        metric_table(ax, band_table, rect=(0.05, 0.20, 0.48, 0.62), fontsize=13)
+        ax2 = fig.add_axes([0.60, 0.25, 0.37, 0.40]); ax2.axis("off")
         bullets(ax2, [
             "HR32 = (P3−P2) / (P3+P2), from rates",
             "both HR bands measured: 86%;\n     both detected: 30%",
-            "forced photometry gives a rate even\n     without detection → huge σ tails",
-            "sub-band non-detections are upper\n     limits → censored likelihood (later)",
-        ], fontsize=13, dy=0.18)
+        ], fontsize=14, dy=0.30)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 6 Results
         runs = [
-            ("V_2 · convolve", args.v1_metrics),
+            ("V_simple · convolve", args.v1_metrics),
             ("V_PAI · convolve", args.paperhead_metrics),
-            ("V_2 · inject", args.v1_inject_metrics),
+            ("V_simple · inject", args.v1_inject_metrics),
             ("V_PAI · inject", args.paperhead_inject_metrics),
         ]
         available = [(label, path) for label, path in runs if load_marker_table(path) is not None]
         detail = [r for r in available if "inject" in r[0]] or available
         fig, ax = new_slide("Results — log flux, cleaned data",
                             "paper anchors: 0.549 published · 0.567 on clean rows")
-        for i, (label, path) in enumerate(detail[:2]):
-            fig.text(0.10 + 0.48 * i, 0.80, label, fontsize=15, fontweight="bold", color=INK)
-            metric_table(ax, load_marker_table(path), rect=(0.03 + 0.49 * i, 0.02, 0.44, 0.90), fontsize=11)
+        if len(detail) >= 2:
+            (label_a, path_a), (label_b, path_b) = detail[0], detail[1]
+            ta = pd.read_csv(path_a).sort_values("r2").reset_index(drop=True)
+            tb = pd.read_csv(path_b).set_index("input_group").loc[ta.input_group].reset_index()
+            rows = []
+            for (_, ra), (_, rb) in zip(ta.iterrows(), tb.iterrows()):
+                parts = set(str(ra.input_group).split("+"))
+                combo = " ".join(short if name in parts else " " for name, short in MODALITY_ORDER)
+                rows.append({"inputs": combo,
+                             "R²": f"{ra.r2:.3f}", "exp(IG)": f"{ra.exp_info_gain:.2f}",
+                             "R² ": f"{rb.r2:.3f}", "exp(IG) ": f"{rb.exp_info_gain:.2f}"})
+            merged = pd.DataFrame(rows)
+            metric_table(ax, merged, rect=(0.14, 0.02, 0.72, 0.86), fontsize=11)
+            # supertitles over columns 2-3 and 4-5 (table spans x 0.14-0.86 of the axes,
+            # inputs column ~ first fifth)
+            fig.text(0.415, 0.795, label_a.split(" · ")[0], fontsize=14, fontweight="bold", ha="center", color=INK)
+            fig.text(0.675, 0.795, label_b.split(" · ")[0], fontsize=14, fontweight="bold", ha="center", color=INK)
         if len(available) > 2:
             summary = pd.DataFrame([
                 {"run": label, "R² (all)": f"{allinputs_numbers(path)[0]:.3f}", "exp(IG)": f"{allinputs_numbers(path)[1]:.2f}"}
