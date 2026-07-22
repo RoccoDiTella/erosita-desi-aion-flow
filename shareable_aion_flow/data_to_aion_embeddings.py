@@ -397,6 +397,23 @@ def prepare_staged_data(
     return summary
 
 
+def load_extra_targets(csv_path: Path, target_name: str) -> dict[int, tuple[float, float, float]]:
+    """targetid -> (target, sig_lo, sig_hi) from a runtime sidecar CSV.
+
+    Lets new targets (e.g. per-band fluxes) train without re-staging: columns
+    ``<target>`` and optionally ``<target>_sig_lo`` / ``<target>_sig_hi``.
+    """
+    df = pd.read_csv(csv_path)
+    if target_name not in df.columns:
+        raise KeyError(f"{target_name!r} not in {csv_path}")
+    has_sig = f"{target_name}_sig_lo" in df.columns and f"{target_name}_sig_hi" in df.columns
+    y = df[target_name].to_numpy(np.float64)
+    sl = df[f"{target_name}_sig_lo"].to_numpy(np.float64) if has_sig else np.zeros(len(df))
+    sh = df[f"{target_name}_sig_hi"].to_numpy(np.float64) if has_sig else np.zeros(len(df))
+    tids = df["targetid"].to_numpy(np.int64)
+    return {int(t): (float(a), float(b), float(c)) for t, a, b, c in zip(tids, y, sl, sh)}
+
+
 class AIONHDF5Dataset(Dataset):
     """PyTorch dataset over one staged split (optionally a row-subset view).
 
@@ -407,14 +424,23 @@ class AIONHDF5Dataset(Dataset):
     staged copy of the data.
     """
 
-    def __init__(self, hdf5_path: Path, target_name: str, rows: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        hdf5_path: Path,
+        target_name: str,
+        rows: np.ndarray | None = None,
+        extra_targets: dict[int, tuple[float, float, float]] | None = None,
+    ) -> None:
         self.hdf5_path = Path(hdf5_path)
         self.target_name = target_name
+        self.extra_targets = extra_targets
         self._handle: h5py.File | None = None
         self.err_cols = TARGET_ERROR_COLS.get(target_name)
         self.rows = None if rows is None else np.asarray(rows, dtype=np.int64)
         with h5py.File(self.hdf5_path, "r") as handle:
             n = int(handle["desi_targetid"].shape[0])
+            if extra_targets is not None:
+                self.has_err = True
             if self.rows is not None and len(self.rows) and (self.rows.min() < 0 or self.rows.max() >= n):
                 raise IndexError(f"rows out of range for {self.hdf5_path} (n={n}).")
             self.length = n if self.rows is None else int(len(self.rows))
@@ -436,7 +462,12 @@ class AIONHDF5Dataset(Dataset):
         wise = np.asarray(
             [handle[name][index] for name in ("flux_w1", "flux_w2", "flux_w3")], dtype=np.float32
         )
-        if self.has_err:
+        targetid = int(read_dataset(handle, "desi_targetid", slice(index, index + 1))[0])
+        if self.extra_targets is not None:
+            target_value, sig_lo, sig_hi = self.extra_targets.get(
+                targetid, (float("nan"), 0.0, 0.0)
+            )
+        elif self.has_err:
             sig_lo = float(read_dataset(handle, self.err_cols[0], slice(index, index + 1))[0])
             sig_hi = float(read_dataset(handle, self.err_cols[1], slice(index, index + 1))[0])
         else:
@@ -455,11 +486,11 @@ class AIONHDF5Dataset(Dataset):
                 )
             ),
             torch.tensor(
-                read_dataset(handle, self.target_name, slice(index, index + 1))[0], dtype=torch.float32
+                target_value if self.extra_targets is not None
+                else read_dataset(handle, self.target_name, slice(index, index + 1))[0],
+                dtype=torch.float32,
             ),
-            torch.tensor(
-                int(read_dataset(handle, "desi_targetid", slice(index, index + 1))[0]), dtype=torch.int64
-            ),
+            torch.tensor(targetid, dtype=torch.int64),
             torch.tensor(sig_lo, dtype=torch.float32),
             torch.tensor(sig_hi, dtype=torch.float32),
         )
@@ -499,7 +530,8 @@ def clean_view_row_maps(
 
 
 def _finite_target_rows(
-    path: Path, target_name: str, rows: np.ndarray | None, max_target_sigma: float | None = None
+    path: Path, target_name: str, rows: np.ndarray | None, max_target_sigma: float | None = None,
+    extra_targets: dict[int, tuple[float, float, float]] | None = None,
 ) -> np.ndarray | None:
     """Restrict ``rows`` (or the whole file) to usable rows for this target.
 
@@ -511,15 +543,24 @@ def _finite_target_rows(
     Returns ``None`` when the whole file qualifies.
     """
     with h5py.File(path, "r") as handle:
-        values = read_dataset(handle, target_name)
-        keep = np.isfinite(values)
-        err_cols = TARGET_ERROR_COLS.get(target_name)
-        if max_target_sigma is not None and err_cols and all(c in handle for c in err_cols):
-            sig = 0.5 * (
-                read_dataset(handle, err_cols[0]).astype(np.float64)
-                + read_dataset(handle, err_cols[1]).astype(np.float64)
-            )
-            keep &= np.isfinite(sig) & (sig <= float(max_target_sigma))
+        if extra_targets is not None:
+            tids = handle["desi_targetid"][:].astype(np.int64)
+            triples = np.array([extra_targets.get(int(t), (np.nan, 0.0, 0.0)) for t in tids])
+            values = triples[:, 0]
+            keep = np.isfinite(values)
+            if max_target_sigma is not None:
+                sig = 0.5 * (triples[:, 1] + triples[:, 2])
+                keep &= np.isfinite(sig) & (sig <= float(max_target_sigma))
+        else:
+            values = read_dataset(handle, target_name)
+            keep = np.isfinite(values)
+            err_cols = TARGET_ERROR_COLS.get(target_name)
+            if max_target_sigma is not None and err_cols and all(c in handle for c in err_cols):
+                sig = 0.5 * (
+                    read_dataset(handle, err_cols[0]).astype(np.float64)
+                    + read_dataset(handle, err_cols[1]).astype(np.float64)
+                )
+                keep &= np.isfinite(sig) & (sig <= float(max_target_sigma))
     if rows is None:
         if bool(keep.all()):
             return None
@@ -543,6 +584,7 @@ def build_dataloaders(
     seed: int | None = None,
     clean_split_csv: Path | None = None,
     max_target_sigma: float | None = None,
+    extra_targets_csv: Path | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Build train/val/test dataloaders over the staged HDF5 splits.
 
@@ -552,6 +594,7 @@ def build_dataloaders(
     Rows whose target is non-finite are always excluded (see _finite_target_rows).
     """
     eval_batch_size = eval_batch_size or batch_size
+    extra = load_extra_targets(Path(extra_targets_csv), target_name) if extra_targets_csv else None
     view_maps = clean_view_row_maps(Path(staged_dir), clean_split_csv) if clean_split_csv else None
     loaders: list[DataLoader] = []
     train_generator = None
@@ -561,14 +604,16 @@ def build_dataloaders(
     for split in ("train", "val", "test"):
         if view_maps is None:
             path = Path(staged_dir) / f"desi_{split}.hdf5"
-            rows = _finite_target_rows(path, target_name, None, max_target_sigma)
-            dataset: Dataset = AIONHDF5Dataset(path, target_name, rows=rows)
+            rows = _finite_target_rows(path, target_name, None, max_target_sigma, extra)
+            dataset: Dataset = AIONHDF5Dataset(path, target_name, rows=rows, extra_targets=extra)
         else:
             parts = []
             for path, rows in view_maps[split]:
-                kept = _finite_target_rows(path, target_name, rows, max_target_sigma)
+                kept = _finite_target_rows(path, target_name, rows, max_target_sigma, extra)
                 if kept is None or len(kept):
-                    parts.append(AIONHDF5Dataset(path, target_name, rows=kept if kept is not None else rows))
+                    parts.append(AIONHDF5Dataset(path, target_name,
+                                                 rows=kept if kept is not None else rows,
+                                                 extra_targets=extra))
             if not parts:
                 raise ValueError(f"Clean-split view has no rows for split {split!r}.")
             dataset = ConcatDataset(parts)
@@ -592,14 +637,21 @@ def read_target_values(hdf5_path: Path, target_name: str) -> np.ndarray:
 
 
 def read_view_target_values(
-    staged_dir: Path, target_name: str, clean_split_csv: Path, split: str = "train"
+    staged_dir: Path, target_name: str, clean_split_csv: Path, split: str = "train",
+    extra_targets_csv: Path | None = None,
 ) -> np.ndarray:
     """Target values for one split of the clean view (standardizer/prior fitting)."""
+    extra = load_extra_targets(Path(extra_targets_csv), target_name) if extra_targets_csv else None
     maps = clean_view_row_maps(Path(staged_dir), clean_split_csv)
     parts: list[np.ndarray] = []
     for path, rows in maps[split]:
         with h5py.File(path, "r") as handle:
-            parts.append(read_dataset(handle, target_name)[rows].astype(np.float32))
+            if extra is not None:
+                tids = handle["desi_targetid"][:].astype(np.int64)[rows]
+                vals = np.array([extra.get(int(t), (np.nan, 0, 0))[0] for t in tids], dtype=np.float32)
+                parts.append(vals[np.isfinite(vals)])
+            else:
+                parts.append(read_dataset(handle, target_name)[rows].astype(np.float32))
     if not parts:
         raise ValueError(f"Clean-split view has no rows for split {split!r}.")
     return np.concatenate(parts)

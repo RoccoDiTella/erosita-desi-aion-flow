@@ -364,11 +364,13 @@ def train(args: argparse.Namespace) -> None:
         seed=args.seed,
         clean_split_csv=clean_split_csv,
         max_target_sigma=args.max_target_sigma,
+        extra_targets_csv=args.extra_targets_csv,
     )
     # Standardizer + prior must be fit on the same rows the model trains on.
     if clean_split_csv is not None:
         target_values = read_view_target_values(
-            Path(args.staged_dir), args.target, clean_split_csv, split="train"
+            Path(args.staged_dir), args.target, clean_split_csv, split="train",
+            extra_targets_csv=args.extra_targets_csv,
         )
     else:
         target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", args.target)
@@ -426,6 +428,7 @@ def train(args: argparse.Namespace) -> None:
         "grad_checkpoint": bool(args.grad_checkpoint),
         "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
         "max_target_sigma": args.max_target_sigma,
+        "extra_targets_csv": str(args.extra_targets_csv) if args.extra_targets_csv else None,
         "architecture": (
             "v3_cls_lora_flow_clean" if args.head_type == "cls"
             else "paper_q4_l2_attention_flow_clean" if is_paper_head
@@ -610,6 +613,7 @@ def train(args: argparse.Namespace) -> None:
             allow_target_override=False,
             clean_split_csv=clean_split_csv,
             max_target_sigma=args.max_target_sigma,
+            extra_targets_csv=args.extra_targets_csv,
         )
         evaluate(eval_args)
         log_eval_metrics(tracker, run_dir / "test_flow_metrics.csv")
@@ -676,7 +680,8 @@ def evaluate(args: argparse.Namespace) -> None:
     if not prior_path.exists():
         if eval_clean_split_csv is not None:
             target_values = read_view_target_values(
-                Path(args.staged_dir), resolved_target, eval_clean_split_csv, split="train"
+                Path(args.staged_dir), resolved_target, eval_clean_split_csv, split="train",
+                extra_targets_csv=Path(eval_extra_csv) if eval_extra_csv else None,
             )
         else:
             target_values = read_target_values(Path(args.staged_dir) / "desi_train.hdf5", resolved_target)
@@ -705,11 +710,13 @@ def evaluate(args: argparse.Namespace) -> None:
     eval_max_sigma = getattr(args, "max_target_sigma", None)
     if eval_max_sigma is None:
         eval_max_sigma = _config.get("max_target_sigma")
+    eval_extra_csv = getattr(args, "extra_targets_csv", None) or _config.get("extra_targets_csv")
     _train_loader, _val_loader, test_loader = build_dataloaders(
         staged_dir=Path(args.staged_dir),
         target_name=resolved_target,
         clean_split_csv=eval_clean_split_csv,
         max_target_sigma=eval_max_sigma,
+        extra_targets_csv=Path(eval_extra_csv) if eval_extra_csv else None,
         batch_size=args.batch_size,
         eval_batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -778,8 +785,14 @@ def parse_args() -> argparse.Namespace:
     train_parser = subparsers.add_parser("train", help="Train the clean paper AION attention-flow model.")
     train_parser.add_argument("--staged-dir", type=Path, default=STAGED_DIR)
     train_parser.add_argument(
-        "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default="log_ml_flux_1"
+        "--target",
+        choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u",
+                 "log_flux_p1", "log_flux_p2", "log_flux_p3", "log_flux_p4"],
+        default="log_ml_flux_1",
     )
+    train_parser.add_argument("--extra-targets-csv", type=Path, default=None,
+                              help="Runtime sidecar with <target>[,_sig_lo,_sig_hi] columns by targetid "
+                              "(e.g. per-band fluxes) -- no re-staging needed.")
     train_parser.add_argument(
         "--error-mode", choices=["none", "inject", "convolve"], default="convolve",
         help="Fold per-source split-normal errors into the likelihood (convolve=deconvolve).",
@@ -871,8 +884,13 @@ def parse_args() -> argparse.Namespace:
     eval_parser.add_argument("--checkpoint", type=Path, required=True)
     eval_parser.add_argument("--staged-dir", type=Path, default=STAGED_DIR)
     eval_parser.add_argument(
-        "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default=None
+        "--target",
+        choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u",
+                 "log_flux_p1", "log_flux_p2", "log_flux_p3", "log_flux_p4"],
+        default=None,
     )
+    eval_parser.add_argument("--extra-targets-csv", type=Path, default=None,
+                             help="Defaults to the checkpoint config's value.")
     eval_parser.add_argument("--allow-target-override", action="store_true")
     eval_parser.add_argument("--max-target-sigma", type=float, default=None,
                              help="Defaults to the checkpoint config's value.")
