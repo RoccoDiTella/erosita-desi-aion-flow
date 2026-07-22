@@ -189,3 +189,11 @@ inflate it), but the *latent* decomposition is not certified by it — the
 - Queued fixes, in order: residual regression Var(y−p50)=a·σ²+b (free, decisive
   on kernel scale + floor); one learned noise-floor scalar in the kernel (still
   σ-free at inference); reassess after a 50-epoch run (does the latent sharpen?).
+- **MODELING DECISION (2026-07-21): the primary estimand is p(y|x)** — plain
+  likelihood at observed values, `--error-mode none`, no kernel anywhere. One
+  space, fully checkable against held-out data, IG directly comparable to the
+  paper's. K is per-datum and *fixed* (never estimated), so the convolution had
+  no internal redundancy — but the latent p(t|x) interpretation leans on
+  trusting K, and we choose not to. Convolve stays in the repo as the optional
+  latent-analysis tool for future intrinsic-scatter work. Canonical flux run of
+  the new config: `v1-clean-none-log_ml_flux_1-34131280`.
