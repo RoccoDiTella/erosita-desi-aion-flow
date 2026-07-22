@@ -102,6 +102,9 @@ def main() -> None:
     parser.add_argument("--paperhead-metrics", type=Path, default=None, help="V_PAI + convolve")
     parser.add_argument("--v1-inject-metrics", type=Path, default=None, help="V_simple + inject")
     parser.add_argument("--paperhead-inject-metrics", type=Path, default=None, help="V_PAI + inject")
+    parser.add_argument("--lx-metrics", type=Path, default=None, help="log_lx, V_simple + inject")
+    parser.add_argument("--mstar-metrics", type=Path, default=None, help="logmstar, V_simple, no error model")
+    parser.add_argument("--hr-metrics", type=Path, default=None, help="hr32_u, V_simple + inject, gate 1.0")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
     args = parser.parse_args()
 
@@ -228,10 +231,40 @@ def main() -> None:
         else:
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6b Per-target results (V_simple)
+        targets = [
+            ("log Lx", args.lx_metrics),
+            ("logM★", args.mstar_metrics),
+            ("HR", args.hr_metrics),
+        ]
+        have_targets = [(label, path) for label, path in targets
+                        if path is not None and Path(path).exists()]
+        if len(have_targets) == 3:
+            fig, ax = new_slide(
+                "Results: per-target (V_simple, cleaned data)",
+                "inject(8) for Lx and HR, plain-LL eval · HR gate σ_u ≤ 1.0 (n 2,121) · logM★ without error model",
+            )
+            base = pd.read_csv(have_targets[0][1]).sort_values("r2").reset_index(drop=True)
+            rows = []
+            for _, r in base.iterrows():
+                parts = set(str(r.input_group).split("+"))
+                combo = " ".join(short if name in parts else " " for name, short in MODALITY_ORDER)
+                row = {"inputs": combo}
+                for k, (label, path) in enumerate(have_targets):
+                    t = pd.read_csv(path).set_index("input_group")
+                    tr = t.loc[str(r.input_group)]
+                    row[f"R²{' ' * k}"] = f"{tr.r2:.3f}"
+                    row[f"exp(IG){' ' * k}"] = f"{tr.exp_info_gain:.2f}"
+                rows.append(row)
+            metric_table(ax, pd.DataFrame(rows), rect=(0.08, 0.02, 0.86, 0.86), fontsize=11)
+            for x, (label, _) in zip((0.342, 0.566, 0.789), have_targets):
+                fig.text(x, 0.795, label, fontsize=14, fontweight="bold", ha="center", color=INK)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- 7 Next
         fig, ax = new_slide("Next")
         bullets(ax, [
-            "per-target sweep: log Lx · logM★ · HR",
+            "line/continuum Shapley attribution of flux information",
             "50-epoch paper reproduction",
             "token cache → 5–15× faster epochs",
             "V_3 head; self-trained encoder",

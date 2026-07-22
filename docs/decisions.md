@@ -166,13 +166,12 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | 0.555 (best combo S+I: 0.556) | **1.24 (IG +0.218)** | ✅ done (1:43 wall) |
 | `v1-clean-inject-log_ml_flux_1-34171110` | V_simple, **inject(8), 1.5σ trunc** | clean view | 15 | **0.572** (plain-LL eval; best combo = all-inputs) | 1.38 (IG +0.323, plain LL) | ✅ done |
 | `paperhead-clean-inject-log_ml_flux_1-34171111` | q4/l2, **inject(8), 1.5σ trunc** | clean view | 15 | 0.565 (best combo S+W+I: 0.568) | 1.36 (IG +0.306, plain LL) | ✅ done |
-| `v1-clean-inject-log_lx-34185556` | V_simple, inject(8) | clean view | 15 | *pending* | | running |
-| `v1-clean-inject-hr32_u-34185558` | V_simple, inject(8), **σ_u≤1.0 gate** | clean view (83.8%) | 15 | *pending* | | running |
-| `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | *pending* | | running |
-| `v1-spec-mask-log_ml_flux_1-34193770` | V_simple, none, spectra-only + token-mask augment | clean view | 12 | (Shapley surrogate) | | running |
-| shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | outputs: shapley_table.csv, heatmap, line table | | chained |
+| `v1-clean-inject-log_lx-34185556` | V_simple, inject(8) | clean view | 15 | **0.905** (z-only 0.835, S-only 0.884) | 3.23 (IG +1.172) | ✅ done |
+| `v1-clean-inject-hr32_u-34185558` | V_simple, inject(8), **σ_u≤1.0 gate** | clean view (n_test 2,121) | 15 | ≈0.00 (no point signal, as expected) | 1.13–1.14 flat across combos (IG +0.13) | ✅ done |
+| `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | **0.648** (S-only 0.383, S+W 0.561 — WISE is the big adder) | 2.98 (IG +1.090) | ✅ done |
+| `v1-spec-mask-log_ml_flux_1-34193770` | V_simple, none, spectra-only + token-mask augment | clean view | 12 | spectra-only 0.529 (vs 0.541 unmasked full model → surrogate faithful, augment costs ~0.01) | 1.34 | ✅ done (Shapley surrogate) |
+| shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | outputs: shapley_table.csv, heatmap, line table | | running |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
-| other targets (log_lx, logmstar, hr32_u) | V1, inject | clean view | 15 | | | after the inject A/B |
 
 **Queue decision (2026-07-21):** compare **V1 vs paper head, everything else
 identical** (clean view, convolve, flux, 15 epochs) — the head A/B informs what
@@ -215,6 +214,25 @@ inject scores noise-perturbed draws, so small val edges do not transfer.
 Inject R² matches convolve (0.572 vs 0.569, same model class) → operating-mode
 choice costs nothing in point metrics, as expected. V_simple + inject stands as
 the per-target sweep configuration (already in flight).
+
+**Per-target results (2026-07-22, jobs 34185556/34185558/34185562):**
+- **log Lx 0.905 / exp(IG) 3.23** all-inputs. Decomposition: z-only 0.835 (the
+  D_L(z)² term), spectra-only 0.884 (spectrum encodes z implicitly + flux info);
+  the increment over z-only (0.835 → 0.905) is the part the paper's flux R²
+  speaks to. RMSE 0.229 dex.
+- **logM★ 0.648 / exp(IG) 2.98** all-inputs, no error model. Modality story
+  differs from flux: spectra-only just 0.383, **WISE is the big adder**
+  (S+W 0.561; W1/W2 trace stellar mass; DESI fiber spectra lose aperture flux).
+  Caveat: X-ray-selected sample is AGN-rich and the VAC photometric mass is
+  cleanest for GALAXY spectypes — slice by spectype before claiming anything.
+- **HR (hr32_u, gate σ_u ≤ 1.0): R² ≈ 0 in every combo** — no point-level
+  predictability at eRASS1 depth, matching the honesty expectation. exp(IG)
+  1.13–1.14, *flat across all 15 combos including singles* → the flow learned a
+  sharper-than-KDE population density (shape gain), not source-level
+  discrimination. Report HR as "no evidence of per-source information" for now.
+- Flux Shapley surrogate (34193770): spectra-only 0.529 with mask augmentation
+  vs 0.541 unmasked (full model) — augmentation costs ~0.012 R², surrogate is
+  faithful enough to attribute.
 
 **Error-treatment decisions (2026-07-21, post-calibration-check):**
 - **σ-conditioning is ruled out** (p(y|x,σ)): σ is metadata of the measurement
