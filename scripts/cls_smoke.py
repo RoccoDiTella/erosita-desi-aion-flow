@@ -28,25 +28,16 @@ from shareable_aion_flow.main import batch_nll, build_model  # noqa: E402
 from shareable_aion_flow.normalizing_flow import TargetStandardizer  # noqa: E402
 
 RANKS = (0, 4, 8, 16)  # 0 = CLS + head + flow only (no LoRA), the baseline
-K_FRACS = (0.25, 0.5, 1.0)
+MODULE_SCOPES = ("attn", "all")  # adapters on attention only vs every linear (QLoRA-style)
 
 
-def run_config(rank, k_frac, loader, standardizer, device, steps, lr, encoder_lr, llrd_gamma):
+def run_config(rank, scope, loader, standardizer, device, steps, lr, encoder_lr, llrd_gamma):
     encoder, context_encoder, flow = build_model(
         device, dropout=0.05, head={"num_queries": 1, "num_layers": 1, "context_hidden": [128]},
-        head_type="cls", lora_rank=rank,
-        lora_blocks=0, grad_checkpoint=True,
+        head_type="cls", lora_rank=rank, lora_blocks=-1 if rank > 0 else 0,
+        lora_modules=scope, grad_checkpoint=True,
     )
     depth = len(encoder.backbone.encoder)
-    k = max(1, int(round(k_frac * depth))) if rank > 0 else 0
-    if rank > 0:
-        # rebuild with the resolved absolute K
-        del encoder, context_encoder, flow
-        torch.cuda.empty_cache()
-        encoder, context_encoder, flow = build_model(
-            device, dropout=0.05, head={"num_queries": 1, "num_layers": 1, "context_hidden": [128]},
-            head_type="cls", lora_rank=rank, lora_blocks=k, grad_checkpoint=True,
-        )
     groups = [{"params": list(context_encoder.parameters()) + list(flow.parameters()), "lr": lr},
               {"params": [encoder.cls_token], "lr": lr}]
     groups += encoder.encoder_param_groups(encoder_lr, llrd_gamma)
@@ -80,7 +71,7 @@ def run_config(rank, k_frac, loader, standardizer, device, steps, lr, encoder_lr
         times.append(time.monotonic() - t0)
         losses.append(float(loss.item()))
     result = {
-        "rank": rank, "k_blocks": k, "depth": depth, "n_lora_params": n_lora,
+        "rank": rank, "modules": scope, "depth": depth, "n_lora_params": n_lora,
         "step_time_s": float(np.median(times[3:])),
         "peak_mem_gb": torch.cuda.max_memory_allocated() / 1e9,
         "loss_first10": float(np.mean(losses[:10])),
@@ -112,20 +103,20 @@ def main() -> None:
     )
     tv = read_view_target_values(args.staged_dir, "log_ml_flux_1", args.clean_split_csv, "train")
     standardizer = TargetStandardizer.fit(tv)
-    configs = [(r, kf) for r in RANKS for kf in (K_FRACS if r > 0 else (0.0,))]
-    for rank, k_frac in configs:
+    configs = [(r, sc) for r in RANKS for sc in (MODULE_SCOPES if r > 0 else ("attn",))]
+    for rank, scope in configs:
         try:
-            row = run_config(rank, k_frac, train_loader, standardizer, device,
+            row = run_config(rank, scope, train_loader, standardizer, device,
                              args.steps, args.lr, args.encoder_lr, args.llrd_gamma)
             row["batch_size"] = bs
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            print(f"rank={rank} k_frac={k_frac}: OOM at bs {bs}, retrying at 256", flush=True)
+            print(f"rank={rank} modules={scope}: OOM at bs {bs}, retrying at 256", flush=True)
             small_loader, _, _ = build_dataloaders(
                 staged_dir=args.staged_dir, target_name="log_ml_flux_1", batch_size=256,
                 num_workers=8, seed=0, clean_split_csv=args.clean_split_csv,
             )
-            row = run_config(rank, k_frac, small_loader, standardizer, device,
+            row = run_config(rank, scope, small_loader, standardizer, device,
                              args.steps, args.lr, args.encoder_lr, args.llrd_gamma)
             row["batch_size"] = 256
         print(row, flush=True)

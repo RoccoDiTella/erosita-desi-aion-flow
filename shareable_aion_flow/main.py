@@ -94,7 +94,8 @@ def build_model(
     head: dict[str, Any] | None = None,
     head_type: str = "attention",
     lora_rank: int = 0,
-    lora_blocks: int = 0,
+    lora_blocks: int = -1,
+    lora_modules: str = "all",
     grad_checkpoint: bool = False,
 ) -> tuple[AIONTokenEncoder, torch.nn.Module, ConditionalNSFFlow]:
     """Build the AION encoder, context head, and conditional flow.
@@ -108,7 +109,8 @@ def build_model(
     if head_type == "cls":
         encoder = AIONTokenEncoder(
             freeze=False, cls_mode=True, lora_rank=lora_rank,
-            lora_blocks=lora_blocks, grad_checkpoint=grad_checkpoint,
+            lora_blocks=lora_blocks, lora_modules=lora_modules,
+            grad_checkpoint=grad_checkpoint,
         ).to(device)
         context_encoder = CLSContext(context_dim=int(head["context_dim"])).to(device)
     else:
@@ -162,7 +164,8 @@ def load_checkpoint(
         device, dropout=dropout, head=cfg.get("head"),
         head_type=str(cfg.get("head_type", "attention")),
         lora_rank=int(cfg.get("lora_rank", 0) or 0),
-        lora_blocks=int(cfg.get("lora_blocks", 0) or 0),
+        lora_blocks=int(cfg.get("lora_blocks", -1)),
+        lora_modules=str(cfg.get("lora_modules", "all")),
     )
     context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
     flow.load_state_dict(checkpoint["flow_state_dict"])
@@ -389,7 +392,7 @@ def train(args: argparse.Namespace) -> None:
     encoder, context_encoder, flow = build_model(
         device, dropout=args.dropout, head=head, head_type=args.head_type,
         lora_rank=args.lora_rank, lora_blocks=args.lora_blocks,
-        grad_checkpoint=args.grad_checkpoint,
+        lora_modules=args.lora_modules, grad_checkpoint=args.grad_checkpoint,
     )
     param_groups: list[dict] = [
         {"params": list(context_encoder.parameters()) + list(flow.parameters()), "lr": args.lr}
@@ -416,6 +419,7 @@ def train(args: argparse.Namespace) -> None:
         "head_type": args.head_type,
         "lora_rank": int(args.lora_rank),
         "lora_blocks": int(args.lora_blocks),
+        "lora_modules": args.lora_modules,
         "encoder_lr": float(args.encoder_lr),
         "llrd_gamma": float(args.llrd_gamma),
         "encoder_warmup_epochs": int(args.encoder_warmup_epochs),
@@ -813,8 +817,10 @@ def parse_args() -> argparse.Namespace:
     )
     train_parser.add_argument("--lora-rank", type=int, default=8,
                               help="LoRA rank for --head-type cls (0 = CLS+head only).")
-    train_parser.add_argument("--lora-blocks", type=int, default=0,
-                              help="Apply LoRA to the LAST k encoder blocks (0 = none).")
+    train_parser.add_argument("--lora-blocks", type=int, default=-1,
+                              help="Apply LoRA to the LAST k encoder blocks (-1 = all, 0 = none).")
+    train_parser.add_argument("--lora-modules", choices=["attn", "all"], default="all",
+                              help="Adapt attention q/k/v/proj only, or every transformer linear (QLoRA-style).")
     train_parser.add_argument("--encoder-lr", type=float, default=2e-5,
                               help="Base LR for encoder LoRA groups (decayed by --llrd-gamma per block).")
     train_parser.add_argument("--llrd-gamma", type=float, default=0.8,

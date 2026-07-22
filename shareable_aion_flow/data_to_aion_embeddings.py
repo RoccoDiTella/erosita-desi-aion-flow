@@ -653,14 +653,18 @@ class AIONTokenEncoder(nn.Module):
         freeze: bool = True,
         cls_mode: bool = False,
         lora_rank: int = 0,
-        lora_blocks: int = 0,
+        lora_blocks: int = -1,
+        lora_modules: str = "all",
         grad_checkpoint: bool = False,
     ) -> None:
         """``cls_mode`` (the V3 architecture): a trainable CLS token is appended
         to the encoder input; ``encode_tokens`` then returns the CLS final
         hidden state as a 1-token sequence. Base backbone weights stay frozen;
-        ``lora_rank``/``lora_blocks`` inject trainable LoRA adapters (attention
-        q/k/v/proj) into the LAST ``lora_blocks`` encoder blocks. A CLS at the
+        ``lora_rank`` injects trainable LoRA adapters into the last
+        ``lora_blocks`` encoder blocks (-1 = all; with the CLS at the input,
+        backprop traverses every block anyway, so restricting depth saves
+        nothing). ``lora_modules``: "attn" = q/k/v/proj only; "all" = every
+        transformer linear incl. the MLP (QLoRA-style, the default). A CLS at the
         input forces backprop through every block, so ``grad_checkpoint``
         trades ~2x forward compute for ~10x activation memory."""
         super().__init__()
@@ -688,6 +692,7 @@ class AIONTokenEncoder(nn.Module):
         self.cls_mode = bool(cls_mode)
         self.lora_rank = int(lora_rank)
         self.lora_blocks = int(lora_blocks)
+        self.lora_modules = str(lora_modules)
         self.grad_checkpoint = bool(grad_checkpoint)
         self.freeze = freeze and not cls_mode
         for parameter in self.backbone.parameters():
@@ -696,11 +701,18 @@ class AIONTokenEncoder(nn.Module):
             dim = int(self.backbone.encoder_norm.weight.shape[0])
             self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
             nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+            if self.lora_blocks < 0:
+                self.lora_blocks = len(self.backbone.encoder)
             if self.lora_rank > 0 and self.lora_blocks > 0:
-                from aion.fourm.lora_utils import inject_trainable_LoRA
+                from aion.fourm.lora_utils import get_LoRA_module_names, inject_trainable_LoRA
 
+                targets = get_LoRA_module_names(
+                    "all" if self.lora_modules == "all" else "attn"
+                )
                 for block in list(self.backbone.encoder)[-self.lora_blocks:]:
-                    inject_trainable_LoRA(block, rank=self.lora_rank, scale=1.0)
+                    inject_trainable_LoRA(
+                        block, rank=self.lora_rank, scale=1.0, target_replace_modules=targets
+                    )
                 for name, parameter in self.backbone.named_parameters():
                     if "lora_" in name:
                         parameter.requires_grad = True
