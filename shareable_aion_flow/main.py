@@ -21,6 +21,7 @@ try:
     from .attention_pooling_head import (
         MODALITIES,
         AIONAttentionContext,
+        CLSContext,
         ComboSampler,
         all_nonempty_modality_combos,
     )
@@ -43,6 +44,7 @@ except ImportError:
     from attention_pooling_head import (
         MODALITIES,
         AIONAttentionContext,
+        CLSContext,
         ComboSampler,
         all_nonempty_modality_combos,
     )
@@ -90,21 +92,34 @@ def build_model(
     device: torch.device,
     dropout: float,
     head: dict[str, Any] | None = None,
-) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow]:
-    """Build the frozen AION encoder, attention-context head, and conditional flow.
+    head_type: str = "attention",
+    lora_rank: int = 0,
+    lora_blocks: int = 0,
+    grad_checkpoint: bool = False,
+) -> tuple[AIONTokenEncoder, torch.nn.Module, ConditionalNSFFlow]:
+    """Build the AION encoder, context head, and conditional flow.
 
-    ``head`` overrides the attention-head sizes (num_queries/num_layers/
-    context_hidden/context_dim); ``None`` uses the paper q4/l2 defaults.
+    ``head_type="attention"`` (default): frozen encoder + attention-pooling
+    head. ``head_type="cls"`` (V3): trainable CLS token at the encoder input,
+    LoRA on the last ``lora_blocks`` blocks, CLS hidden projected to the SAME
+    256-dim context feeding an identical flow (equivalent-flow comparison).
     """
     head = {**PAPER_HEAD, **(head or {})}
-    encoder = AIONTokenEncoder(freeze=True).to(device)
-    context_encoder = AIONAttentionContext(
-        dropout=dropout,
-        num_queries=int(head["num_queries"]),
-        num_layers=int(head["num_layers"]),
-        context_hidden=tuple(head["context_hidden"]),
-        context_dim=int(head["context_dim"]),
-    ).to(device)
+    if head_type == "cls":
+        encoder = AIONTokenEncoder(
+            freeze=False, cls_mode=True, lora_rank=lora_rank,
+            lora_blocks=lora_blocks, grad_checkpoint=grad_checkpoint,
+        ).to(device)
+        context_encoder = CLSContext(context_dim=int(head["context_dim"])).to(device)
+    else:
+        encoder = AIONTokenEncoder(freeze=True).to(device)
+        context_encoder = AIONAttentionContext(
+            dropout=dropout,
+            num_queries=int(head["num_queries"]),
+            num_layers=int(head["num_layers"]),
+            context_hidden=tuple(head["context_hidden"]),
+            context_dim=int(head["context_dim"]),
+        ).to(device)
     flow = ConditionalNSFFlow(context_dim=context_encoder.context_dim).to(device)
     return encoder, context_encoder, flow
 
@@ -119,12 +134,14 @@ def save_checkpoint(
     standardizer: TargetStandardizer,
     config: dict[str, object],
     val_all_inputs_nll: float,
+    encoder_trainable: dict[str, torch.Tensor] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "epoch": int(epoch),
         "context_encoder_state_dict": context_encoder.state_dict(),
         "flow_state_dict": flow.state_dict(),
+        "encoder_trainable_state_dict": encoder_trainable,
         "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
         "standardizer": standardizer.state_dict(),
         "config": config,
@@ -140,10 +157,20 @@ def load_checkpoint(
     dropout: float,
 ) -> tuple[AIONTokenEncoder, AIONAttentionContext, ConditionalNSFFlow, TargetStandardizer, dict[str, object]]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    head = checkpoint.get("config", {}).get("head")
-    encoder, context_encoder, flow = build_model(device, dropout=dropout, head=head)
+    cfg = checkpoint.get("config", {})
+    encoder, context_encoder, flow = build_model(
+        device, dropout=dropout, head=cfg.get("head"),
+        head_type=str(cfg.get("head_type", "attention")),
+        lora_rank=int(cfg.get("lora_rank", 0) or 0),
+        lora_blocks=int(cfg.get("lora_blocks", 0) or 0),
+    )
     context_encoder.load_state_dict(checkpoint["context_encoder_state_dict"])
     flow.load_state_dict(checkpoint["flow_state_dict"])
+    encoder_trainable = checkpoint.get("encoder_trainable_state_dict")
+    if encoder_trainable:
+        missing, unexpected = encoder.load_state_dict(encoder_trainable, strict=False)
+        if unexpected:
+            raise RuntimeError(f"Unexpected encoder-trainable keys: {unexpected[:5]}")
     standardizer = TargetStandardizer.from_state_dict(checkpoint["standardizer"])
     return encoder, context_encoder, flow, standardizer, checkpoint.get("config", {})
 
@@ -358,13 +385,20 @@ def train(args: argparse.Namespace) -> None:
         "context_hidden": list(args.context_hidden),
         "context_dim": args.context_dim,
     }
-    is_paper_head = head == PAPER_HEAD
-    encoder, context_encoder, flow = build_model(device, dropout=args.dropout, head=head)
-    optimizer = torch.optim.AdamW(
-        list(context_encoder.parameters()) + list(flow.parameters()),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+    is_paper_head = head == PAPER_HEAD and args.head_type == "attention"
+    encoder, context_encoder, flow = build_model(
+        device, dropout=args.dropout, head=head, head_type=args.head_type,
+        lora_rank=args.lora_rank, lora_blocks=args.lora_blocks,
+        grad_checkpoint=args.grad_checkpoint,
     )
+    param_groups: list[dict] = [
+        {"params": list(context_encoder.parameters()) + list(flow.parameters()), "lr": args.lr}
+    ]
+    if args.head_type == "cls":
+        param_groups.append({"params": [encoder.cls_token], "lr": args.lr})
+        param_groups.extend(encoder.encoder_param_groups(args.encoder_lr, args.llrd_gamma))
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
+    trainable_params = [p for g in param_groups for p in g["params"]]
     sampler = ComboSampler.default()
     config = {
         "target": args.target,
@@ -379,9 +413,20 @@ def train(args: argparse.Namespace) -> None:
         "error_mode": args.error_mode,
         "inject_samples": int(args.inject_samples),
         "mask_mode": args.mask_mode,
+        "head_type": args.head_type,
+        "lora_rank": int(args.lora_rank),
+        "lora_blocks": int(args.lora_blocks),
+        "encoder_lr": float(args.encoder_lr),
+        "llrd_gamma": float(args.llrd_gamma),
+        "encoder_warmup_epochs": int(args.encoder_warmup_epochs),
+        "grad_checkpoint": bool(args.grad_checkpoint),
         "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
         "max_target_sigma": args.max_target_sigma,
-        "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
+        "architecture": (
+            "v3_cls_lora_flow_clean" if args.head_type == "cls"
+            else "paper_q4_l2_attention_flow_clean" if is_paper_head
+            else "aion_attention_flow_clean_custom_head"
+        ),
         "training_mix": "25% singles, 25% pairs, 25% triples, 25% all-input",
         "modalities": list(MODALITIES),
         "standardizer": standardizer.state_dict(),
@@ -419,6 +464,13 @@ def train(args: argparse.Namespace) -> None:
         encoder.eval()
         context_encoder.train()
         flow.train()
+        if args.head_type == "cls" and args.encoder_warmup_epochs > 0:
+            # Warmup: CLS + head + flow adapt to the frozen encoder before the
+            # LoRA adapters move (their LR is 0 during warmup epochs).
+            scale = 0.0 if epoch <= args.encoder_warmup_epochs else 1.0
+            for group in optimizer.param_groups:
+                if group.get("is_encoder"):
+                    group["lr"] = group["base_lr"] * scale
         train_losses: list[float] = []
         train_counts: list[int] = []
         size_losses: dict[int, list[float]] = {1: [], 2: [], 3: [], 4: []}
@@ -446,9 +498,7 @@ def train(args: argparse.Namespace) -> None:
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                list(context_encoder.parameters()) + list(flow.parameters()), args.grad_clip
-            )
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
             optimizer.step()
 
             train_losses.append(float(loss.item()))
@@ -512,6 +562,9 @@ def train(args: argparse.Namespace) -> None:
                 log_payload[key] = float(np.mean(losses))
         tracker.log(log_payload, step=global_step)
 
+        encoder_trainable = (
+            encoder.encoder_trainable_state() if args.head_type == "cls" else None
+        )
         save_checkpoint(
             run_dir / "last.pt",
             epoch=epoch,
@@ -521,6 +574,7 @@ def train(args: argparse.Namespace) -> None:
             standardizer=standardizer,
             config=config,
             val_all_inputs_nll=val_nll,
+            encoder_trainable=encoder_trainable,
         )
         if val_nll < best_val:
             best_val = val_nll
@@ -533,6 +587,7 @@ def train(args: argparse.Namespace) -> None:
                 standardizer=standardizer,
                 config=config,
                 val_all_inputs_nll=val_nll,
+                encoder_trainable=encoder_trainable,
             )
 
     tracker.summary({"val/best_all_inputs_nll": best_val, "epochs_run": args.epochs})
@@ -751,6 +806,23 @@ def parse_args() -> argparse.Namespace:
                               help="Train on one fixed modality combo, e.g. 'spectra'.")
     train_parser.add_argument("--token-mask-augment", action="store_true",
                               help="Random rest-frame coalition masking of spectrum tokens (Shapley prep).")
+    train_parser.add_argument(
+        "--head-type", choices=["attention", "cls"], default="attention",
+        help="cls = V3: trainable CLS token at the encoder input + LoRA fine-tune, "
+        "projected to the same 256-dim context and identical flow.",
+    )
+    train_parser.add_argument("--lora-rank", type=int, default=8,
+                              help="LoRA rank for --head-type cls (0 = CLS+head only).")
+    train_parser.add_argument("--lora-blocks", type=int, default=0,
+                              help="Apply LoRA to the LAST k encoder blocks (0 = none).")
+    train_parser.add_argument("--encoder-lr", type=float, default=2e-5,
+                              help="Base LR for encoder LoRA groups (decayed by --llrd-gamma per block).")
+    train_parser.add_argument("--llrd-gamma", type=float, default=0.8,
+                              help="Layer-wise LR decay per block from the top, cls mode.")
+    train_parser.add_argument("--encoder-warmup-epochs", type=int, default=1,
+                              help="Epochs with encoder LoRA LR at 0 (CLS/head/flow adapt first).")
+    train_parser.add_argument("--grad-checkpoint", action="store_true",
+                              help="Gradient-checkpoint encoder blocks (needed for cls mode at bs 448).")
     train_parser.add_argument(
         "--mask-mode", choices=["drop", "replace"], default="drop",
         help="Token removal semantics for masking: drop = AION-native input mask "

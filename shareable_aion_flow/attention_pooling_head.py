@@ -284,6 +284,29 @@ class AIONAttentionContext(nn.Module):
         return self.adapter(self.pooler(tokens, group_ids))
 
 
+class CLSContext(nn.Module):
+    """V3 head: project the AION CLS hidden state to the flow context.
+
+    Keeps the ``(tokens, group_ids)`` interface of ``AIONAttentionContext`` so
+    the train/val/eval plumbing is untouched: ``tokens`` is the [B, 1, 768] CLS
+    hidden returned by the cls-mode encoder; ``group_ids`` is ignored. The
+    output feeds the SAME ConditionalNSFFlow as the attention heads, so V3 is
+    an equivalent-flow comparison isolating pooling + encoder fine-tuning.
+    """
+
+    def __init__(self, embed_dim: int = 768, context_dim: int = 256) -> None:
+        super().__init__()
+        self.norm_in = nn.LayerNorm(embed_dim)
+        self.project = nn.Linear(embed_dim, context_dim)
+        self.norm_out = nn.LayerNorm(context_dim)
+        self.context_dim = context_dim
+
+    def forward(self, tokens: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
+        if tokens.dim() != 3 or tokens.shape[1] != 1:
+            raise ValueError(f"CLSContext expects [B, 1, D] CLS hidden, got {tuple(tokens.shape)}.")
+        return self.norm_out(self.project(self.norm_in(tokens[:, 0])))
+
+
 @dataclass(frozen=True)
 class ComboSampler:
     """Uniformly sample by combo size: singles, pairs, triples, all-input."""

@@ -94,3 +94,13 @@ def test_combo_sampler_samples_all_combo_sizes() -> None:
     sampler = ComboSampler.default()
     sizes = {len(combo) for combos in sampler.combos_by_size.values() for combo in combos}
     assert sizes == {1, 2, 3, 4}
+
+
+def test_cls_context_projects_cls_hidden() -> None:
+    from attention_pooling_head import CLSContext
+
+    head = CLSContext(embed_dim=768, context_dim=256)
+    out = head(torch.randn(3, 1, 768), torch.zeros(3, 1, dtype=torch.long))
+    assert out.shape == (3, 256)
+    with pytest.raises(ValueError, match="CLS hidden"):
+        head(torch.randn(3, 5, 768), torch.zeros(3, 5, dtype=torch.long))

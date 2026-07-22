@@ -647,7 +647,22 @@ class AIONTokenEncoder(nn.Module):
     attention head. ``aion`` is imported lazily so staging and tests run without it.
     """
 
-    def __init__(self, model_name: str = "polymathic-ai/aion-base", freeze: bool = True) -> None:
+    def __init__(
+        self,
+        model_name: str = "polymathic-ai/aion-base",
+        freeze: bool = True,
+        cls_mode: bool = False,
+        lora_rank: int = 0,
+        lora_blocks: int = 0,
+        grad_checkpoint: bool = False,
+    ) -> None:
+        """``cls_mode`` (the V3 architecture): a trainable CLS token is appended
+        to the encoder input; ``encode_tokens`` then returns the CLS final
+        hidden state as a 1-token sequence. Base backbone weights stay frozen;
+        ``lora_rank``/``lora_blocks`` inject trainable LoRA adapters (attention
+        q/k/v/proj) into the LAST ``lora_blocks`` encoder blocks. A CLS at the
+        input forces backprop through every block, so ``grad_checkpoint``
+        trades ~2x forward compute for ~10x activation memory."""
         super().__init__()
         try:
             from aion import AION
@@ -670,10 +685,44 @@ class AIONTokenEncoder(nn.Module):
         self.z_cls = Z
         self.image_cls = LegacySurveyImage
         self.wise_classes = (LegacySurveyFluxW1, LegacySurveyFluxW2, LegacySurveyFluxW3)
-        self.freeze = freeze
-        if freeze:
-            for parameter in self.backbone.parameters():
-                parameter.requires_grad = False
+        self.cls_mode = bool(cls_mode)
+        self.lora_rank = int(lora_rank)
+        self.lora_blocks = int(lora_blocks)
+        self.grad_checkpoint = bool(grad_checkpoint)
+        self.freeze = freeze and not cls_mode
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+        if self.cls_mode:
+            dim = int(self.backbone.encoder_norm.weight.shape[0])
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+            nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+            if self.lora_rank > 0 and self.lora_blocks > 0:
+                from aion.fourm.lora_utils import inject_trainable_LoRA
+
+                for block in list(self.backbone.encoder)[-self.lora_blocks:]:
+                    inject_trainable_LoRA(block, rank=self.lora_rank, scale=1.0)
+                for name, parameter in self.backbone.named_parameters():
+                    if "lora_" in name:
+                        parameter.requires_grad = True
+
+    def encoder_trainable_state(self) -> dict[str, torch.Tensor]:
+        """CLS + LoRA parameters only (the 318M frozen base stays out of checkpoints)."""
+        return {
+            name: tensor
+            for name, tensor in self.state_dict().items()
+            if "lora_" in name or "cls_token" in name
+        }
+
+    def encoder_param_groups(self, base_lr: float, llrd_gamma: float = 0.8) -> list[dict]:
+        """Per-block LoRA parameter groups with layer-wise LR decay from the top."""
+        groups: list[dict] = []
+        blocks = list(self.backbone.encoder)
+        for depth_from_top, block in enumerate(reversed(blocks[-self.lora_blocks:] if self.lora_blocks else [])):
+            params = [p for n, p in block.named_parameters() if "lora_" in n]
+            if params:
+                lr = base_lr * (llrd_gamma ** depth_from_top)
+                groups.append({"params": params, "lr": lr, "base_lr": lr, "is_encoder": True})
+        return groups
 
     def _codec(self, device: torch.device):
         if self.codec_manager is None or str(device) != getattr(self.codec_manager, "device", None):
@@ -847,6 +896,12 @@ class AIONTokenEncoder(nn.Module):
                 mask=input_mask_dict,
                 num_encoder_tokens=num_tokens,
             )
+            if self.cls_mode:
+                cls_hidden = self._encode_with_cls(encoder_tokens, encoder_emb, encoder_mask)
+                group_ids = torch.zeros(
+                    cls_hidden.shape[0], 1, dtype=torch.long, device=cls_hidden.device
+                )
+                return cls_hidden.unsqueeze(1), group_ids
             tokens = self.backbone._encode(encoder_tokens, encoder_emb, encoder_mask)
         # encoder_mask marks invalid (dropped) positions with 1/True; those become
         # group id -1 so the attention head excludes them from pooling.
@@ -854,3 +909,31 @@ class AIONTokenEncoder(nn.Module):
         if input_mask_dict is not None:
             invalid = encoder_mask.reshape(encoder_mod_mask.shape).bool()
         return tokens, self._group_ids_from_modality_mask(encoder_mod_mask, invalid=invalid)
+
+    def _encode_with_cls(
+        self,
+        encoder_tokens: torch.Tensor,
+        encoder_emb: torch.Tensor,
+        encoder_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the encoder with the trainable CLS appended; return its final hidden.
+
+        The CLS enters at block 0 (it shapes the encoding, not just reads it),
+        with zero positional embedding (the parameter learns its own bias) and
+        a valid attention-mask slot. Because the CLS requires grad, activations
+        for every block are stored -- ``grad_checkpoint`` recomputes them in
+        backward instead.
+        """
+        x = encoder_tokens + encoder_emb
+        batch = x.shape[0]
+        x = torch.cat([x, self.cls_token.expand(batch, -1, -1).to(x.dtype)], dim=1)
+        pad = torch.zeros(batch, 1, 1, dtype=encoder_mask.dtype, device=encoder_mask.device)
+        mask = torch.cat([encoder_mask, pad], dim=-1)
+        for block in self.backbone.encoder:
+            if self.grad_checkpoint and torch.is_grad_enabled():
+                x = torch.utils.checkpoint.checkpoint(
+                    lambda inp, blk=block: blk(inp, mask=mask), x, use_reentrant=False
+                )
+            else:
+                x = block(x, mask=mask)
+        return self.backbone.encoder_norm(x)[:, -1]
