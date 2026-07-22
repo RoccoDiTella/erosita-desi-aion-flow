@@ -189,6 +189,7 @@ inflate it), but the *latent* decomposition is not certified by it — the
 - Queued fixes, in order: residual regression Var(y−p50)=a·σ²+b (free, decisive
   on kernel scale + floor); one learned noise-floor scalar in the kernel (still
   σ-free at inference); reassess after a 50-epoch run (does the latent sharpen?).
+- **OPERATING MODE (2026-07-21, supersedes the line below for training): `--error-mode inject` with multi-draw sampling (`--inject-samples 8`)** — per step, k noise draws from each source's split normal, trained point-wise (mean log-prob; AION context shared across draws so k is ~free). Accepts the documented broadening bias (~E[σ²]≈0.03 variance inflation) in exchange for: observation-space simplicity, no kernel at eval, per-source errors still shaping the fit. Convolve remains the optional latent tool; the p(t|x) deployment question is out with a research agent.
 - **MODELING DECISION (2026-07-21): the primary estimand is p(y|x)** — plain
   likelihood at observed values, `--error-mode none`, no kernel anywhere. One
   space, fully checkable against held-out data, IG directly comparable to the

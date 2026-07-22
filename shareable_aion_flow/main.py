@@ -157,6 +157,7 @@ def batch_nll(
     combo: tuple[str, ...],
     standardizer: TargetStandardizer,
     error_mode: str = "none",
+    inject_samples: int = 1,
 ) -> torch.Tensor:
     """Negative log-likelihood of one batch under the flow for a given modality combo.
 
@@ -172,7 +173,7 @@ def batch_nll(
     target_std = standardizer.transform_tensor(target)
     tokens, group_ids = encoder.encode_tokens(batch, combo)
     context = context_encoder(tokens, group_ids)
-    log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode)
+    log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode, inject_samples)
     loss = -log_prob.mean()
     if not torch.isfinite(loss):
         raise FloatingPointError(f"Non-finite NLL for combo={'+'.join(combo)}.")
@@ -186,6 +187,7 @@ def _log_prob_with_error(
     batch: tuple[torch.Tensor, ...],
     standardizer: TargetStandardizer,
     error_mode: str,
+    inject_samples: int = 1,
 ) -> torch.Tensor:
     """Flow log-prob under the run's error mode, given a precomputed context."""
     has_err = error_mode != "none" and len(batch) >= 10 and float((batch[8].abs() + batch[9].abs()).max()) > 1e-8
@@ -195,7 +197,15 @@ def _log_prob_with_error(
         if error_mode == "convolve":
             return flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
         if error_mode == "inject":
-            return flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
+            # Multi-draw injection: the AION context is already paid for, and the
+            # flow forward is tiny, so k draws per step cost ~nothing and reduce
+            # gradient variance. Mean of log-probs (point-wise training on
+            # perturbed targets) — accepts the documented broadening bias.
+            draws = [
+                flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
+                for _ in range(max(1, int(inject_samples)))
+            ]
+            return torch.stack(draws).mean(dim=0)
         raise ValueError(f"Unknown error_mode {error_mode!r}.")
     return flow.log_prob(target_std, context)
 
@@ -241,7 +251,7 @@ def validation_metrics(
         for name, combo in combos.items():
             tokens, group_ids = encoder.encode_tokens(batch, combo)
             context = context_encoder(tokens, group_ids)
-            log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode)
+            log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode, inject_samples)
             nll_sums[name] += float(-log_prob.mean().item()) * n
             samples = flow.sample(context, num_samples=r2_samples)
             preds[name].append(samples.mean(dim=0).detach().cpu().numpy().ravel())
@@ -359,6 +369,7 @@ def train(args: argparse.Namespace) -> None:
         "dropout": args.dropout,
         "head": head,
         "error_mode": args.error_mode,
+        "inject_samples": int(args.inject_samples),
         "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
         "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
         "training_mix": "25% singles, 25% pairs, 25% triples, 25% all-input",
@@ -405,6 +416,7 @@ def train(args: argparse.Namespace) -> None:
                 combo=combo,
                 standardizer=standardizer,
                 error_mode=args.error_mode,
+                inject_samples=args.inject_samples,
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -703,6 +715,12 @@ def parse_args() -> argparse.Namespace:
         "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
+    train_parser.add_argument(
+        "--inject-samples",
+        type=int,
+        default=8,
+        help="Noise draws per source per step in --error-mode inject (context is reused, so cheap).",
+    )
     train_parser.add_argument(
         "--clean-split-csv",
         type=Path,
