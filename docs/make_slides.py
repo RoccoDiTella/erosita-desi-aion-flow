@@ -65,25 +65,26 @@ def metric_table(ax: plt.Axes, frame: pd.DataFrame, *, rect: tuple[float, float,
     table = ax.table(cellText=frame.values.tolist(), colLabels=frame.columns.tolist(), cellLoc="center", bbox=rect)
     table.auto_set_font_size(False)
     table.set_fontsize(fontsize)
-    for (row, _col), cell in table.get_celld().items():
+    mono_cols = [i for i, c in enumerate(frame.columns) if c == "inputs"]
+    for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor("#dddddd")
         if row == 0:
             cell.set_facecolor(ACCENT)
             cell.set_text_props(color="white", fontweight="bold")
+        elif col in mono_cols:
+            cell.set_text_props(family="monospace")
 
 
 def load_marker_table(metrics_csv: Path | None) -> pd.DataFrame | None:
-    """Compact S/Z/W/I indicator table, R^2 + exp(IG) only, sorted by R^2."""
+    """Single aligned 'S Z W I' column (spaces when absent), R^2 + exp(IG)."""
     if metrics_csv is None or not Path(metrics_csv).exists():
         return None
     t = pd.read_csv(metrics_csv).sort_values("r2")
     rows = []
     for _, r in t.iterrows():
         parts = set(str(r.input_group).split("+"))
-        row = {short: ("●" if name in parts else "·") for name, short in MODALITY_ORDER}
-        row["R²"] = f"{r.r2:.3f}"
-        row["exp(IG)"] = f"{r.exp_info_gain:.2f}"
-        rows.append(row)
+        combo = " ".join(short if name in parts else " " for name, short in MODALITY_ORDER)
+        rows.append({"inputs": combo, "R²": f"{r.r2:.3f}", "exp(IG)": f"{r.exp_info_gain:.2f}"})
     return pd.DataFrame(rows)
 
 
@@ -125,24 +126,25 @@ def main() -> None:
         ], fontsize=14, dy=0.16)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 3 NWAY cleaning
+        # ---- 3 Buchner comment (screenshot only)
+        fig = plt.figure(figsize=SLIDE)
+        fig.patch.set_facecolor("white")
+        image_panel(fig, FIGS / "johannes_buchner_comment.png", (0.05, 0.28, 0.90, 0.44))
+        pdf.savefig(fig); plt.close(fig)
+
+        # ---- 4 NWAY cleaning
         fig, ax = new_slide("Crossmatch cleaning with NWAY",
                             "Salvato+2025 (A&A 704 A344): Bayesian matching of eRASS1 X-ray sources to optical counterparts")
         image_panel(fig, FIGS / "fig_dz_log.png", (0.04, 0.08, 0.52, 0.62))
         ax2 = fig.add_axes([0.58, 0.08, 0.40, 0.66]); ax2.axis("off")
         bullets(ax2, [
-            "same-object test: Δz < 0.01 between our\n     counterpart's z and NWAY's (valley of\n     the bimodal distribution)",
-            "wrong (3.3%): Δz ≥ 0.01 — different object",
-            "ambiguous (3.4%): NWAY match has no\n     spec-z — unverifiable",
-            "spurious (5.0%): NWAY assigns no\n     counterpart at all",
-            "keep = correct only (87.5%); paper model\n     2× worse on rejects (0.549 → 0.567)",
-        ], fontsize=12.5, dy=0.175)
-        pdf.savefig(fig); plt.close(fig)
-
-        # ---- 4 Buchner comment (screenshot only)
-        fig = plt.figure(figsize=SLIDE)
-        fig.patch.set_facecolor("white")
-        image_panel(fig, FIGS / "johannes_buchner_comment.png", (0.05, 0.28, 0.90, 0.44))
+            "in NWAY, ~95% of our sources have a\n     confirmed optical match",
+            "3.3%: z mismatch > 0.01",
+            "3.4%: no z — no way to check",
+            "we keep only NWAY-confirmed sources",
+            "PAI performance: R² 0.549",
+            "PAI on mismatched objects: R² 0.29",
+        ], fontsize=13, dy=0.15)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 5 Errors
