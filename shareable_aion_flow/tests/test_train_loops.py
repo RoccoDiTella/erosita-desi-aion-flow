@@ -16,7 +16,7 @@ from shareable_aion_flow.normalizing_flow import TargetStandardizer
 
 
 class StubEncoder:
-    def encode_tokens(self, batch, combo, spectrum_token_mask=None):
+    def encode_tokens(self, batch, combo, spectrum_token_mask=None, mask_mode="drop"):
         flux = batch[0]
         tokens = torch.zeros(flux.shape[0], 4, 8)
         group_ids = torch.zeros(flux.shape[0], 4, dtype=torch.long)

@@ -55,13 +55,31 @@ def test_paper_pooler_returns_flattened_four_query_features() -> None:
     assert output.shape == (3, 4 * 16)
 
 
-def test_paper_pooler_rejects_legacy_padding_or_invalid_ids() -> None:
+def test_paper_pooler_rejects_invalid_ids_but_allows_padding() -> None:
     pooler = PaperQ4L2AttentionPooler(embed_dim=16, num_heads=4, dropout=0.0)
     tokens = torch.randn(1, 3, 16)
     with pytest.raises(ValueError, match="direct modality ids"):
-        pooler(tokens, torch.tensor([[0, -1, 3]], dtype=torch.long))
+        pooler(tokens, torch.tensor([[0, -2, 3]], dtype=torch.long))
     with pytest.raises(ValueError, match="direct modality ids"):
         pooler(tokens, torch.tensor([[0, 4, 3]], dtype=torch.long))
+    # -1 is dropped-token padding and must be accepted
+    out = pooler(tokens, torch.tensor([[0, -1, 3]], dtype=torch.long))
+    assert out.shape == (1, 4 * 16)
+    with pytest.raises(ValueError, match="non-padding token"):
+        pooler(tokens, torch.tensor([[-1, -1, -1]], dtype=torch.long))
+
+
+def test_padding_tokens_do_not_change_pooler_output() -> None:
+    torch.manual_seed(0)
+    pooler = PaperQ4L2AttentionPooler(embed_dim=16, num_heads=4, dropout=0.0).eval()
+    tokens = torch.randn(2, 5, 16)
+    ids = torch.tensor([[0, 0, 1, 2, 3], [3, 2, 1, 0, 0]])
+    base = pooler(tokens, ids)
+    garbage = 100.0 * torch.randn(2, 2, 16)
+    padded_tokens = torch.cat([tokens, garbage], dim=1)
+    padded_ids = torch.cat([ids, torch.full((2, 2), -1, dtype=torch.long)], dim=1)
+    with_pad = pooler(padded_tokens, padded_ids)
+    torch.testing.assert_close(base, with_pad, atol=1e-5, rtol=1e-4)
 
 
 def test_context_encoder_returns_flow_context() -> None:

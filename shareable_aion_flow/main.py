@@ -159,6 +159,7 @@ def batch_nll(
     error_mode: str = "none",
     inject_samples: int = 1,
     spectrum_token_mask: torch.Tensor | None = None,
+    mask_mode: str = "drop",
 ) -> torch.Tensor:
     """Negative log-likelihood of one batch under the flow for a given modality combo.
 
@@ -166,13 +167,16 @@ def batch_nll(
     as ``batch[8]=sig_lo, batch[9]=sig_hi`` (in target units): ``convolve``
     deconvolves it via the convolution likelihood, ``inject`` adds it as noise,
     ``none`` ignores it. Falls back to plain log-prob when errors are absent/zero.
+    ``mask_mode`` governs how ``spectrum_token_mask`` removes tokens (drop|replace).
     """
     target = batch[6]
     if not torch.isfinite(target).all():
         bad = int((~torch.isfinite(target)).sum().item())
         raise FloatingPointError(f"Encountered {bad} non-finite target values in a training/eval batch.")
     target_std = standardizer.transform_tensor(target)
-    tokens, group_ids = encoder.encode_tokens(batch, combo, spectrum_token_mask=spectrum_token_mask)
+    tokens, group_ids = encoder.encode_tokens(
+        batch, combo, spectrum_token_mask=spectrum_token_mask, mask_mode=mask_mode
+    )
     context = context_encoder(tokens, group_ids)
     log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode, inject_samples)
     loss = -log_prob.mean()
@@ -374,6 +378,7 @@ def train(args: argparse.Namespace) -> None:
         "head": head,
         "error_mode": args.error_mode,
         "inject_samples": int(args.inject_samples),
+        "mask_mode": args.mask_mode,
         "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
         "max_target_sigma": args.max_target_sigma,
         "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
@@ -437,6 +442,7 @@ def train(args: argparse.Namespace) -> None:
                 error_mode=args.error_mode,
                 inject_samples=args.inject_samples,
                 spectrum_token_mask=token_mask,
+                mask_mode=args.mask_mode,
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -745,6 +751,11 @@ def parse_args() -> argparse.Namespace:
                               help="Train on one fixed modality combo, e.g. 'spectra'.")
     train_parser.add_argument("--token-mask-augment", action="store_true",
                               help="Random rest-frame coalition masking of spectrum tokens (Shapley prep).")
+    train_parser.add_argument(
+        "--mask-mode", choices=["drop", "replace"], default="drop",
+        help="Token removal semantics for masking: drop = AION-native input mask "
+        "with pixel sanitization (default); replace = legacy continuum-code swap.",
+    )
     train_parser.add_argument(
         "--max-target-sigma",
         type=float,

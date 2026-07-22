@@ -62,8 +62,13 @@ def validate_direct_group_ids(tokens: torch.Tensor, group_ids: torch.Tensor) -> 
         )
     if group_ids.dtype != torch.long:
         raise TypeError(f"group_ids must use torch.long dtype, got {group_ids.dtype}.")
-    if bool(group_ids.lt(0).any() or group_ids.ge(len(MODALITIES)).any()):
-        raise ValueError("group_ids must contain only direct modality ids 0=spectra, 1=z, 2=wise, 3=image.")
+    if bool(group_ids.lt(-1).any() or group_ids.ge(len(MODALITIES)).any()):
+        raise ValueError(
+            "group_ids must contain only direct modality ids 0=spectra, 1=z, 2=wise, 3=image, "
+            "or -1 for dropped-token padding."
+        )
+    if bool(group_ids.eq(-1).all(dim=1).any()):
+        raise ValueError("Every sample needs at least one non-padding token.")
 
 
 class ModalityAffine(nn.Module):
@@ -87,8 +92,11 @@ class ModalityAffine(nn.Module):
 
     def forward(self, tokens: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
         validate_direct_group_ids(tokens, group_ids)
-        scale = torch.exp(self.log_scale[group_ids].clamp(-2.0, 2.0)).unsqueeze(-1)
-        calibrated = scale.to(tokens.dtype) * tokens + self.bias[group_ids].to(tokens.dtype)
+        # Padding tokens (-1) borrow modality 0's affine; their values are
+        # irrelevant because attention masks them out downstream.
+        ids = group_ids.clamp_min(0)
+        scale = torch.exp(self.log_scale[ids].clamp(-2.0, 2.0)).unsqueeze(-1)
+        calibrated = scale.to(tokens.dtype) * tokens + self.bias[ids].to(tokens.dtype)
         return self.norm(calibrated)
 
 
@@ -128,9 +136,16 @@ class AttentionPoolingBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, queries: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        queries: torch.Tensor,
+        tokens: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         cross_input = self.query_cross_norm(queries)
-        cross_output, _ = self.cross_attention(cross_input, tokens, tokens, need_weights=False)
+        cross_output, _ = self.cross_attention(
+            cross_input, tokens, tokens, need_weights=False, key_padding_mask=key_padding_mask
+        )
         queries = queries + self.dropout(cross_output)
 
         self_input = self.query_self_norm(queries)
@@ -187,11 +202,13 @@ class PaperQ4L2AttentionPooler(nn.Module):
 
     def forward(self, tokens: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
         validate_direct_group_ids(tokens, group_ids)
+        pad = group_ids.eq(-1)
+        key_padding_mask = pad if bool(pad.any()) else None
         tokens = self.modality_affine(tokens, group_ids)
         queries = self.query.expand(tokens.shape[0], -1, -1)
         queries = queries + self.presence_embedding(batch_presence_ids(group_ids)).unsqueeze(1)
         for block in self.blocks:
-            queries = block(queries, tokens)
+            queries = block(queries, tokens, key_padding_mask=key_padding_mask)
         pooled_queries = self.output(queries)
         return pooled_queries.flatten(start_dim=1)
 

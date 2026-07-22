@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 """Run the line/continuum Shapley sweeps on a trained spectra-only checkpoint.
 
-Outputs into <run-dir>/shapley/: shapley_table.csv (per player: phi, SE, n),
-heatmap.png (z-bins x rest wavelength), and line_table.png.
+Outputs into <run-dir>/shapley/: shapley_table.csv (per player: phi, SE, n,
+mean tokens, phi per token), pair_interactions.csv, coalition_summary.csv
+(full / lines-only / continuum-only / norm-only log-likelihoods), heatmap.png,
+line_table.png, pair_heatmap.png.
 
     python scripts/run_line_shapley.py --checkpoint <best.pt> \
         --staged-dir <staged_paper> --clean-split-csv <clean_split.csv> \
-        [--full-sweeps 2] [--line-sweeps 4] [--batch-size 256]
+        [--full-sweeps 2] [--line-sweeps 4] [--pair-sweeps 3] \
+        [--mask-mode drop] [--batch-size 256]
 """
 
 from __future__ import annotations
@@ -25,10 +28,73 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shareable_aion_flow.data_to_aion_embeddings import build_dataloaders  # noqa: E402
-from shareable_aion_flow.line_shapley import N_LINES, player_catalog, run_sweeps  # noqa: E402
+from shareable_aion_flow.line_shapley import (  # noqa: E402
+    N_LINES,
+    N_SPEC_TOKENS,
+    masked_log_prob,
+    player_catalog,
+    player_token_map,
+    run_sweeps,
+)
 from shareable_aion_flow.main import load_checkpoint  # noqa: E402
 
 ACCENT, LINEC = "#0072B2", "#D55E00"
+
+
+@torch.no_grad()
+def coalition_summary(*, encoder, context_encoder, flow, loader, standardizer,
+                      players, device, mask_mode) -> pd.DataFrame:
+    """Mean test log-likelihood of four fixed coalitions.
+
+    full = no mask; lines_only = drop all continuum tokens; continuum_only =
+    drop all line tokens; norm_only = drop every wavelength token (the
+    normalization token always stays: all four condition on overall brightness).
+    """
+    sums = {"full": 0.0, "continuum_only": 0.0, "lines_only": 0.0, "norm_only": 0.0}
+    total = 0
+    for batch in loader:
+        batch = tuple(t.to(device, non_blocking=True) for t in batch)
+        z_np = batch[3].detach().cpu().numpy().ravel()
+        B = len(z_np)
+        total += B
+        masks = {
+            "full": np.zeros((B, N_SPEC_TOKENS), dtype=bool),
+            "continuum_only": np.zeros((B, N_SPEC_TOKENS), dtype=bool),
+            "lines_only": np.zeros((B, N_SPEC_TOKENS), dtype=bool),
+            "norm_only": np.ones((B, N_SPEC_TOKENS), dtype=bool),
+        }
+        for b in range(B):
+            tok = player_token_map(float(z_np[b]), players)
+            for j, t in enumerate(tok):
+                if not len(t):
+                    continue
+                if j < N_LINES:
+                    masks["continuum_only"][b, t] = True
+                else:
+                    masks["lines_only"][b, t] = True
+        for name, mask in masks.items():
+            lp = masked_log_prob(
+                encoder=encoder, context_encoder=context_encoder, flow=flow,
+                batch=batch, standardizer=standardizer,
+                spectrum_token_mask=torch.from_numpy(mask).to(device),
+                mask_mode=mask_mode,
+            )
+            sums[name] += float(lp.sum())
+    return pd.DataFrame(
+        [{"coalition": k, "mean_log_prob_nats": v / total, "n_test": total} for k, v in sums.items()]
+    )
+
+
+def mean_tokens_per_player(loader, players) -> np.ndarray:
+    counts = np.zeros(len(players))
+    avail = np.zeros(len(players))
+    for batch in loader:
+        for z in batch[3].detach().cpu().numpy().ravel():
+            for j, t in enumerate(player_token_map(float(z), players)):
+                if len(t):
+                    counts[j] += len(t)
+                    avail[j] += 1
+    return counts / np.maximum(avail, 1)
 
 
 def main() -> None:
@@ -38,6 +104,9 @@ def main() -> None:
     ap.add_argument("--clean-split-csv", type=Path, default=None)
     ap.add_argument("--full-sweeps", type=int, default=2)
     ap.add_argument("--line-sweeps", type=int, default=4)
+    ap.add_argument("--pair-sweeps", type=int, default=3)
+    ap.add_argument("--mask-mode", choices=["drop", "replace"], default=None,
+                    help="Defaults to the checkpoint config's mask_mode, else drop.")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
@@ -47,29 +116,56 @@ def main() -> None:
     encoder, context_encoder, flow, standardizer, config = load_checkpoint(
         args.checkpoint, device=device, dropout=0.0
     )
+    mask_mode = args.mask_mode or str(config.get("mask_mode", "drop"))
     target = config.get("target", "log_ml_flux_1")
     _, _, test_loader = build_dataloaders(
         staged_dir=args.staged_dir, target_name=target, batch_size=args.batch_size,
         num_workers=args.num_workers, clean_split_csv=args.clean_split_csv,
     )
     players = player_catalog()
-    acc = run_sweeps(
-        encoder=encoder, context_encoder=context_encoder, flow=flow,
-        loader=test_loader, standardizer=standardizer, players=players,
-        device=device, n_full_sweeps=args.full_sweeps, n_line_sweeps=args.line_sweeps,
-        seed=args.seed,
-    )
+    print(f"mask_mode={mask_mode}", flush=True)
 
     out_dir = args.checkpoint.parent / "shapley"
     out_dir.mkdir(exist_ok=True)
+
+    summary = coalition_summary(
+        encoder=encoder, context_encoder=context_encoder, flow=flow,
+        loader=test_loader, standardizer=standardizer, players=players,
+        device=device, mask_mode=mask_mode,
+    )
+    summary.to_csv(out_dir / "coalition_summary.csv", index=False)
+    print(summary.to_string(index=False), flush=True)
+
+    acc, pair_acc = run_sweeps(
+        encoder=encoder, context_encoder=context_encoder, flow=flow,
+        loader=test_loader, standardizer=standardizer, players=players,
+        device=device, n_full_sweeps=args.full_sweeps, n_line_sweeps=args.line_sweeps,
+        n_pair_sweeps=args.pair_sweeps, mask_mode=mask_mode, seed=args.seed,
+    )
+
     phi, se, count = acc.table()
+    mean_tok = mean_tokens_per_player(test_loader, players)
     table = pd.DataFrame({
         "player": [p["name"] for p in players],
         "kind": [p["kind"] for p in players],
         "rest_center_A": [p["rest_center"] for p in players],
         "phi_nats": phi, "se_nats": se, "n_samples": count,
+        "mean_tokens": mean_tok,
+        "phi_per_token": phi / np.maximum(mean_tok, 1e-9),
     })
     table.to_csv(out_dir / "shapley_table.csv", index=False)
+
+    imean, ise, icount = pair_acc.table()
+    line_names = [p["name"] for p in players[:N_LINES]]
+    pair_rows = []
+    for i in range(N_LINES):
+        for j in range(i + 1, N_LINES):
+            pair_rows.append({
+                "line_a": line_names[i], "line_b": line_names[j],
+                "interaction_nats": imean[i, j], "se_nats": ise[i, j],
+                "n_samples": icount[i, j],
+            })
+    pd.DataFrame(pair_rows).to_csv(out_dir / "pair_interactions.csv", index=False)
 
     # ---- heatmap: z-bins x players on the rest-wavelength axis
     zt = acc.z_table()
@@ -102,6 +198,19 @@ def main() -> None:
     ax.set_title("Emission-line contributions to flux prediction")
     fig.tight_layout()
     fig.savefig(out_dir / "line_table.png", dpi=180)
+    plt.close(fig)
+
+    # ---- pair interaction heatmap
+    fig, ax = plt.subplots(figsize=(6.4, 5.2))
+    vmax = np.nanmax(np.abs(imean)) or 1e-4
+    masked = np.where(np.eye(N_LINES, dtype=bool), np.nan, imean)
+    im = ax.imshow(masked, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    ax.set_xticks(range(N_LINES), line_names, rotation=45, ha="right", fontsize=9)
+    ax.set_yticks(range(N_LINES), line_names, fontsize=9)
+    fig.colorbar(im, ax=ax, label="Shapley interaction (nats)")
+    ax.set_title("Line-pair interactions (blue = redundant, red = synergistic)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "pair_heatmap.png", dpi=180)
     plt.close(fig)
 
     print(table.head(N_LINES).to_string(index=False))

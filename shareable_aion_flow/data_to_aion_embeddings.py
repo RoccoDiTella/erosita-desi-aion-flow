@@ -679,7 +679,10 @@ class AIONTokenEncoder(nn.Module):
     def _num_tokens(token_dict: dict[str, torch.Tensor]) -> int:
         return sum(tensor.shape[1] if tensor.dim() > 1 else 1 for tensor in token_dict.values())
 
-    def _group_ids_from_modality_mask(self, modality_mask: torch.Tensor) -> torch.Tensor:
+    def _group_ids_from_modality_mask(
+        self, modality_mask: torch.Tensor, invalid: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Map AION modality ids to head group ids; ``invalid`` positions become -1 (padding)."""
         group_ids = torch.full_like(modality_mask, -1, dtype=torch.long)
         modality_info = getattr(self.backbone, "modality_info", {})
         for group_name, token_keys in TOKEN_KEYS_BY_MODALITY.items():
@@ -688,8 +691,13 @@ class AIONTokenEncoder(nn.Module):
                     group_ids[modality_mask.eq(int(modality_info[token_key]["id"]))] = MODALITY_TO_ID[
                         group_name
                     ]
-        if bool(group_ids.lt(0).any()):
+        unmapped = group_ids.lt(0)
+        if invalid is not None:
+            unmapped = unmapped & ~invalid
+        if bool(unmapped.any()):
             raise RuntimeError("AION returned token ids that are not mapped to spectra, z, WISE, or image.")
+        if invalid is not None:
+            group_ids = group_ids.masked_fill(invalid, -1)
         return group_ids
 
     def _spec_key(self, token_dict: dict) -> str:
@@ -698,31 +706,76 @@ class AIONTokenEncoder(nn.Module):
                 return key
         raise KeyError(f"No spectrum token key in {list(token_dict)}")
 
-    def _locate_spec_columns(self, device: torch.device, wavelength: torch.Tensor) -> int:
-        """Column offset of wavelength-token 0 inside the spectrum code tensor.
+    @staticmethod
+    def _median_continuum(flux: torch.Tensor, k: int = 101) -> torch.Tensor:
+        """Per-source 101-px (~80 A) running-median continuum estimate."""
+        pad = k // 2
+        padded = torch.nn.functional.pad(flux.unsqueeze(1), (pad, pad), mode="reflect").squeeze(1)
+        return padded.unfold(-1, k, 1).median(dim=-1).values
 
-        Probed once: tokenize a flat spectrum and one with a spike inside
-        wavelength-token block 10; the changed code column reveals the offset
-        (the extra normalization token may sit before or after the 272).
+    def _sanitize_masked_pixels(
+        self, flux: torch.Tensor, spectrum_token_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Fill the raw pixels under masked CODEC tokens with the median continuum.
+
+        The codec token grid starts at 3500 A while the raw DESI grid starts at
+        3600 A, so codec token q covers raw pixels [32q - 125, 32q - 93).
+        """
+        try:
+            from .line_shapley import token_to_raw_pixels
+        except ImportError:
+            from line_shapley import token_to_raw_pixels
+
+        cont = self._median_continuum(flux)
+        n_raw = flux.shape[-1]
+        pixel_mask = torch.zeros_like(flux, dtype=torch.bool)
+        for q in range(spectrum_token_mask.shape[1]):
+            col = spectrum_token_mask[:, q]
+            if not bool(col.any()):
+                continue
+            p_lo, p_hi = token_to_raw_pixels(q)
+            p_lo, p_hi = max(p_lo, 0), min(p_hi, n_raw)
+            if p_lo < p_hi:
+                pixel_mask[col, p_lo:p_hi] = True
+        return torch.where(pixel_mask, cont, flux)
+
+    def _locate_spec_columns(self, device: torch.device, wavelength: torch.Tensor) -> int:
+        """Code-column offset of CODEC wavelength-token 0 in the code tensor.
+
+        Probed once with two spikes placed at raw pixels of two KNOWN codec
+        tokens (the codec grid starts at 3500 A, the raw DESI grid at 3600 A,
+        so codec token q covers raw pixels [32q - 125, 32q - 93)). The offset
+        is the median of (changed column - spiked token) over both probes,
+        which is robust to receptive-field leakage into neighbouring columns.
         """
         if getattr(self, "_spec_col_offset", None) is not None:
             return self._spec_col_offset
+        try:
+            from .line_shapley import token_to_raw_pixels
+        except ImportError:
+            from line_shapley import token_to_raw_pixels
+
         codec = self._codec(device)
-        base = torch.ones(1, wavelength.shape[-1], device=device)
-        spike = base.clone()
-        spike[0, 10 * 32 : 11 * 32] = 25.0
-        ivar1 = torch.ones_like(base)
+        n_raw = wavelength.shape[-1]
         wl = wavelength[:1] if wavelength.dim() > 1 else wavelength.unsqueeze(0)
-        outs = []
-        for fl in (base, spike):
+        base = torch.ones(1, n_raw, device=device)
+        ivar1 = torch.ones_like(base)
+
+        def code_of(fl: torch.Tensor) -> torch.Tensor:
             td = codec.encode(self.spectrum_cls(flux=fl, ivar=ivar1, mask=ivar1 <= 0, wavelength=wl))
-            outs.append(td[self._spec_key(td)])
-        changed = (outs[0] != outs[1]).nonzero()
-        cols = sorted(set(changed[:, -1].tolist()))
-        # spike lives in wavelength-token 10 (+ possibly the norm token changing)
-        candidates = [c - 10 for c in cols if 0 <= c - 10]
-        offset = min(candidates) if candidates else 0
-        self._spec_col_offset = int(offset)
+            return td[self._spec_key(td)]
+
+        base_code = code_of(base)
+        diffs: list[int] = []
+        for q_probe in (20, 60):
+            p_lo, p_hi = token_to_raw_pixels(q_probe)
+            spike = base.clone()
+            spike[0, p_lo:p_hi] = 25.0
+            changed = (base_code != code_of(spike)).nonzero()
+            diffs.extend(int(c) - q_probe for c in sorted(set(changed[:, -1].tolist())))
+        if not diffs:
+            raise RuntimeError("Spectrum-code column probe found no changed columns.")
+        self._spec_col_offset = int(np.median(diffs))
         return self._spec_col_offset
 
     def encode_tokens(
@@ -730,40 +783,68 @@ class AIONTokenEncoder(nn.Module):
         batch: tuple[torch.Tensor, ...],
         combo: tuple[str, ...],
         spectrum_token_mask: torch.Tensor | None = None,
+        mask_mode: str = "drop",
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a batch; ``spectrum_token_mask`` (bool [B, 272]) removes wavelength tokens.
+
+        ``mask_mode="drop"`` (default) removes masked tokens the AION-native way:
+        they are marked invalid in the encoder input mask, so backbone attention
+        never sees them (partial input is the pretraining task) and they come
+        back as group id -1 (padding) for the head to skip. ``"replace"`` is the
+        legacy behaviour: swap the masked token codes for the source's own
+        101-px median-filtered continuum codes. The normalization token is never
+        masked in either mode, so both variants condition on overall brightness.
+        """
         flux, ivar, wavelength, redshift, wise, image = batch[:6]
         codec = self._codec(flux.device)
+        if spectrum_token_mask is not None and "spectra" in combo and mask_mode == "drop":
+            # Sanitize the masked pixel windows BEFORE the codec: its ConvNeXt
+            # encoder has a multi-token receptive field, so codes of KEPT
+            # neighbouring tokens would otherwise still see the masked line.
+            # The sanitized fill is this source's own 101-px median continuum;
+            # the filled tokens themselves are then dropped from the encoder
+            # input below, so the fill only controls what neighbours see.
+            spectrum_token_mask = spectrum_token_mask.to(flux.device)
+            flux = self._sanitize_masked_pixels(flux, spectrum_token_mask)
         modalities = self._modalities(flux, ivar, wavelength, redshift, wise, image, combo)
         token_dict = codec.encode(*modalities)
+        input_mask_dict = None
         if spectrum_token_mask is not None and "spectra" in combo:
-            # Replace masked wavelength-token codes with the codes of this
-            # source's own median-filtered continuum: "remove the line, keep
-            # the continuum", applied before the backbone so the information
-            # is genuinely absent. The normalization token stays original.
-            k = 101  # ~80 A median window, wide enough to erase lines
-            pad = k // 2
-            padded = torch.nn.functional.pad(flux.unsqueeze(1), (pad, pad), mode="reflect").squeeze(1)
-            cont = padded.unfold(-1, k, 1).median(dim=-1).values
-            cont_dict = codec.encode(
-                self.spectrum_cls(flux=cont, ivar=ivar, mask=ivar <= 0.0, wavelength=wavelength)
-            )
+            if mask_mode not in ("drop", "replace"):
+                raise ValueError(f"Unknown mask_mode {mask_mode!r}.")
             key = self._spec_key(token_dict)
             offset = self._locate_spec_columns(flux.device, wavelength)
-            codes = token_dict[key].clone()
-            cont_codes = cont_dict[self._spec_key(cont_dict)]
             n_tok = spectrum_token_mask.shape[1]
-            sub = codes[:, offset : offset + n_tok]
-            sub[spectrum_token_mask] = cont_codes[:, offset : offset + n_tok][spectrum_token_mask]
-            codes[:, offset : offset + n_tok] = sub
-            token_dict[key] = codes
+            if mask_mode == "drop":
+                col_mask = torch.zeros(
+                    token_dict[key].shape[:2], dtype=torch.bool, device=flux.device
+                )
+                col_mask[:, offset : offset + n_tok] = spectrum_token_mask
+                input_mask_dict = {key: col_mask}
+            else:
+                cont = self._median_continuum(flux)
+                cont_dict = codec.encode(
+                    self.spectrum_cls(flux=cont, ivar=ivar, mask=ivar <= 0.0, wavelength=wavelength)
+                )
+                codes = token_dict[key].clone()
+                cont_codes = cont_dict[self._spec_key(cont_dict)]
+                sub = codes[:, offset : offset + n_tok]
+                sub[spectrum_token_mask] = cont_codes[:, offset : offset + n_tok][spectrum_token_mask]
+                codes[:, offset : offset + n_tok] = sub
+                token_dict[key] = codes
         num_tokens = self._num_tokens(token_dict)
 
         context_manager = torch.no_grad() if self.freeze else torch.enable_grad()
         with context_manager:
             encoder_tokens, encoder_emb, encoder_mask, encoder_mod_mask = self.backbone.embed_inputs(
                 token_dict,
-                mask=None,
+                mask=input_mask_dict,
                 num_encoder_tokens=num_tokens,
             )
             tokens = self.backbone._encode(encoder_tokens, encoder_emb, encoder_mask)
-        return tokens, self._group_ids_from_modality_mask(encoder_mod_mask)
+        # encoder_mask marks invalid (dropped) positions with 1/True; those become
+        # group id -1 so the attention head excludes them from pooling.
+        invalid = None
+        if input_mask_dict is not None:
+            invalid = encoder_mask.reshape(encoder_mod_mask.shape).bool()
+        return tokens, self._group_ids_from_modality_mask(encoder_mod_mask, invalid=invalid)
