@@ -166,6 +166,11 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | `paperhead-clean-log_ml_flux_1-34089921` | **q4/l2**, convolve | clean view | 15 | 0.555 (best combo S+I: 0.556) | **1.24 (IG +0.218)** | ✅ done (1:43 wall) |
 | `v1-clean-inject-log_ml_flux_1-34146030` | V1, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
 | `paperhead-clean-inject-log_ml_flux_1-34150667` | q4/l2, **inject(8)** | clean view | 15 | *pending* | *pending* | running |
+| `v1-clean-inject-log_lx-34185556` | V_simple, inject(8) | clean view | 15 | *pending* | | running |
+| `v1-clean-inject-hr32_u-34185558` | V_simple, inject(8), **σ_u≤1.0 gate** | clean view (83.8%) | 15 | *pending* | | running |
+| `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | *pending* | | running |
+| `v1-spec-mask-log_ml_flux_1-34193770` | V_simple, none, spectra-only + token-mask augment | clean view | 12 | (Shapley surrogate) | | running |
+| shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | outputs: shapley_table.csv, heatmap, line table | | chained |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
 | other targets (log_lx, logmstar, hr32_u) | V1, inject | clean view | 15 | | | after the inject A/B |
 
