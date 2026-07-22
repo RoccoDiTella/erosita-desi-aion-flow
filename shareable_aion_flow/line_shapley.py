@@ -49,6 +49,14 @@ LINE_PLAYERS = [  # (name, rest wavelength, half-window in rest-frame Angstrom)
     ("OIII", 5008.2, 30.0),
     ("MgII", 2798.0, 120.0),
     ("Halpha", 6564.6, 120.0),
+    # v3 additions: the hot cont_4008_4428 bin (33 mnats) is Hgamma+Hdelta
+    # territory, and the UV broad lines were uncovered entirely.
+    ("Hdelta", 4102.9, 120.0),
+    ("Hgamma", 4341.7, 120.0),  # window includes [OIII]4363
+    ("NeIII", 3869.9, 30.0),
+    ("Lyalpha", 1215.7, 120.0),
+    ("CIV", 1549.5, 120.0),
+    ("CIII", 1908.7, 120.0),
 ]
 N_LINES = len(LINE_PLAYERS)
 
