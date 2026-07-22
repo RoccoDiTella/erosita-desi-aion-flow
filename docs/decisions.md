@@ -356,3 +356,25 @@ band-rate likelihood (predict P2/P3 rates with upper limits, not their ratio).
   trusting K, and we choose not to. Convolve stays in the repo as the optional
   latent-analysis tool for future intrinsic-scatter work. Canonical flux run of
   the new config: `v1-clean-none-log_ml_flux_1-34131280`.
+
+## 7. Buchner feedback checklist (Slack, 2026-07-21)
+
+1. **Text**: state clearly the counterpart catalog is an optical-to-optical
+   crossmatch (their eRASS1–LS10 catalog to ONIR catalogs); naive X-ray-to-
+   optical matching is bad due to X-ray positional errors. (We use their NWAY
+   counterparts for cleaning — wording must reflect it.)
+2. **Validation test**: predict X-ray flux for NON-detected DESI sources —
+   predictions should fall below the eROSITA detection limit. Per-position
+   limits: Tubín-Arenas+2024 upper-limit database. (Needs a DESI sample
+   without eRASS1 detections — new data pull; natural companion to the
+   deferred censored band-rate likelihood.)
+3. **Text**: more X-ray detail; state the band explicitly (0.2–2.3 keV
+   ML_FLUX_1, correct guess).
+4. **Table 1**: add a header row "X-ray flux prediction" above R²/IG/exp(IG).
+5. **Figure**: rest-frame SED from X-ray to IR per source using predictions +
+   z; color-code by X-ray flux, median-bin to denoise. Model-interpretation
+   plot.
+6. **Cite** Salvato+2022 (eFEDS) as related work: its §3 ML prior (built by
+   J. Wolf) predicts P(X-ray emitter) from ONIR photometry (RF on griz+WISE,
+   trained on ~40k secure emitters; the NWAY prior). Comparison idea: our
+   P(detectable) = ∫ p(flux|x) above the local limit vs their classifier.
