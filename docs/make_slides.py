@@ -293,14 +293,15 @@ def main() -> None:
         # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
         if (FIGS / "fig_shapley_heatmap.png").exists():
             fig, ax = new_slide("Where in the spectrum is the flux information?",
-                                "line/continuum Shapley on the spectra-only model · masked tokens replaced by own smoothed continuum")
+                                "line/continuum Shapley, AION-native token dropping (guard band from measured codec receptive field)")
             image_panel(fig, FIGS / "fig_shapley_heatmap.png", (0.03, 0.42, 0.94, 0.40))
             image_panel(fig, FIGS / "fig_shapley_lines.png", (0.16, 0.01, 0.48, 0.40))
             ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
             bullets(ax2, [
-                "7 lines: 10% of fine-structure info",
-                "MgII strongest line",
-                "smooth SED carries most of it",
+                "Balmer lines dominate: H$\alpha$, H$\beta$, OIII",
+                "lines alone keep 92% of the info,
+   continuum alone 96%: redundant",
+                "MgII slightly negative",
             ], fontsize=12, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
 
