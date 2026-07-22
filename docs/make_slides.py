@@ -303,14 +303,6 @@ def main() -> None:
             ], fontsize=12, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
 
-        # ---- 7 Next
-        fig, ax = new_slide("Next")
-        bullets(ax, [
-            "50-epoch paper reproduction",
-            "token cache → 5–15× faster epochs",
-            "V_3 head; CLS-token fine-tune; self-trained encoder",
-        ], fontsize=17, dy=0.14)
-        pdf.savefig(fig); plt.close(fig)
 
     print(f"wrote {args.output}")
 
