@@ -298,9 +298,8 @@ def main() -> None:
             image_panel(fig, FIGS / "fig_shapley_lines.png", (0.16, 0.01, 0.48, 0.40))
             ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
             bullets(ax2, [
-                "Balmer lines dominate: H$\alpha$, H$\beta$, OIII",
-                "lines alone keep 92% of the info,
-   continuum alone 96%: redundant",
+                "Balmer lines dominate: Ha, Hb, OIII",
+                "lines alone keep 92% of the info,\n   continuum alone 96%: redundant",
                 "MgII slightly negative",
             ], fontsize=12, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
