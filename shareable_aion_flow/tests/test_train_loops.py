@@ -88,7 +88,7 @@ def test_validation_info_gain_sign():
         standardizer=std, prior=StubPrior(), device=torch.device("cpu"), error_mode="none",
     )
     expected = -metrics["val/all_inputs_nll"] - (-1.2)
-    assert abs(metrics["val/all_inputs_info_gain"] - expected) < 1e-9
+    assert abs(metrics["val/all_inputs_info_gain"] - expected) < 1e-5  # float32 prior accumulation
     assert metrics["val/all_inputs_info_gain"] > -1.0  # sane scale, not ~ -2.4
 
 
