@@ -56,22 +56,32 @@ def main() -> None:
         label, path = spec.split("=", 1)
         models[label] = load_checkpoint(Path(path), device=device, dropout=0.0)
 
-    first = next(iter(models.values()))
-    target0 = first[4].get("target", "log_ml_flux_1")
-    _, _, test_loader = build_dataloaders(
-        staged_dir=args.staged_dir, target_name=target0, batch_size=512,
-        num_workers=8, clean_split_csv=args.clean_split_csv,
-    )
-    batch = next(iter(test_loader))
-    y = batch[6].numpy()
-    order = np.argsort(y)
-    pick = order[np.linspace(0, len(order) - 1, args.n_sources).astype(int)]
-    base_batch = tuple(t[pick].to(device) for t in batch)
+    # one loader per model target: each flow must be scored at ITS OWN
+    # observed target value, or its LL sits in a flat tail and maps go blank
+    batches = {}
+    for lab, (enc, ctx, flow, std, cfg) in models.items():
+        _, _, ldr = build_dataloaders(
+            staged_dir=args.staged_dir, target_name=cfg.get("target", "log_ml_flux_1"),
+            batch_size=512, num_workers=4, clean_split_csv=args.clean_split_csv,
+        )
+        batches[lab] = next(iter(ldr))
+    ref = batches[next(iter(models))]
+    y = ref[6].numpy()
+    order = np.argsort(np.where(np.isfinite(y), y, np.inf))
+    pick = order[np.linspace(0, args.n_sources * 20, args.n_sources).astype(int)]
+    ref_tids = ref[7].numpy()[pick]
+    base_batches = {}
+    for lab, b in batches.items():
+        tid_index = {int(t): i for i, t in enumerate(b[7].numpy())}
+        rows = [tid_index.get(int(t), -1) for t in ref_tids]
+        base_batches[lab] = tuple(x[rows].to(device) for x in b)
+    base_batch = base_batches[next(iter(models))]
     B, G, size = len(pick), args.grid, base_batch[5].shape[-1]
     cell = size // G
 
     sal = {lab: np.zeros((B, G, G)) for lab in models}
     for lab, (enc, ctx, flow, std, cfg) in models.items():
+        base_batch = base_batches[lab]
         base_ll = image_ll(enc, ctx, flow, std, base_batch)
         for gy in range(G):
             for gx in range(G):
