@@ -378,3 +378,24 @@ band-rate likelihood (predict P2/P3 rates with upper limits, not their ratio).
    J. Wolf) predicts P(X-ray emitter) from ONIR photometry (RF on griz+WISE,
    trained on ~40k secure emitters; the NWAY prior). Comparison idea: our
    P(detectable) = ∫ p(flux|x) above the local limit vs their classifier.
+
+**Line-Shapley v2 RESULTS (2026-07-22, drop-mode + aligned grid + wide windows
++ guard 2, job 34298428): the v1 line ranking was an artifact of the masking
+bugs — corrected attribution REVERSES it.** Hα is the top line (φ = 68 ± 3
+mnats, was 0.2 in v1), then Hβ 41 ± 2, OIII 27 ± 1; NeV 5.5, OII 6.4, HeII
+3.2; **MgII slightly NEGATIVE (−4 ± 1 mnats, was v1's top line)**. Lines total
+Σφ ≈ 0.147 nats, ~20× v1. Per-token density: OIII 7.9 > Hα 4.5 > Hβ 2.7
+mnats/token. Availability-weighted (population view): Hβ 26 > Hα 18 > OIII 14.
+**Coalition test (community "lines carry the lion's share" hypothesis): full
+−0.980, continuum-only −0.992, lines-only −1.003, norm-only −1.265 nats mean
+LL. Of the 0.284-nat shape gain over norm-only, continuum-only retains 96%,
+lines-only retains 92% — the information is largely REDUNDANT: either channel
+alone nearly suffices; neither holds a lion's share.** Corrected leakage
+calibration (same-encoding double difference; norm channel cancels in
+marginals): residual beyond-guard leak at guard 2 = 13 (narrow) / 21 (broad)
+mnats — small-line φ (NeV/OII/HeII) sits WITHIN this systematic; Hα/Hβ/OIII
+are well above it, and the bias direction (line visible when "absent") makes
+their φ conservative (biased low). V3 CLS run: OOM at bs 256 in full run
+(smoke peak 51 GB but combo-mix + fragmentation exceeded 80 GB) → relaunched
+bs 192 + expandable_segments (34327106). Per-band ceilings (sidecar
+targets_bands.csv): P1 0.06, P2 0.34, P3 0.23, P4 −1.09; runs 34321151-4.
