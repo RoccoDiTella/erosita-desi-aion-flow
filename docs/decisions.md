@@ -18,7 +18,8 @@ wrong counterparts.
 counterpart catalog (A&A 704 A344, VizieR `J/A+A/704/A344/dr1ls10`) on
 `IAUName`, compare NWAY's chosen counterpart with ours per `targetid`.
 **Operational same-object test = spec-z agreement** (our `ls_id` vs their
-`LS10objid` packing could not be reconciled reliably): dz < 0.01, sitting in the
+`LS10objid` packing could not be reconciled reliably): **plain |z−zsp| < 0.01**
+(NOT (1+z)-normalized; verified to reproduce the 1,017 exactly), sitting in the
 valley of a strongly bimodal distribution (88.7% at dz<1e-4, ~3% at dz>0.1).
 Caveat: z-agreement is an identity *proxy* — distinct objects at equal z (pairs,
 group members) would pass as `correct`. Classes in `match_quality.csv`
@@ -94,7 +95,10 @@ failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
   vectorized over nodes. Validated analytically: a N(0,1) flow convolved with a
   Gaussian kernel recovers N(0, 1+σ²).
 - `inject`: sample ε ~ split-normal per step, add to the standardized target
-  (documented as broadening, not deconvolution).
+  (documented as broadening, not deconvolution). **Draws truncated at 1.5σ per
+  side** (inverse-CDF truncated half-normals; side odds preserved) — keeps
+  single draws out of the far tail (huge-σ HR rows); slightly narrows the
+  effective kernel. Multi-draw: `--inject-samples 8`.
 - `none`: paper behavior; σ columns ignored.
 - σ enters standardized space as **σ/std** of the target standardizer.
 - **Eval consistency rule:** a convolve-trained checkpoint is *scored* through

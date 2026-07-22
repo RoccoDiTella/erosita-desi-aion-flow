@@ -36,13 +36,23 @@ def split_normal_log_kernel(
     return -0.5 * (residual / sig) ** 2 + log_norm
 
 
-def sample_split_normal(sig_lo: torch.Tensor, sig_hi: torch.Tensor) -> torch.Tensor:
-    """Draw noise ``eps ~ split-normal(mode 0; lower width sig_lo, upper width sig_hi)``.
+def sample_split_normal(
+    sig_lo: torch.Tensor, sig_hi: torch.Tensor, max_sigma: float = 1.5
+) -> torch.Tensor:
+    """Draw ``eps ~ split-normal(mode 0; widths sig_lo/sig_hi)``, truncated at
+    ``max_sigma`` per side.
 
     Used by ``--error-mode inject``: pick the lower half with probability
-    ``sig_lo/(sig_lo+sig_hi)`` and draw a half-normal of that side's width.
+    ``sig_lo/(sig_lo+sig_hi)`` (truncation removes the same mass fraction from
+    each side, so the side odds are unchanged), then draw the magnitude from a
+    truncated half-normal via the inverse CDF:
+    ``|eps| = sigma * sqrt(2) * erfinv(u * erf(max_sigma/sqrt(2)))``.
+    Truncation keeps single draws out of the far tail (relevant for the
+    huge-sigma HR rows) at the cost of a slightly narrower effective kernel.
     """
-    z = torch.randn_like(sig_lo).abs()
+    u = torch.rand_like(sig_lo)
+    cap = math.erf(max_sigma / math.sqrt(2.0))
+    z = math.sqrt(2.0) * torch.erfinv(u * cap)
     take_lower = torch.rand_like(sig_lo) < (sig_lo / (sig_lo + sig_hi))
     return torch.where(take_lower, -sig_lo * z, sig_hi * z)
 

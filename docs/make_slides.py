@@ -152,10 +152,11 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_split_normal.png", (0.04, 0.08, 0.55, 0.66))
         ax2 = fig.add_axes([0.62, 0.15, 0.36, 0.55]); ax2.axis("off")
         bullets(ax2, [
-            "built from catalog lo/hi limits;\n     central 68.3% exact by construction",
+            "catalog gives the error borders F−LOWERR,\n     F+UPERR → they ARE the ±1σ borders\n     of the split normal (in log space)",
+            "draws truncated at 1.5σ per side",
             "logM★ has no catalog σ →\n     class floor: 0.2 (GALAXY) / 0.3 (QSO) dex",
-            "eval: plain likelihood at observed y —\n     no σ used at evaluation",
-        ], fontsize=13, dy=0.22)
+            "eval: plain likelihood at observed y — no σ",
+        ], fontsize=12.5, dy=0.17)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 5b Band coverage
