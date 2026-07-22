@@ -94,8 +94,10 @@ def load_headline(metrics_csv: Path | None) -> pd.DataFrame | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--v1-metrics", type=Path, default=None)
-    parser.add_argument("--paperhead-metrics", type=Path, default=None)
+    parser.add_argument("--v1-metrics", type=Path, default=None, help="V1 + convolve run")
+    parser.add_argument("--paperhead-metrics", type=Path, default=None, help="paper head + convolve run")
+    parser.add_argument("--v1-inject-metrics", type=Path, default=None)
+    parser.add_argument("--paperhead-inject-metrics", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
     args = parser.parse_args()
 
@@ -164,21 +166,35 @@ def main() -> None:
         ], fontsize=14, dy=0.145)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 6. Results
-        headline = load_headline(args.v1_metrics)
-        paperhead = load_headline(args.paperhead_metrics)
-        fig, ax = new_slide("Results — log flux (0.2–2.3 keV), cleaned + convolve",
+        # ---- 6. Results: detailed tables for the current operating mode (inject
+        # if available, else convolve), plus a cross-run summary strip.
+        runs = [
+            ("V1 + convolve", "V1", "convolve", load_headline(args.v1_metrics)),
+            ("paper head + convolve", "q4/l2", "convolve", load_headline(args.paperhead_metrics)),
+            ("V1 + inject(8)", "V1", "inject", load_headline(args.v1_inject_metrics)),
+            ("paper head + inject(8)", "q4/l2", "inject", load_headline(args.paperhead_inject_metrics)),
+        ]
+        available = [r for r in runs if r[3] is not None]
+        detail = [r for r in available if r[2] == "inject"] or available
+        fig, ax = new_slide("Results — log flux (0.2–2.3 keV), cleaned data",
                             "Anchors: paper published 0.549 (noisy test) · paper model on clean rows 0.567")
-        if headline is not None:
-            fig.text(0.075, 0.80, "V1 head (7.8M, 15 epochs)", fontsize=14, fontweight="bold", color=INK)
-            metric_table(ax, headline, rect=(0.03, 0.28 if paperhead is None else 0.02, 0.44, 0.60), fontsize=12)
-        if paperhead is not None:
-            fig.text(0.555, 0.80, "Paper head (16.8M, same data)", fontsize=14, fontweight="bold", color=INK)
-            metric_table(ax, paperhead, rect=(0.52, 0.02, 0.44, 0.60), fontsize=12)
+        for i, (label, _h, _m, table) in enumerate(detail[:2]):
+            fig.text(0.075 + 0.48 * i, 0.80, f"{label} (15 ep)", fontsize=14, fontweight="bold", color=INK)
+            metric_table(ax, table, rect=(0.03 + 0.49 * i, 0.24, 0.44, 0.52), fontsize=11)
+        if len(available) > 1:
+            summary = pd.DataFrame([
+                {
+                    "run": label, "head": head, "error mode": mode,
+                    "all-inputs R²": float(t.loc[t["inputs"] == "spectra+z+wise+image", "R²"].iloc[0]),
+                    "exp(IG)": float(t.loc[t["inputs"] == "spectra+z+wise+image", "exp(IG)"].iloc[0]),
+                }
+                for label, head, mode, t in available
+            ])
+            fig.text(0.075, 0.24, "Cross-run summary (all-inputs)", fontsize=13, fontweight="bold", color=INK)
+            metric_table(ax, summary, rect=(0.03, -0.08, 0.70, 0.26), fontsize=11)
         bullets(ax, [
-            "Modality ordering reproduces the paper: z < WISE < image < spectra < combos",
-            "QSO R² 0.60 (n=2,195) vs GALAXY 0.40 (n=325); signal concentrated at z < 0.7",
-        ], y=0.14 if paperhead is None else -0.06, fontsize=12, dy=0.08)
+            "QSO R² 0.60 vs GALAXY 0.40; signal concentrated at z < 0.7",
+        ], y=-0.12, fontsize=11, dy=0.07)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 7. Next steps
