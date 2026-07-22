@@ -35,6 +35,20 @@ group members) would pass as `correct`. Classes in `match_quality.csv`
 
 **`keep = (class == correct)` only** — conservative by design.
 
+**Corroboration from the full Salvato+2025 read (2026-07-22):** their spec-z
+compilation *includes DESI DR1* and drops sources with literature redshifts
+disagreeing by >0.1 — so an NWAY counterpart without zsp (our `ambiguous`) is
+either not our DESI object or has conflicting redshifts; dropping it is right.
+Their own LS10 counterparts average ~85% (DET_LIKE≥6) to ~91% (≥8)
+completeness/purity at the optimal p_any threshold — our Δz-confirmed keep class
+is spectroscopically verified, i.e. stricter. §3.1.4: low p_any + DET_LIKE_0<7
+suggests the X-ray source itself is spurious (our `spurious` reading).
+**DET_LIKE=6 is the eRASS1 Main-catalog inclusion threshold with P(spurious)≈14%
+(4% at ≥8; Seppi+2022)** — "detected" at 6 is catalog-grade, not certain.
+Their catalogs carry per-source p_any + purity[6,7,8] if a tunable cut is ever
+preferred over our binary keep. Paper archived at
+`../summer2026/predicting_xray/papers/salvato2025_erass1_counterparts.pdf`.
+
 **Why we trust the cut** (three independent validations):
 1. Δz between our DESI z and NWAY's zsp is bimodal — mismatches form a distinct cloud.
 2. The published paper model is ~2× worse on the rejected rows (R² 0.29 vs 0.57); dropping them lifts test R² 0.549 → 0.567 *without retraining*.

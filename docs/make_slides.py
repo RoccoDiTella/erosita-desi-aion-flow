@@ -170,11 +170,15 @@ def main() -> None:
             {"band": "P5",             "measured": "22%",  "detected": "0.2%"},
         ])
         metric_table(ax, band_table, rect=(0.05, 0.20, 0.48, 0.62), fontsize=13)
-        ax2 = fig.add_axes([0.60, 0.25, 0.37, 0.40]); ax2.axis("off")
+        ax2 = fig.add_axes([0.60, 0.22, 0.37, 0.46]); ax2.axis("off")
         bullets(ax2, [
             "HR32 = (P3−P2) / (P3+P2), from rates",
             "both HR bands measured: 86%;\n     both detected: 30%",
-        ], fontsize=14, dy=0.30)
+        ], fontsize=14, dy=0.26)
+        fig.text(0.05, 0.115, "measured: forced PSF-fit rate > 0 in the band     "
+                 "detected: DET_LIKE ≥ 6 — the eRASS1 catalog threshold\n"
+                 "(P(spurious) ≈ 14% at DET_LIKE = 6, → 4% at ≥ 8; Seppi+2022, Salvato+2025)",
+                 fontsize=10.5, color=MUTED)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 6 Results
