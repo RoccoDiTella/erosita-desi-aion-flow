@@ -498,25 +498,38 @@ def clean_view_row_maps(
     return maps
 
 
-def _finite_target_rows(path: Path, target_name: str, rows: np.ndarray | None) -> np.ndarray | None:
-    """Restrict ``rows`` (or the whole file) to rows whose target is finite.
+def _finite_target_rows(
+    path: Path, target_name: str, rows: np.ndarray | None, max_target_sigma: float | None = None
+) -> np.ndarray | None:
+    """Restrict ``rows`` (or the whole file) to usable rows for this target.
 
-    Secondary targets (logmstar, hr32_u) are not measured for every object and
-    ``batch_nll`` intentionally refuses non-finite targets, so the loaders must
-    serve only measured rows. Returns ``None`` when the whole file qualifies.
+    Always requires a finite target (``batch_nll`` refuses NaN). With
+    ``max_target_sigma``, additionally requires the target's mean measurement
+    sigma to be finite and <= the threshold: the S/N gate for targets with
+    pathological error tails (hr32_u: median sigma 0.51 but max ~8e3 from
+    band non-detections; those rows are upper limits, not measurements).
+    Returns ``None`` when the whole file qualifies.
     """
     with h5py.File(path, "r") as handle:
         values = read_dataset(handle, target_name)
-    finite = np.isfinite(values)
+        keep = np.isfinite(values)
+        err_cols = TARGET_ERROR_COLS.get(target_name)
+        if max_target_sigma is not None and err_cols and all(c in handle for c in err_cols):
+            sig = 0.5 * (
+                read_dataset(handle, err_cols[0]).astype(np.float64)
+                + read_dataset(handle, err_cols[1]).astype(np.float64)
+            )
+            keep &= np.isfinite(sig) & (sig <= float(max_target_sigma))
     if rows is None:
-        if bool(finite.all()):
+        if bool(keep.all()):
             return None
-        kept = np.flatnonzero(finite).astype(np.int64)
+        kept = np.flatnonzero(keep).astype(np.int64)
     else:
-        kept = rows[finite[rows]]
+        kept = rows[keep[rows]]
     dropped = (len(values) if rows is None else len(rows)) - len(kept)
     if dropped:
-        print(f"[loader] {path.name}: dropped {dropped} rows with non-finite {target_name}", flush=True)
+        print(f"[loader] {path.name}: dropped {dropped} rows (non-finite {target_name}"
+              + (f" or sigma > {max_target_sigma}" if max_target_sigma is not None else "") + ")", flush=True)
     return kept
 
 
@@ -529,6 +542,7 @@ def build_dataloaders(
     num_workers: int = 0,
     seed: int | None = None,
     clean_split_csv: Path | None = None,
+    max_target_sigma: float | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Build train/val/test dataloaders over the staged HDF5 splits.
 
@@ -547,12 +561,12 @@ def build_dataloaders(
     for split in ("train", "val", "test"):
         if view_maps is None:
             path = Path(staged_dir) / f"desi_{split}.hdf5"
-            rows = _finite_target_rows(path, target_name, None)
+            rows = _finite_target_rows(path, target_name, None, max_target_sigma)
             dataset: Dataset = AIONHDF5Dataset(path, target_name, rows=rows)
         else:
             parts = []
             for path, rows in view_maps[split]:
-                kept = _finite_target_rows(path, target_name, rows)
+                kept = _finite_target_rows(path, target_name, rows, max_target_sigma)
                 if kept is None or len(kept):
                     parts.append(AIONHDF5Dataset(path, target_name, rows=kept if kept is not None else rows))
             if not parts:

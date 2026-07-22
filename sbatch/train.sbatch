@@ -45,6 +45,7 @@ echo "=== validation passed, starting training ==="
 
 VIEW_ARGS=()
 [ -n "$CLEAN_SPLIT_CSV" ] && VIEW_ARGS=(--clean-split-csv "$CLEAN_SPLIT_CSV")
+[ -n "$MAX_TARGET_SIGMA" ] && VIEW_ARGS+=(--max-target-sigma "$MAX_TARGET_SIGMA")
 
 python -m shareable_aion_flow.main train \
   --staged-dir "$STAGED_DIR" \

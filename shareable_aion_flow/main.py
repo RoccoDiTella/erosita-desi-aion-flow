@@ -328,6 +328,7 @@ def train(args: argparse.Namespace) -> None:
         num_workers=args.num_workers,
         seed=args.seed,
         clean_split_csv=clean_split_csv,
+        max_target_sigma=args.max_target_sigma,
     )
     # Standardizer + prior must be fit on the same rows the model trains on.
     if clean_split_csv is not None:
@@ -373,6 +374,7 @@ def train(args: argparse.Namespace) -> None:
         "error_mode": args.error_mode,
         "inject_samples": int(args.inject_samples),
         "clean_split_csv": str(clean_split_csv) if clean_split_csv else None,
+        "max_target_sigma": args.max_target_sigma,
         "architecture": "paper_q4_l2_attention_flow_clean" if is_paper_head else "aion_attention_flow_clean_custom_head",
         "training_mix": "25% singles, 25% pairs, 25% triples, 25% all-input",
         "modalities": list(MODALITIES),
@@ -526,6 +528,7 @@ def train(args: argparse.Namespace) -> None:
             num_samples=args.eval_samples,
             allow_target_override=False,
             clean_split_csv=clean_split_csv,
+            max_target_sigma=args.max_target_sigma,
         )
         evaluate(eval_args)
         log_eval_metrics(tracker, run_dir / "test_flow_metrics.csv")
@@ -618,10 +621,14 @@ def evaluate(args: argparse.Namespace) -> None:
         ):
             raise ValueError("Prior standardizer metadata does not match checkpoint standardizer.")
 
+    eval_max_sigma = getattr(args, "max_target_sigma", None)
+    if eval_max_sigma is None:
+        eval_max_sigma = _config.get("max_target_sigma")
     _train_loader, _val_loader, test_loader = build_dataloaders(
         staged_dir=Path(args.staged_dir),
         target_name=resolved_target,
         clean_split_csv=eval_clean_split_csv,
+        max_target_sigma=eval_max_sigma,
         batch_size=args.batch_size,
         eval_batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -719,6 +726,12 @@ def parse_args() -> argparse.Namespace:
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
     train_parser.add_argument(
+        "--max-target-sigma",
+        type=float,
+        default=None,
+        help="S/N gate: exclude rows whose mean target sigma exceeds this (hr32_u: use 1.0).",
+    )
+    train_parser.add_argument(
         "--inject-samples",
         type=int,
         default=8,
@@ -752,6 +765,8 @@ def parse_args() -> argparse.Namespace:
         "--target", choices=["log_ml_flux_1", "log_lx", "logmstar", "hr32_u"], default=None
     )
     eval_parser.add_argument("--allow-target-override", action="store_true")
+    eval_parser.add_argument("--max-target-sigma", type=float, default=None,
+                             help="Defaults to the checkpoint config's value.")
     eval_parser.add_argument(
         "--clean-split-csv",
         type=Path,

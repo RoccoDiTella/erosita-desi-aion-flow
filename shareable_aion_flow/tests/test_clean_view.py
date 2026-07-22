@@ -117,6 +117,24 @@ def test_view_row_maps_dedup_prefers_first_occurrence(tmp_path: Path) -> None:
     assert test_files["desi_test.hdf5"] == [0]  # targetid 7 only
 
 
+def test_max_target_sigma_gate(tmp_path: Path) -> None:
+    """The S/N gate excludes rows with mean sigma above the threshold."""
+    staged = build_superset(tmp_path)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        handle["flux_sig_lo"][2] = 5.0  # targetid 3: mean sigma (5.0+0.2)/2 = 2.6
+        handle["flux_sig_hi"][2] = 0.2
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0,
+        max_target_sigma=1.0,
+    )
+    assert 3 not in collect_targetids(train_loader)
+    # without the gate the row is served
+    train_loader2, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0,
+    )
+    assert 3 in collect_targetids(train_loader2)
+
+
 def test_rows_subset_dataset_bounds_check(tmp_path: Path) -> None:
     staged = build_superset(tmp_path)
     try:
