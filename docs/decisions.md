@@ -251,6 +251,16 @@ Lx: S 46 / z 34 / I 17 / W 2% (distance info split between S and z — the
 spectrum carries z). M★: S 42 / I 24 / W 22 / z 12%. HR: flat 23–26%×4
 (population-shape gain evenly credited = no modality-specific signal).
 
+**Pairwise Shapley interaction index (exact, same 16 coalitions; negative =
+redundant, positive = synergistic; IG nats):** Lx spectra+z **−0.679** (the
+spectrum-carries-z redundancy, quantified) and spectra+image −0.317, z+image
+−0.166 (image also proxies distance). M★ spectra+wise **+0.154** — the only
+large synergy: per-aperture SED × total NIR luminosity jointly pin the mass —
+plus wise+image +0.097; but spectra+z −0.232. Flux: mild redundancy everywhere
+(all pairs negative, max spectra+image −0.118) — every input reads the same
+source brightness. HR: uniformly −0.03…−0.04, four redundant copies of the
+same population-shape gain. Figure: `docs/figures/fig_modality_interactions.png`.
+
 **HR verdict (2026-07-22): not learnable at eRASS1 depth — do NOT re-run on the
 detected-only subset.** Noise-floor analysis (clean sample, hr32_u/σ_u
 sidecars): at the σ_u≤1.0 gate, Var(u)=0.16 < E[σ_u²]=0.25 → the observed HR

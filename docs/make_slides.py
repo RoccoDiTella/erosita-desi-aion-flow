@@ -268,6 +268,19 @@ def main() -> None:
             image_panel(fig, FIGS / "fig_modality_shapley.png", (0.08, 0.08, 0.84, 0.72))
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6c2 Pairwise modality interactions
+        if (FIGS / "fig_modality_interactions.png").exists():
+            fig, ax = new_slide("Input-type interactions",
+                                "exact pairwise Shapley interaction index of info gain, same 16 coalitions")
+            image_panel(fig, FIGS / "fig_modality_interactions.png", (0.16, 0.05, 0.60, 0.75))
+            ax2 = fig.add_axes([0.76, 0.15, 0.23, 0.55]); ax2.axis("off")
+            bullets(ax2, [
+                "Lx: spectra + z redundant\n   (spectrum carries z)",
+                "logM$_*$: spectra + WISE\n   synergistic",
+                "flux: mild redundancy\n   everywhere",
+            ], fontsize=12, dy=0.28)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
         if (FIGS / "fig_shapley_heatmap.png").exists():
             fig, ax = new_slide("Where in the spectrum is the flux information?",
