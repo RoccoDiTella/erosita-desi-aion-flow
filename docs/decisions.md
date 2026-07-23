@@ -399,3 +399,24 @@ their φ conservative (biased low). V3 CLS run: OOM at bs 256 in full run
 (smoke peak 51 GB but combo-mix + fragmentation exceeded 80 GB) → relaunched
 bs 192 + expandable_segments (34327106). Per-band ceilings (sidecar
 targets_bands.csv): P1 0.06, P2 0.34, P3 0.23, P4 −1.09; runs 34321151-4.
+
+**2026-07-23 failure post-mortem + recovery:** band runs 34349303-31 died of
+plain SLURM TIMEOUT (3h wrap limit; band epochs ≈ 20.5 min → need ~5.5h) —
+relaunched identically at 7h as 34629507/08/19/35. v3-cls 34319596/27106/49334
+were bs-256/192 OOM iterations; **34356743 trained all 15 epochs (bs 128 +
+grad checkpointing) and only its in-process final eval OOM'd.** Root cause
+found and fixed (0df4d31): the CLS branch forced `torch.enable_grad()`, which
+OVERRIDES eval-time `@torch.no_grad()` → every eval forward built and retained
+autograd graphs through the unfrozen encoder (77 GiB accumulated). Encoder now
+respects the ambient grad mode. Fresh eval on the saved best.pt: 34632659.
+
+**V3-CLS verdict (2026-07-23, eval of 34356743 best.pt): all-inputs R²
+0.575 / exp(IG) 1.32 (plain-LL eval) — a statistical TIE with frozen-encoder
+V_simple (0.572 / 1.38) on points and WORSE on density.** LoRA(r8, all
+blocks/modules) + trainable CLS at ~2.2× the wall time and ~8× the memory of
+V_simple buys +0.003 R². Notably single-modality combos DEGRADE (spectra-only
+0.476 vs 0.541) while multi-modal catches up — the fine-tune specializes the
+encoder toward joint context at the cost of marginal encodings. Read: the
+frozen AION representation is not the bottleneck at this sample size; caveats
+(15 epochs is short for a fine-tune, one warmup epoch, single LR config) noted
+but not compelling enough to iterate further now. V_simple stays the workhorse.
