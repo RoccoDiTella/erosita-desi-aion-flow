@@ -93,6 +93,7 @@ def build_model(
     dropout: float,
     head: dict[str, Any] | None = None,
     head_type: str = "attention",
+    cls_variant: str = "input",
     lora_rank: int = 0,
     lora_blocks: int = -1,
     lora_modules: str = "all",
@@ -108,7 +109,7 @@ def build_model(
     head = {**PAPER_HEAD, **(head or {})}
     if head_type == "cls":
         encoder = AIONTokenEncoder(
-            freeze=False, cls_mode=True, lora_rank=lora_rank,
+            freeze=False, cls_mode=True, cls_variant=cls_variant, lora_rank=lora_rank,
             lora_blocks=lora_blocks, lora_modules=lora_modules,
             grad_checkpoint=grad_checkpoint,
         ).to(device)
@@ -163,6 +164,7 @@ def load_checkpoint(
     encoder, context_encoder, flow = build_model(
         device, dropout=dropout, head=cfg.get("head"),
         head_type=str(cfg.get("head_type", "attention")),
+        cls_variant=str(cfg.get("cls_variant", "input")),
         lora_rank=int(cfg.get("lora_rank", 0) or 0),
         lora_blocks=int(cfg.get("lora_blocks", -1)),
         lora_modules=str(cfg.get("lora_modules", "all")),
@@ -393,6 +395,7 @@ def train(args: argparse.Namespace) -> None:
     is_paper_head = head == PAPER_HEAD and args.head_type == "attention"
     encoder, context_encoder, flow = build_model(
         device, dropout=args.dropout, head=head, head_type=args.head_type,
+        cls_variant=args.cls_variant,
         lora_rank=args.lora_rank, lora_blocks=args.lora_blocks,
         lora_modules=args.lora_modules, grad_checkpoint=args.grad_checkpoint,
     )
@@ -419,6 +422,7 @@ def train(args: argparse.Namespace) -> None:
         "inject_samples": int(args.inject_samples),
         "mask_mode": args.mask_mode,
         "head_type": args.head_type,
+        "cls_variant": args.cls_variant,
         "lora_rank": int(args.lora_rank),
         "lora_blocks": int(args.lora_blocks),
         "lora_modules": args.lora_modules,
@@ -827,6 +831,12 @@ def parse_args() -> argparse.Namespace:
         "--head-type", choices=["attention", "cls"], default="attention",
         help="cls = V3: trainable CLS token at the encoder input + LoRA fine-tune, "
         "projected to the same 256-dim context and identical flow.",
+    )
+    train_parser.add_argument(
+        "--cls-variant", choices=["input", "readonly"], default="input",
+        help="input = V3a (CLS in the sequence, encoder LoRA-tuned). readonly = V3b: "
+        "no token attends to the CLS, data stream stays exactly frozen; the CLS "
+        "cross-reads each block with adapter deltas on its query and consumed values.",
     )
     train_parser.add_argument("--lora-rank", type=int, default=8,
                               help="LoRA rank for --head-type cls (0 = CLS+head only).")

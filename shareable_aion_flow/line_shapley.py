@@ -45,8 +45,13 @@ LINE_PLAYERS = [  # (name, rest wavelength, half-window in rest-frame Angstrom)
     ("NeV", 3426.9, 30.0),
     ("OII", 3727.5, 30.0),
     ("HeII", 4686.0, 30.0),
-    ("Hbeta", 4862.7, 120.0),
-    ("OIII", 5008.2, 30.0),
+    # Hbeta and [OIII] are ONE merged player (v4): [OIII]4959 sits inside any
+    # honest broad Hbeta window (its fixed 1:3 doublet ratio with 5007
+    # duplicates the OIII signal there), and at z<0.25 the guard around Hbeta
+    # claims the 5007 core token itself. The pair is inseparable at token
+    # resolution — the v3 Hbeta/OIII split and part of their measured pair
+    # "redundancy" was window convention, not physics.
+    ("Hbeta+OIII", 4890.5, 147.8),  # union window 4742.7-5038.3 A
     ("MgII", 2798.0, 120.0),
     ("Halpha", 6564.6, 120.0),
     # v3 additions: the hot cont_4008_4428 bin (33 mnats) is Hgamma+Hdelta

@@ -692,6 +692,66 @@ def resolve_column_offset(changed_by_probe: dict[int, list[int]], n_cols: int) -
 N_SPEC_TOKENS_EXPECTED = 272  # codec grid: 8704 px / 32 px per token
 
 
+class CLSReadAdapter(nn.Module):
+    """Per-block low-rank deltas for the read-only CLS (V3b).
+
+    Adapts (a) the CLS token's query and (b) the values the CLS reads from the
+    data tokens. Keys and the whole data-token computation stay frozen, and no
+    data token ever attends to the CLS, so the encoder's representation of the
+    data is bit-identical to the frozen model. Zero-init up-projections make
+    the adapters an exact no-op at initialization.
+    """
+
+    def __init__(self, dim: int, rank: int) -> None:
+        super().__init__()
+        self.q_down = nn.Linear(dim, rank, bias=False)
+        self.q_up = nn.Linear(rank, dim, bias=False)
+        self.v_down = nn.Linear(dim, rank, bias=False)
+        self.v_up = nn.Linear(rank, dim, bias=False)
+        nn.init.normal_(self.q_down.weight, std=1.0 / rank)
+        nn.init.zeros_(self.q_up.weight)
+        nn.init.normal_(self.v_down.weight, std=1.0 / rank)
+        nn.init.zeros_(self.v_up.weight)
+
+
+def cls_read_step(
+    block: nn.Module,
+    adapter: CLSReadAdapter,
+    x: torch.Tensor,
+    c: torch.Tensor,
+    key_invalid: torch.Tensor | None,
+) -> torch.Tensor:
+    """One read-only CLS update against a 4M ``Block``: the CLS stream ``c``
+    [B, 1, D] cross-reads the data tokens ``x`` [B, N, D] with the block's own
+    frozen attention weights (adapter deltas on the CLS query and on the values
+    it consumes), then passes through the block's frozen MLP. ``x`` is NOT
+    modified — the data stream advances separately through the unmodified
+    block. ``key_invalid``: bool [B, 1, 1, N], True = masked-out token.
+    Standalone function so a lightweight stub block can unit-test the math.
+    """
+    attn = block.attn
+    dim = c.shape[-1]
+    h = block.norm1(x)
+    qkv_w, qkv_b = attn.qkv.weight, attn.qkv.bias
+    kv = nn.functional.linear(h, qkv_w[dim:], None if qkv_b is None else qkv_b[dim:])
+    k, v = kv.chunk(2, dim=-1)
+    v = v + adapter.v_up(adapter.v_down(h))
+    hc = block.norm1(c)
+    q = nn.functional.linear(hc, qkv_w[:dim], None if qkv_b is None else qkv_b[:dim])
+    q = q + adapter.q_up(adapter.q_down(hc))
+    B, N, _ = k.shape
+    heads, head_dim = attn.num_heads, dim // attn.num_heads
+    q = q.view(B, 1, heads, head_dim).transpose(1, 2)
+    k = k.view(B, N, heads, head_dim).transpose(1, 2)
+    v = v.view(B, N, heads, head_dim).transpose(1, 2)
+    logits = (q @ k.transpose(-2, -1)) * attn.scale
+    if key_invalid is not None:
+        logits = logits.masked_fill(key_invalid, -torch.finfo(logits.dtype).max)
+    read = (logits.softmax(dim=-1) @ v).transpose(1, 2).reshape(B, 1, dim)
+    c = c + attn.proj(read)
+    return c + block.mlp(block.norm2(c))
+
+
 class AIONTokenEncoder(nn.Module):
     """Frozen AION encoder wrapped to return tokens and per-token modality ids.
 
@@ -705,6 +765,7 @@ class AIONTokenEncoder(nn.Module):
         model_name: str = "polymathic-ai/aion-base",
         freeze: bool = True,
         cls_mode: bool = False,
+        cls_variant: str = "input",
         lora_rank: int = 0,
         lora_blocks: int = -1,
         lora_modules: str = "all",
@@ -743,14 +804,25 @@ class AIONTokenEncoder(nn.Module):
         self.image_cls = LegacySurveyImage
         self.wise_classes = (LegacySurveyFluxW1, LegacySurveyFluxW2, LegacySurveyFluxW3)
         self.cls_mode = bool(cls_mode)
+        self.cls_variant = str(cls_variant)
         self.lora_rank = int(lora_rank)
         self.lora_blocks = int(lora_blocks)
         self.lora_modules = str(lora_modules)
         self.grad_checkpoint = bool(grad_checkpoint)
+        # Read-only CLS never perturbs the data-token stream, so the encoder
+        # proper stays "frozen" in every sense that matters downstream.
         self.freeze = freeze and not cls_mode
         for parameter in self.backbone.parameters():
             parameter.requires_grad = False
-        if self.cls_mode:
+        if self.cls_mode and self.cls_variant == "readonly":
+            dim = int(self.backbone.encoder_norm.weight.shape[0])
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+            nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+            rank = max(1, self.lora_rank)
+            self.cls_read_adapters = nn.ModuleList(
+                CLSReadAdapter(dim, rank) for _ in self.backbone.encoder
+            )
+        elif self.cls_mode:
             dim = int(self.backbone.encoder_norm.weight.shape[0])
             self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
             nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
@@ -775,12 +847,17 @@ class AIONTokenEncoder(nn.Module):
         return {
             name: tensor
             for name, tensor in self.state_dict().items()
-            if "lora_" in name or "cls_token" in name
+            if "lora_" in name or name.startswith("cls_")
         }
 
     def encoder_param_groups(self, base_lr: float, llrd_gamma: float = 0.8) -> list[dict]:
         """Per-block LoRA parameter groups with layer-wise LR decay from the top."""
         groups: list[dict] = []
+        if self.cls_variant == "readonly" and self.cls_mode:
+            # Read adapters are head-like parameters (they never move the
+            # encoder), so one flat group at the base LR — no depth decay.
+            params = list(self.cls_read_adapters.parameters())
+            return [{"params": params, "lr": base_lr, "base_lr": base_lr, "is_encoder": True}]
         blocks = list(self.backbone.encoder)
         for depth_from_top, block in enumerate(reversed(blocks[-self.lora_blocks:] if self.lora_blocks else [])):
             params = [p for n, p in block.named_parameters() if "lora_" in n]
@@ -969,7 +1046,12 @@ class AIONTokenEncoder(nn.Module):
                 num_encoder_tokens=num_tokens,
             )
             if self.cls_mode:
-                cls_hidden = self._encode_with_cls(encoder_tokens, encoder_emb, encoder_mask)
+                if self.cls_variant == "readonly":
+                    cls_hidden = self._encode_with_readonly_cls(
+                        encoder_tokens, encoder_emb, encoder_mask
+                    )
+                else:
+                    cls_hidden = self._encode_with_cls(encoder_tokens, encoder_emb, encoder_mask)
                 group_ids = torch.zeros(
                     cls_hidden.shape[0], 1, dtype=torch.long, device=cls_hidden.device
                 )
@@ -1009,3 +1091,36 @@ class AIONTokenEncoder(nn.Module):
             else:
                 x = block(x, mask=mask)
         return self.backbone.encoder_norm(x)[:, -1]
+
+    def _encode_with_readonly_cls(
+        self,
+        encoder_tokens: torch.Tensor,
+        encoder_emb: torch.Tensor,
+        encoder_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """V3b: the CLS reads every block's data tokens but never writes.
+
+        Data tokens never attend to the CLS, so their stream is bit-identical
+        to the frozen encoder and advances under ``no_grad`` (no activation
+        storage, no drift). Per block, the CLS cross-reads the data tokens with
+        the block's own frozen attention (adapter deltas on its query and on
+        the values it consumes; keys reused frozen), then passes through the
+        frozen MLP. Gradients touch only the CLS stream: [B, 1, D] activations
+        plus per-block K/V saves — ``grad_checkpoint`` trades those K/V saves
+        for recompute if memory is tight.
+        """
+        x = encoder_tokens + encoder_emb
+        batch = x.shape[0]
+        c = self.cls_token.expand(batch, -1, -1).to(x.dtype)
+        key_invalid = encoder_mask.reshape(batch, 1, 1, -1).bool()
+        for block, adapter in zip(self.backbone.encoder, self.cls_read_adapters):
+            if self.grad_checkpoint and torch.is_grad_enabled():
+                c = torch.utils.checkpoint.checkpoint(
+                    lambda xx, cc, blk=block, ad=adapter: cls_read_step(blk, ad, xx, cc, key_invalid),
+                    x, c, use_reentrant=False,
+                )
+            else:
+                c = cls_read_step(block, adapter, x, c, key_invalid)
+            with torch.no_grad():
+                x = block(x, mask=encoder_mask)
+        return self.backbone.encoder_norm(c)[:, 0]
