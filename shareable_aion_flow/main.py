@@ -192,6 +192,8 @@ def batch_nll(
     inject_samples: int = 1,
     spectrum_token_mask: torch.Tensor | None = None,
     mask_mode: str = "drop",
+    combos_per_source: list[tuple[str, ...]] | None = None,
+    _loss_scale: float = 1.0,
 ) -> torch.Tensor:
     """Negative log-likelihood of one batch under the flow for a given modality combo.
 
@@ -206,12 +208,25 @@ def batch_nll(
         bad = int((~torch.isfinite(target)).sum().item())
         raise FloatingPointError(f"Encountered {bad} non-finite target values in a training/eval batch.")
     target_std = standardizer.transform_tensor(target)
+    modality_dropout = None
+    if combos_per_source is not None:
+        # Stratified fixed-composition batch: encode once at the full all-inputs
+        # sequence length; each source excludes modalities via the native input
+        # mask. Constant per-batch memory, one codec pass, one backbone forward.
+        combo = tuple(MODALITIES)
+        modality_dropout = {
+            group: torch.tensor(
+                [group not in c for c in combos_per_source], dtype=torch.bool
+            )
+            for group in MODALITIES
+        }
     tokens, group_ids = encoder.encode_tokens(
-        batch, combo, spectrum_token_mask=spectrum_token_mask, mask_mode=mask_mode
+        batch, combo, spectrum_token_mask=spectrum_token_mask, mask_mode=mask_mode,
+        modality_dropout=modality_dropout,
     )
     context = context_encoder(tokens, group_ids)
     log_prob = _log_prob_with_error(flow, target_std, context, batch, standardizer, error_mode, inject_samples)
-    loss = -log_prob.mean()
+    loss = -log_prob.mean() * float(_loss_scale)
     if not torch.isfinite(loss):
         raise FloatingPointError(f"Non-finite NLL for combo={'+'.join(combo)}.")
     return loss
@@ -245,6 +260,56 @@ def _log_prob_with_error(
             return torch.stack(draws).mean(dim=0)
         raise ValueError(f"Unknown error_mode {error_mode!r}.")
     return flow.log_prob(target_std, context)
+
+
+
+
+_OOM_ERROR = getattr(torch, "OutOfMemoryError", getattr(torch.cuda, "OutOfMemoryError", RuntimeError))
+
+
+def oom_resilient_step(
+    *, batch, combos_per_source, token_mask, optimizer, nll_kwargs, depth: int = 0
+) -> tuple[float, int]:
+    """Forward+backward with CUDA-OOM fallback: on OOM, free the cache and rerun
+    the SAME batch as two half-batches with size-weighted gradient accumulation
+    (mathematically the identical update). CUDA OOM is a catchable exception,
+    not a process kill -- recovery is safe as long as partial references are
+    dropped before ``empty_cache``. Recurses at most twice (quarter batches).
+    Returns ``(loss_value, n_chunks_used)``.
+    """
+    try:
+        loss = batch_nll(
+            batch=batch,
+            combos_per_source=combos_per_source,
+            spectrum_token_mask=token_mask,
+            **nll_kwargs,
+        )
+        loss.backward()
+        return float(loss.item()), 1
+    except _OOM_ERROR:
+        if depth >= 2 or int(batch[6].shape[0]) < 2:
+            raise
+        optimizer.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        n = int(batch[6].shape[0])
+        half = n // 2
+        print(f"[oom] step fell back to 2x{half} micro-batches (depth {depth})", flush=True)
+        total, chunks = 0.0, 0
+        for sl in (slice(0, half), slice(half, n)):
+            sub_batch = tuple(t[sl] for t in batch)
+            sub_combos = combos_per_source[sl] if combos_per_source is not None else None
+            sub_mask = token_mask[sl] if token_mask is not None else None
+            weight = (sl.stop - sl.start) / n
+            value, sub_chunks = oom_resilient_step(
+                batch=sub_batch, combos_per_source=sub_combos, token_mask=sub_mask,
+                optimizer=optimizer,
+                nll_kwargs={**nll_kwargs, "_loss_scale": weight},
+                depth=depth + 1,
+            )
+            total += value
+            chunks += sub_chunks
+        return total, chunks
 
 
 @torch.no_grad()
@@ -421,6 +486,7 @@ def train(args: argparse.Namespace) -> None:
         "error_mode": args.error_mode,
         "inject_samples": int(args.inject_samples),
         "mask_mode": args.mask_mode,
+        "stratified_combos": bool(args.stratified_combos),
         "head_type": args.head_type,
         "cls_variant": args.cls_variant,
         "lora_rank": int(args.lora_rank),
@@ -486,41 +552,55 @@ def train(args: argparse.Namespace) -> None:
         train_counts: list[int] = []
         size_losses: dict[int, list[float]] = {1: [], 2: [], 3: [], 4: []}
 
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        oom_fallback_steps = 0
         for batch in train_loader:
             batch = tuple(item.to(device, non_blocking=True) for item in batch)
-            combo = fixed_combo if fixed_combo else sampler.sample(generator)
+            combos_per_source = None
+            if args.stratified_combos and not fixed_combo:
+                combo = tuple(MODALITIES)
+                combos_per_source = sampler.sample_per_source(int(batch[6].shape[0]), generator)
+            else:
+                combo = fixed_combo if fixed_combo else sampler.sample(generator)
             token_mask = None
             if args.token_mask_augment:
                 mask_np = sample_training_mask(
                     batch[3].detach().cpu().numpy().ravel(), shapley_players, mask_rng
                 )
                 token_mask = torch.from_numpy(mask_np).to(device)
-            loss = batch_nll(
-                encoder=encoder,
-                context_encoder=context_encoder,
-                flow=flow,
-                batch=batch,
-                combo=combo,
-                standardizer=standardizer,
-                error_mode=args.error_mode,
-                inject_samples=args.inject_samples,
-                spectrum_token_mask=token_mask,
-                mask_mode=args.mask_mode,
-            )
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            loss_value, n_chunks = oom_resilient_step(
+                batch=batch,
+                combos_per_source=combos_per_source,
+                token_mask=token_mask,
+                optimizer=optimizer,
+                nll_kwargs=dict(
+                    encoder=encoder,
+                    context_encoder=context_encoder,
+                    flow=flow,
+                    combo=combo,
+                    standardizer=standardizer,
+                    error_mode=args.error_mode,
+                    inject_samples=args.inject_samples,
+                    mask_mode=args.mask_mode,
+                ),
+            )
+            if n_chunks > 1:
+                oom_fallback_steps += 1
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
             optimizer.step()
 
-            train_losses.append(float(loss.item()))
+            train_losses.append(loss_value)
             train_counts.append(int(batch[6].shape[0]))
-            size_losses[len(combo)].append(float(loss.item()))
+            if combos_per_source is None:
+                size_losses[len(combo)].append(loss_value)
             global_step += 1
             if tracker.enabled and global_step % args.log_every == 0:
                 tracker.log(
                     {
-                        "train/batch_nll": float(loss.item()),
-                        "train/combo_size": len(combo),
+                        "train/batch_nll": loss_value,
+                        "train/combo_size": 0 if combos_per_source is not None else len(combo),
                         "train/grad_norm": float(grad_norm),
                         "train/lr": float(optimizer.param_groups[0]["lr"]),
                         "epoch": epoch,
@@ -565,6 +645,8 @@ def train(args: argparse.Namespace) -> None:
             "val/best_all_inputs_nll": min(best_val, val_nll),
             "epoch_seconds": epoch_seconds,
             "throughput/samples_per_second": float(sum(train_counts) / max(epoch_seconds, 1e-6)),
+            "vram/peak_gb": float(torch.cuda.max_memory_allocated() / 2**30) if torch.cuda.is_available() else 0.0,
+            "train/oom_fallback_steps": oom_fallback_steps,
             **val_metrics,
         }
         for size, losses in size_losses.items():
@@ -823,6 +905,12 @@ def parse_args() -> argparse.Namespace:
         "--context-hidden", type=int, nargs="+", default=list(PAPER_HEAD["context_hidden"])
     )
     train_parser.add_argument("--context-dim", type=int, default=PAPER_HEAD["context_dim"])
+    train_parser.add_argument(
+        "--stratified-combos", action="store_true",
+        help="Fixed-composition batches: one combo PER SOURCE (same size-stratified "
+        "marginal), encoded in a single all-inputs-length masked forward. Constant "
+        "per-batch memory and full combo mix in every gradient.",
+    )
     train_parser.add_argument("--fixed-combo", default=None,
                               help="Train on one fixed modality combo, e.g. 'spectra'.")
     train_parser.add_argument("--token-mask-augment", action="store_true",

@@ -979,6 +979,7 @@ class AIONTokenEncoder(nn.Module):
         combo: tuple[str, ...],
         spectrum_token_mask: torch.Tensor | None = None,
         mask_mode: str = "drop",
+        modality_dropout: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode a batch; ``spectrum_token_mask`` (bool [B, 272]) removes wavelength tokens.
 
@@ -1000,6 +1001,28 @@ class AIONTokenEncoder(nn.Module):
         modalities = self._modalities(flux, ivar, wavelength, redshift, wise, image, combo)
         token_dict = codec.encode(*modalities)
         input_mask_dict = None
+        if modality_dropout:
+            # Per-source modality dropout (stratified fixed-composition batches):
+            # every batch is encoded at the full all-inputs sequence length and
+            # sources exclude modalities via the SAME native input mask used for
+            # token drops -- one codec pass, one backbone forward, constant
+            # per-batch memory. Masked positions come back as group id -1.
+            input_mask_dict = {}
+            for group_name, token_keys in TOKEN_KEYS_BY_MODALITY.items():
+                dropped = modality_dropout.get(group_name)
+                if dropped is None or not bool(dropped.any()):
+                    continue
+                dropped = dropped.to(flux.device)
+                for token_key in token_keys:
+                    if token_key not in token_dict:
+                        continue
+                    tensor = token_dict[token_key]
+                    n_cols = int(tensor.shape[1]) if tensor.dim() > 1 else 1
+                    col_mask = torch.zeros(
+                        tensor.shape[0], n_cols, dtype=torch.bool, device=flux.device
+                    )
+                    col_mask[dropped] = True
+                    input_mask_dict[token_key] = col_mask
         if spectrum_token_mask is not None and "spectra" in combo:
             if mask_mode not in ("drop", "replace"):
                 raise ValueError(f"Unknown mask_mode {mask_mode!r}.")
@@ -1017,7 +1040,11 @@ class AIONTokenEncoder(nn.Module):
                     token_dict[key].shape[:2], dtype=torch.bool, device=flux.device
                 )
                 col_mask[:, offset : offset + n_tok] = spectrum_token_mask
-                input_mask_dict = {key: col_mask}
+                if input_mask_dict is None:
+                    input_mask_dict = {}
+                if key in input_mask_dict:
+                    col_mask = col_mask | input_mask_dict[key]
+                input_mask_dict[key] = col_mask
             else:
                 cont = self._median_continuum(flux)
                 cont_dict = codec.encode(

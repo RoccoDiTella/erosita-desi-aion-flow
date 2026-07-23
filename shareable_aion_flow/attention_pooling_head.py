@@ -320,6 +320,16 @@ class ComboSampler:
             combos_by_size.setdefault(len(combo), []).append(combo)
         return cls({size: tuple(combos) for size, combos in combos_by_size.items()})
 
+    def sample_per_source(
+        self, n: int, generator: torch.Generator | None = None
+    ) -> list[tuple[str, ...]]:
+        """One combo per source, same size-stratified marginal as ``sample``.
+
+        Used for fixed-composition batches: every batch then contains the full
+        combo mix, so per-batch memory and gradient composition are constant.
+        """
+        return [self.sample(generator) for _ in range(n)]
+
     def sample(self, generator: torch.Generator | None = None) -> tuple[str, ...]:
         sizes = tuple(sorted(self.combos_by_size))
         size_index = int(torch.randint(len(sizes), (1,), generator=generator).item())
