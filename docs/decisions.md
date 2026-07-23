@@ -410,6 +410,25 @@ OVERRIDES eval-time `@torch.no_grad()` → every eval forward built and retained
 autograd graphs through the unfrozen encoder (77 GiB accumulated). Encoder now
 respects the ambient grad mode. Fresh eval on the saved best.pt: 34632659.
 
+**13-line Shapley results (job 34345374, 1h22m — ran 2026-07-22 evening,
+harvested 2026-07-23):** extended catalog (adds Hγ, Hδ, NeIII, Lyα, CIV,
+CIII). **Balmer dominance sharpens: Hα 64.0±3.5 > Hβ 36.8 > OIII 27.6 >
+Hδ 26.9 > Hγ 18.0 mnats — the four Balmer lines carry ~65% of all line
+information.** Then Lyα 15.3±3.7 (11.6% availability, z>1.96), CIII 13.7,
+NeIII 10.1, CIV 6.0, OII 5.4, NeV 4.8, HeII ≈0; MgII stays negative
+(−4.1±1.2). Per-token density: OIII 8.0 > Hα 4.2 > Hβ 2.4. Population view
+(φ·availability): Hβ 23.2 > Hδ 21.7 > Hα 17.4 — Hβ/Hδ overtake Hα on
+coverage. Pair interactions: Balmer×Balmer and Balmer×OIII strongly REDUNDANT
+(Hβ×Hα −37.7±4.6, OIII×Hα −31.6, Hα×Hδ −27.4 mnats) = one shared
+ionization/luminosity signal; only MgII×Lyα weakly synergistic (+17.1±8.0,
+2σ). **Coalition summary shifts vs the 7-line v2: lines_only −0.971 now BEATS
+full −0.980 (103% of the 0.284-nat shape gain; continuum_only retains 77%,
+down from 96%)** — with 13 windows + guards the line set covers enough
+spectrum to carry essentially all shape information; the residual continuum
+adds nothing (mildly negative marginal, MgII-like). The "redundant channels"
+verdict from v2 softens to "line windows suffice; continuum-minus-line-regions
+is the weaker channel."
+
 **V3-CLS verdict (2026-07-23, eval of 34356743 best.pt): all-inputs R²
 0.575 / exp(IG) 1.32 (plain-LL eval) — a statistical TIE with frozen-encoder
 V_simple (0.572 / 1.38) on points and WORSE on density.** LoRA(r8, all
