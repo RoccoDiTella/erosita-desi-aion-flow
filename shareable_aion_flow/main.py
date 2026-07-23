@@ -976,6 +976,28 @@ def parse_args() -> argparse.Namespace:
     )
     train_parser.add_argument("--log-every", type=int, default=10, help="Log batch NLL every N steps.")
 
+    mt = subparsers.add_parser("train-multi", help="Train the 8-head read-only-CLS multi-target model.")
+    mt.add_argument("--staged-dir", type=Path, required=True)
+    mt.add_argument("--clean-split-csv", type=Path, required=True)
+    mt.add_argument("--extra-targets-csv", type=Path, required=True, help="Band-target sidecar (targets_bands.csv).")
+    mt.add_argument("--epochs", type=int, default=30)
+    mt.add_argument("--batch-size", type=int, default=448)
+    mt.add_argument("--lr", type=float, default=1e-4)
+    mt.add_argument("--lr-schedule", choices=["constant", "cosine"], default="constant")
+    mt.add_argument("--weight-decay", type=float, default=1e-4, help="Head + flows.")
+    mt.add_argument("--adapter-wd", type=float, default=1e-2, help="Full-rank read adapters (capacity control).")
+    mt.add_argument("--grad-checkpoint", action="store_true")
+    mt.add_argument("--no-inject", action="store_true")
+    mt.add_argument("--num-workers", type=int, default=8)
+    mt.add_argument("--seed", type=int, default=42)
+    mt.add_argument("--device", default=None)
+    mt.add_argument("--run-id", required=True)
+    mt.add_argument("--output-dir", type=Path, default=OUTPUTS_DIR)
+    mt.add_argument("--log-every", type=int, default=10)
+    mt.add_argument("--wandb", action="store_true")
+    mt.add_argument("--wandb-project", default="erosita-desi-aion-flow")
+    mt.add_argument("--wandb-entity", default=None)
+
     eval_parser = subparsers.add_parser(
         "eval", help="Evaluate all 15 modality combinations from a checkpoint."
     )
@@ -1031,6 +1053,9 @@ def main() -> None:
         print(json.dumps(summary, indent=2, sort_keys=True))
     elif args.command == "train":
         train(args)
+    elif args.command == "train-multi":
+        from .multitarget import run_train_multi
+        run_train_multi(args)
     elif args.command == "eval":
         evaluate(args)
     elif args.command == "make-table":

@@ -201,6 +201,7 @@ class ConditionalNSFFlow(nn.Module):
         context_dim: int = 256,
         transforms: int = 8,
         hidden_features: tuple[int, ...] = (256, 256),
+        features: int = 1,
     ) -> None:
         super().__init__()
         try:
@@ -208,8 +209,9 @@ class ConditionalNSFFlow(nn.Module):
         except ImportError as exc:
             raise ImportError("Install zuko>=1.5.0 to train or evaluate the normalizing flow.") from exc
         self.context_dim = context_dim
+        self.features = int(features)
         self.flow = NSF(
-            features=1,
+            features=self.features,
             context=context_dim,
             transforms=transforms,
             hidden_features=list(hidden_features),
@@ -221,12 +223,14 @@ class ConditionalNSFFlow(nn.Module):
         return self.flow(context)
 
     def log_prob(self, standardized_target: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        if standardized_target.dim() == 1:
+        if standardized_target.dim() == 1 and self.features == 1:
             target = standardized_target.unsqueeze(-1)
-        elif standardized_target.dim() == 2 and standardized_target.shape[-1] == 1:
+        elif standardized_target.dim() == 2 and standardized_target.shape[-1] == self.features:
             target = standardized_target
         else:
-            raise ValueError(f"Expected target shape [B] or [B, 1], got {tuple(standardized_target.shape)}.")
+            raise ValueError(
+                f"Expected target shape [B] or [B, {self.features}], got {tuple(standardized_target.shape)}."
+            )
         if target.shape[0] != context.shape[0]:
             raise ValueError(
                 f"Target batch size {target.shape[0]} does not match context batch size {context.shape[0]}."
