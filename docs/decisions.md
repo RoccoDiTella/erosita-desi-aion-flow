@@ -452,6 +452,20 @@ error-mode none vs inject A/B on one band target (P1, most inflated) to price
 the damage; (c) a global σ-shrinkage calibration factor in the kernel (still
 σ-free at inference). Not scheduled — pinned.
 
+**Composed hardness from band predictions (2026-07-23, user request):** the
+eRASS1 flux/rate ratio is EXACTLY constant per band (global ECFs: log F−log R =
+−12.133/−12.006 for P2/P3, scatter 0.0000), so HR32 from predicted band fluxes
+is exact arithmetic. On the P2∩P3 test intersection (2,169): **the population
+HR32 distribution is recovered** — predicted p10–p90 spread (half-width 0.14)
+matches the noise-subtracted measured width (~0.16; detected-subset measured
+0.29 minus median σ_HR 0.24 in quadrature). **Per-source HR skill is null**
+(corr 0.06 on hr32_ok) — independently confirming the direct-HR verdict via a
+completely different route. Per-source composed-HR posteriors are wide (±0.55)
+because the two band posteriors were modeled independently; a JOINT P2×P3
+posterior would cancel the shared flux error in the ratio — a concrete
+motivation for the multi-target correlated-flow extension. Slide added
+(band-performance table + HR quantile table).
+
 **Shapley v4, merged Hbeta+OIII player (job 34672894):** merge behaves as
 predicted — merged φ 48.5±2.2 mnats ≈ v3's separate sum plus their pair
 interaction; **Hα robustly top (81±4)**. CAVEAT: the sweep auto-adopted

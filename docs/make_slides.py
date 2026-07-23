@@ -270,6 +270,32 @@ def main() -> None:
             metric_table(ax, mstar_table, rect=(0.24, 0.02, 0.52, 0.90), fontsize=12)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 6b2 Per-band performance + composed hardness
+        fig, ax = new_slide("Per-band prediction and composed hardness",
+                            "V_simple + inject, gate sigma <= 1.0 · HR32 from the P2/P3 predicted posteriors (independence approx.)")
+        band_perf = pd.DataFrame([
+            {"band": "P1  0.2-0.6", "R2": "0.320", "exp(IG)": "1.15", "n": "1,976", "sigma ceiling": "0.06"},
+            {"band": "P2  0.6-2.3", "R2": "0.380", "exp(IG)": "1.17", "n": "2,372", "sigma ceiling": "0.34"},
+            {"band": "P3  2.3-5.0", "R2": "0.378", "exp(IG)": "1.14", "n": "2,310", "sigma ceiling": "0.23"},
+            {"band": "P4  5.0-8.0", "R2": "0.071", "exp(IG)": "0.94", "n": "1,176", "sigma ceiling": "-1.09"},
+        ])
+        metric_table(ax, band_perf, rect=(0.02, 0.42, 0.44, 0.44), fontsize=11)
+        hr_tab = pd.DataFrame([
+            {"HR32": "p10", "predicted": "-0.25", "measured (det.)": "-0.34", "measured (all)": "-0.54"},
+            {"HR32": "p25", "predicted": "-0.18", "measured (det.)": "-0.21", "measured (all)": "-0.34"},
+            {"HR32": "p50", "predicted": "-0.11", "measured (det.)": "-0.06", "measured (all)": "-0.07"},
+            {"HR32": "p75", "predicted": "-0.04", "measured (det.)": "0.08", "measured (all)": "0.21"},
+            {"HR32": "p90", "predicted": "0.04", "measured (det.)": "0.24", "measured (all)": "0.46"},
+        ])
+        metric_table(ax, hr_tab, rect=(0.54, 0.42, 0.44, 0.44), fontsize=11)
+        bullets(ax, [
+            "P1/P3 beat their error-derived ceilings: faint-band sigma overestimated",
+            "population HR width 0.14 ~ noise-subtracted measured width 0.16",
+            "per-source HR: corr 0.06 on detected subset - matches the direct-HR null",
+            "joint P2xP3 posterior (multi-target flow) would cancel the shared flux error",
+        ], y=0.30, fontsize=12, dy=0.085)
+        pdf.savefig(fig); plt.close(fig)
+
         # ---- 6c Modality Shapley
         if (FIGS / "fig_modality_shapley.png").exists():
             fig, ax = new_slide("Information by input type",

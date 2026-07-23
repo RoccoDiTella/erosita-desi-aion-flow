@@ -42,7 +42,7 @@ def _setup(seed: int = 0):
     block = _StubBlock()
     for p in block.parameters():
         p.requires_grad = False
-    adapter = CLSReadAdapter(DIM, rank=4)
+    adapter = CLSReadAdapter(DIM)
     x = torch.randn(B, N, DIM)
     c = torch.randn(B, 1, DIM, requires_grad=True)
     return block, adapter, x, c
@@ -62,18 +62,18 @@ def test_gradients_reach_only_cls_and_adapters() -> None:
     out = cls_read_step(block, adapter, x, c, None)
     out.sum().backward()
     assert c.grad is not None and c.grad.abs().sum() > 0
-    # Zero-init up-projections: ups receive gradient immediately, downs do not
-    # (standard LoRA); the frozen block receives none by construction.
-    assert adapter.q_up.weight.grad is not None and adapter.q_up.weight.grad.abs().sum() > 0
-    assert adapter.v_up.weight.grad is not None and adapter.v_up.weight.grad.abs().sum() > 0
+    # Zero-init full-rank deltas receive gradients immediately; the frozen
+    # block receives none by construction.
+    assert adapter.q_delta.weight.grad is not None and adapter.q_delta.weight.grad.abs().sum() > 0
+    assert adapter.v_delta.weight.grad is not None and adapter.v_delta.weight.grad.abs().sum() > 0
     assert all(p.grad is None for p in block.parameters())
 
 
 def test_adapters_are_noop_at_init() -> None:
     block, _, x, c = _setup(seed=1)
-    out_a = cls_read_step(block, CLSReadAdapter(DIM, rank=4), x, c, None)
-    out_b = cls_read_step(block, CLSReadAdapter(DIM, rank=8), x, c, None)
-    # Different random down-projections, but zero-init ups: both exact no-ops.
+    out_a = cls_read_step(block, CLSReadAdapter(DIM), x, c, None)
+    out_b = cls_read_step(block, CLSReadAdapter(DIM), x, c, None)
+    # Zero-init full-rank deltas: both adapters are exact no-ops at init.
     assert torch.allclose(out_a, out_b, atol=1e-6)
 
 
@@ -86,3 +86,13 @@ def test_masked_tokens_are_invisible_to_the_cls() -> None:
     x_perturbed[:, -1] += 100.0
     out_perturbed = cls_read_step(block, adapter, x_perturbed, c.detach(), key_invalid)
     assert torch.allclose(out, out_perturbed, atol=1e-5)
+
+
+def test_multi_cls_streams_match_independent_singles() -> None:
+    """K stacked CLS streams must equal K independent single-CLS reads."""
+    block, adapter, x, _ = _setup(seed=3)
+    c_multi = torch.randn(B, 3, DIM)
+    out_multi = cls_read_step(block, adapter, x, c_multi, None)
+    for j in range(3):
+        out_single = cls_read_step(block, adapter, x, c_multi[:, j : j + 1], None)
+        assert torch.allclose(out_multi[:, j : j + 1], out_single, atol=1e-5)
