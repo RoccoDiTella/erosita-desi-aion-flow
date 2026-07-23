@@ -429,6 +429,56 @@ adds nothing (mildly negative marginal, MgII-like). The "redundant channels"
 verdict from v2 softens to "line windows suffice; continuum-minus-line-regions
 is the weaker channel."
 
+**Band-rate results (reruns 34629507/08/19/35, 2026-07-23; V_simple inject,
+gate σ≤1.0):** P1 (0.2–0.6 keV) all-inputs R² **0.320**, P3 (2.3–5.0)
+**0.378**, P4 (5.0–8.0) 0.071; P2 pending. **P1 and P3 land far ABOVE their
+predicted noise-floor ceilings (0.06 / 0.23)** → the eRASS1 per-band σ's are
+systematically overestimated for faint bands, so the ceiling table is a lower
+bound on achievable R², not an upper bound (same error-inflation family as the
+HR σ blow-up, opposite consequence). P3's real hard-band predictability
+strengthens the censored band-RATE approach over the HR ratio. P4 ≈ its
+ceiling (5% detected — genuinely empty).
+
+**Shapley v4, merged Hbeta+OIII player (job 34672894):** merge behaves as
+predicted — merged φ 48.5±2.2 mnats ≈ v3's separate sum plus their pair
+interaction; **Hα robustly top (81±4)**. CAVEAT: the sweep auto-adopted
+**guard=10** from the codec-leakage probe (v3 used ~2). ±10 tokens ≈ ±250 Å
+dilation explains the anomalies (NeIII availability 83→8% — swallowed by
+Hδ+guard; HeII φ ×20 — its guard claims Hβ's blue wing). Ranking trustworthy;
+absolute line/continuum split NOT comparable to v3; "lines carry everything"
+partly window dilation. Open: pin guard=2 and re-run (~30 min) or audit why
+the probe recommends 10.
+
+**V3b read-only CLS (designed with user, commit 8f6b5d8; implemented +
+unit-tested, NOT yet run):** CLS outside the sequence — no token attends to
+it, data stream bit-identical to the frozen encoder (no_grad); per block the
+CLS cross-reads with the block's own frozen attention + frozen MLP; trainable
+= CLS vector + per-block zero-init low-rank deltas on the CLS query and
+consumed values. Kills both measured V3a failure modes by construction; bs 448
+fits; per-block K/V saves cap it near bs ~900. Design points still OPEN with
+the user: Q-only vs Q+V adapters, keep/skip the frozen MLP between reads,
+per-block vs shared adapters, single vs per-task CLS bank.
+
+**Batching/efficiency design (2026-07-23, user-driven; supersedes any
+"maximize VRAM" phrasing):** the objective is information learned per
+GPU-hour; per the FASRC TRES scheme (A100 = 836.5 CPU-core-equiv) GPU
+wall-time is the entire fairshare cost. Converged design: **combo-pure
+forwards** (uniform token count per forward — mixing lengths in one tensor
+pays the max length for every source; true packing needs block-diagonal masks
+the frozen backbone lacks), **one optimizer step per forward** (same as the
+current per-batch-combo protocol), per-combo batch size = **throughput knee,
+capped by critical batch size** (below knee: hardware idles; between: 1:1
+regime, free choice; above B_crit: redundant data per update). Cheap combos
+are optimization-ruled (their forwards are wall-time-free anyway). VRAM
+filling is NOT a goal — FLOPs saturation is; empty VRAM = OOM insurance.
+Historical runs never varied batch size (all bs 448; V3a only 128), so
+knees are being MEASURED: `scripts/throughput_probe.py` (timed steps, no
+epochs; job 34686753, manual review — no auto-chaining per user rule).
+Infrastructure landed (1e7baf3): `--stratified-combos` per-source assignment
+via the native input mask, `oom_resilient_step` (CUDA OOM is catchable →
+half-batch gradient accumulation, mathematically identical update),
+`vram/peak_gb` + OOM-fallback logging.
+
 **V3-CLS verdict (2026-07-23, eval of 34356743 best.pt): all-inputs R²
 0.575 / exp(IG) 1.32 (plain-LL eval) — a statistical TIE with frozen-encoder
 V_simple (0.572 / 1.38) on points and WORSE on density.** LoRA(r8, all
