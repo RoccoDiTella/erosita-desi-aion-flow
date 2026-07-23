@@ -8,6 +8,7 @@ See ``docs/DATA.md`` for how to obtain the raw inputs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -953,7 +954,14 @@ class AIONTokenEncoder(nn.Module):
                 token_dict[key] = codes
         num_tokens = self._num_tokens(token_dict)
 
-        context_manager = torch.no_grad() if self.freeze else torch.enable_grad()
+        # Respect the ambient grad mode: forcing enable_grad() here would override
+        # eval-time @torch.no_grad() and build (and leak) autograd graphs through
+        # the whole encoder — the v3-cls eval OOM. Training reaches this under an
+        # ambient grad-enabled context, so nullcontext keeps gradients flowing.
+        if self.freeze or not torch.is_grad_enabled():
+            context_manager = torch.no_grad()
+        else:
+            context_manager = contextlib.nullcontext()
         with context_manager:
             encoder_tokens, encoder_emb, encoder_mask, encoder_mod_mask = self.backbone.embed_inputs(
                 token_dict,
