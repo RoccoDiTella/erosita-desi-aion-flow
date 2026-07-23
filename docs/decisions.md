@@ -440,6 +440,18 @@ HR σ blow-up, opposite consequence). P3's real hard-band predictability
 strengthens the censored band-RATE approach over the HR ratio. P4 ≈ its
 ceiling (5% detected — genuinely empty).
 
+**PINNED QUESTION (user, 2026-07-23): are we doing a disservice by training
+with the catalog lolim/hilim?** The ceiling overshoot implies the eRASS1
+LOWERR/UPERR-derived σ's are inflated for faint bands/sources — and inject
+training smears targets by exactly these σ's, so we inject MORE noise than the
+measurements actually carry. The accepted broadening bias is then larger than
+the documented E[σ²]≈0.03, worst where σ is most inflated. Candidate probes
+when picked up: (a) the already-queued residual regression
+Var(y−p50)=a·σ²+b — a<1 directly MEASURES the σ inflation factor; (b) an
+error-mode none vs inject A/B on one band target (P1, most inflated) to price
+the damage; (c) a global σ-shrinkage calibration factor in the kernel (still
+σ-free at inference). Not scheduled — pinned.
+
 **Shapley v4, merged Hbeta+OIII player (job 34672894):** merge behaves as
 predicted — merged φ 48.5±2.2 mnats ≈ v3's separate sum plus their pair
 interaction; **Hα robustly top (81±4)**. CAVEAT: the sweep auto-adopted
