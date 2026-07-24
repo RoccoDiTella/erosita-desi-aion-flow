@@ -452,6 +452,51 @@ error-mode none vs inject A/B on one band target (P1, most inflated) to price
 the damage; (c) a global σ-shrinkage calibration factor in the kernel (still
 σ-free at inference). Not scheduled — pinned.
 
+**Why band predictions carry no HR information (variance decomposition,
+2026-07-23):** measured logF_P2/logF_P3 are only 0.56 correlated with ~0.40 dex
+spread each; the DIFFERENCE (all HR lives there) has 0.374 dex measured spread
+of which ~0.35 is independent per-band measurement noise → intrinsic hardness
+signal ≈ 0.13 dex, per-source S/N ≈ 0.4 on both target and model side. The
+per-band R² 0.38 is almost entirely the SHARED brightness component, which
+cancels exactly in HR; our independent band models' residuals are only 0.24
+correlated (residual on the diff 0.38 dex ≈ the whole measured diff spread;
+corr(predicted diff, true diff) = 0.099). Composed-HR point estimates: corr²
+≤ 0.016 on every quality subset (raw R² negative from under-dispersion) — but
+the +0.11 corr at n=1,209 is a ~4σ whisper the direct HR model never showed.
+The joint P2×P3 flow exists to amplify exactly that (correlated residuals
+cancel the shared error in the ratio).
+
+**Multi-target V3b — final spec (user-designed, commits cdc28be + bucketing):**
+8 heads = 7 scalar 1-D flows (flux, Lx, M★, P1–P4) + one JOINT 2-D flow over
+(P2,P3); HR never a direct target. Per-target CLS vectors; SHARED FULL-RANK
+per-block Q/V read adapters (deltas on the projection maps, zero-init; capacity
+control = weight decay, not rank — compute is ~free and activation memory is
+rank-independent); shared 768→512→256 MLP; sharing ends at the 256-d
+conditioning vectors. Losses: per-source availability masks (missing bands
+contribute nothing), split-normal injection where σ exists (independent per
+band — Poisson), detached-EMA per-head loss normalization. All unit-tested
+(60), incl. reader independence (K stacked CLS ≡ K singles).
+
+**Calibration grid (jobs 34706362-89, 2 epochs each, 2026-07-24):**
+bs 224: 53.2 samp/s, 27.6 GB, val-sum 9.96 | bs 448: 44.3, 53.3, 10.62 |
+bs 896: OOM (frozen attention transient 29 GB + 50 GB checkpoint saves) |
+wd 1e-1: 10.41 (≥ wd 1e-2 — stronger adapter decay costs nothing early) |
+lr 3e-4 cosine: 10.74, destabilizes the easy heads (Lx 0.82 vs 0.65).
+**Decisions: bs 224 (beats 448 on BOTH throughput and per-epoch convergence —
+attention is bandwidth-bound at these lengths and more steps win below B_crit),
+lr 1e-4 constant, adapter wd 1e-1. Overnight config: train-multi, 30 epochs,
+~3.8 h — STAGED, awaiting explicit go.**
+
+**Length-bucketed combo packing (user design, implemented + tested,
+`--bucketed`):** combos grouped by padded token LENGTH, not identity — four
+buckets (tiny z/W/z+W @ 4 tokens; spectra-ish @ ~281; image-ish @ ~510; heavy
+@ ~790), each encoding its combos' modality UNION once with per-source
+native-mask dropout; padding waste ≤1.5% everywhere. One forward AND one
+optimizer step per bucket: with a large loader batch (~896) each bucket lands
+near the calibrated 224 while the step count stays high. Codec batching
+improves ~4× per bucket (saving ~1–3% train wall); the big codec win remains
+eval-side reuse (15-combo sweep: tokenize once, 15×→1 — queued).
+
 **Composed hardness from band predictions (2026-07-23, user request):** the
 eRASS1 flux/rate ratio is EXACTLY constant per band (global ECFs: log F−log R =
 −12.133/−12.006 for P2/P3, scatter 0.0000), so HR32 from predicted band fluxes

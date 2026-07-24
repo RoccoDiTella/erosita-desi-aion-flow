@@ -987,6 +987,10 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--weight-decay", type=float, default=1e-4, help="Head + flows.")
     mt.add_argument("--adapter-wd", type=float, default=1e-2, help="Full-rank read adapters (capacity control).")
     mt.add_argument("--grad-checkpoint", action="store_true")
+    mt.add_argument("--bucketed", action="store_true",
+                    help="Length-bucketed combo packing: per-source combos grouped into 4 "
+                    "token-length buckets; one forward + one step per bucket. Use a LARGE "
+                    "--batch-size (e.g. 896) so each bucket lands near the calibrated 224.")
     mt.add_argument("--no-inject", action="store_true")
     mt.add_argument("--num-workers", type=int, default=8)
     mt.add_argument("--seed", type=int, default=42)

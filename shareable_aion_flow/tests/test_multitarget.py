@@ -109,3 +109,26 @@ def test_ema_weights_normalize_scales() -> None:
     assert np.isclose(w[0] * 4.0, 1.0, rtol=0.05)
     assert np.isclose(w[3] * 0.5, 1.0, rtol=0.05)
     assert w[2] == 1.0                           # never-seen target keeps unit weight
+
+
+def test_length_buckets_partition_all_15_combos() -> None:
+    from multitarget import LENGTH_BUCKETS, bucket_assignments, bucket_modality_dropout
+    from attention_pooling_head import all_nonempty_modality_combos
+
+    all_combos = all_nonempty_modality_combos()
+    covered = set()
+    for b in LENGTH_BUCKETS:
+        assert not (covered & b["combos"])       # disjoint
+        covered |= b["combos"]
+    assert covered == set(all_combos)            # exhaustive
+
+    combos = [("z",), ("spectra", "z"), ("spectra", "z", "wise", "image"), ("wise", "image"), ("z",)]
+    parts = bucket_assignments(combos)
+    assert sum(len(idx) for _, idx in parts) == len(combos)
+    for bucket, idx in parts:
+        for i in idx:
+            assert tuple(combos[i]) in bucket["combos"]
+        drop = bucket_modality_dropout(bucket, combos, idx)
+        for k, group in enumerate(bucket["union"]):
+            for row, i in enumerate(idx):
+                assert drop[group][row].item() == (group not in combos[i])

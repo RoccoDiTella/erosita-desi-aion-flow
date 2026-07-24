@@ -280,7 +280,7 @@ def run_train_multi(args) -> None:
     ]
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     trainable = [p for g in param_groups for p in g["params"]]
-    steps_per_epoch = max(1, len(train_loader))
+    steps_per_epoch = max(1, len(train_loader)) * (len(LENGTH_BUCKETS) if args.bucketed else 1)
     scheduler = None
     if args.lr_schedule == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -294,6 +294,7 @@ def run_train_multi(args) -> None:
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
         "inject": not args.no_inject, "grad_checkpoint": args.grad_checkpoint,
+        "bucketed": bool(args.bucketed),
         "cls_variant": "readonly", "num_cls": N_HEADS, "adapter": "full-rank",
         "standardizers": [s.state_dict() for s in standardizers],
         "clean_split_csv": str(args.clean_split_csv), "extra_targets_csv": str(args.extra_targets_csv),
@@ -325,30 +326,49 @@ def run_train_multi(args) -> None:
         n_seen = 0
         for batch in train_loader:
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
-            combo = sampler.sample(generator)
-            y, slo, shi = lookup.batch(batch[7], device)
-            cls_seq, _ = encoder.encode_tokens(batch, combo)
-            contexts = head(cls_seq)
-            loss, raw = multi_target_nll(
-                contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
-                standardizers=standardizers, weights=weights, inject=not args.no_inject,
-            )
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-            weights = ema.update_and_weights(raw)
-            n_seen += int(batch[6].shape[0]); global_step += 1
-            if tracker.enabled and global_step % args.log_every == 0:
-                payload = {"train/weighted_loss": float(loss.item()),
-                           "train/grad_norm": float(grad_norm),
-                           "train/lr": float(optimizer.param_groups[0]["lr"]), "epoch": epoch}
-                for name, val in zip(HEAD_NAMES, raw):
-                    if val is not None:
-                        payload[f"train/nll_{name}"] = val
-                tracker.log(payload, step=global_step)
+            y_all, slo_all, shi_all = lookup.batch(batch[7], device)
+            if args.bucketed:
+                # Length-bucketed packing: per-source combos, one forward AND
+                # one optimizer step per bucket -- each bucket lands near the
+                # calibrated per-forward size while the step count stays high.
+                B = int(batch[6].shape[0])
+                combos_ps = [sampler.sample(generator) for _ in range(B)]
+                steps = []
+                for bucket, idx in bucket_assignments(combos_ps):
+                    rows = torch.from_numpy(idx).to(device)
+                    sub = tuple(t[rows] for t in batch)
+                    drop = {k: v.to(device) for k, v in
+                            bucket_modality_dropout(bucket, combos_ps, idx).items()}
+                    steps.append((bucket["union"], sub, drop, rows))
+            else:
+                steps = [(sampler.sample(generator), batch, None, None)]
+            for combo, sub, drop, rows in steps:
+                if rows is None:
+                    y, slo, shi = y_all, slo_all, shi_all
+                else:
+                    y, slo, shi = y_all[rows], slo_all[rows], shi_all[rows]
+                cls_seq, _ = encoder.encode_tokens(sub, tuple(combo), modality_dropout=drop)
+                contexts = head(cls_seq)
+                loss, raw = multi_target_nll(
+                    contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
+                    standardizers=standardizers, weights=weights, inject=not args.no_inject,
+                )
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                weights = ema.update_and_weights(raw)
+                n_seen += int(sub[6].shape[0]); global_step += 1
+                if tracker.enabled and global_step % args.log_every == 0:
+                    payload = {"train/weighted_loss": float(loss.item()),
+                               "train/grad_norm": float(grad_norm),
+                               "train/lr": float(optimizer.param_groups[0]["lr"]), "epoch": epoch}
+                    for name, val in zip(HEAD_NAMES, raw):
+                        if val is not None:
+                            payload[f"train/nll_{name}"] = val
+                    tracker.log(payload, step=global_step)
 
         # validation: all-inputs combo, plain NLL (no injection), per head
         encoder.eval(); head.eval(); flows.eval()
@@ -385,3 +405,53 @@ def run_train_multi(args) -> None:
             save(run_dir / "best.pt", epoch, val_sum)
     tracker.summary({"val/best_multi_nll_sum": best})
     tracker.finish()
+
+
+# Length-bucketed combo packing (user design): combos grouped by padded token
+# length, not identity. Each bucket encodes the UNION of its combos' modalities
+# once; per-source masks drop the rest (padding waste <=1.5%). One optimizer
+# step per bucket forward: with a large loader batch, each bucket lands at the
+# calibrated per-forward size while keeping the step count of small batches.
+LENGTH_BUCKETS: list[dict] = [
+    {"name": "tiny", "union": ("z", "wise"),
+     "combos": {("z",), ("wise",), ("z", "wise")}},
+    {"name": "spectra", "union": ("spectra", "z", "wise"),
+     "combos": {("spectra",), ("spectra", "z"), ("spectra", "wise"), ("spectra", "z", "wise")}},
+    {"name": "image", "union": ("z", "wise", "image"),
+     "combos": {("image",), ("z", "image"), ("wise", "image"), ("z", "wise", "image")}},
+    {"name": "heavy", "union": ("spectra", "z", "wise", "image"),
+     "combos": {("spectra", "image"), ("spectra", "z", "image"), ("spectra", "wise", "image"),
+                ("spectra", "z", "wise", "image")}},
+]
+
+
+def bucket_assignments(
+    combos_per_source: list[tuple[str, ...]],
+) -> list[tuple[dict, np.ndarray]]:
+    """Partition per-source combos into length buckets.
+
+    Returns (bucket_spec, source_indices) for each non-empty bucket; every
+    source lands in exactly one bucket.
+    """
+    out = []
+    assigned = np.zeros(len(combos_per_source), dtype=bool)
+    for bucket in LENGTH_BUCKETS:
+        idx = np.array([i for i, c in enumerate(combos_per_source) if tuple(c) in bucket["combos"]],
+                       dtype=np.int64)
+        if len(idx):
+            out.append((bucket, idx))
+            assigned[idx] = True
+    if not bool(assigned.all()):
+        missing = [combos_per_source[i] for i in np.flatnonzero(~assigned)]
+        raise ValueError(f"Combos not covered by any length bucket: {set(missing)}")
+    return out
+
+
+def bucket_modality_dropout(
+    bucket: dict, combos: list[tuple[str, ...]], idx: np.ndarray
+) -> dict[str, torch.Tensor]:
+    """Per-source modality-dropout masks WITHIN a bucket (True = drop)."""
+    return {
+        group: torch.tensor([group not in combos[i] for i in idx], dtype=torch.bool)
+        for group in bucket["union"]
+    }
