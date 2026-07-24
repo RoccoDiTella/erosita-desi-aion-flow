@@ -330,6 +330,51 @@ def main() -> None:
             ], fontsize=12, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- 8 V3b multi-target design
+        fig, ax = new_slide("V3b: read-only CLS, one frozen forward, 8 heads",
+                            "no token attends to a CLS: the data stream is bit-identical to frozen AION and runs without gradients")
+        bullets(ax, [
+            "8 CLS tokens read every block with the block's own frozen attention (flux, Lx, M$_*$, P1-P4, P2$\\times$P3)",
+            "shared FULL-RANK deltas on the CLS query + consumed-value projections; capacity control = weight decay",
+            "shared MLP 768 $\\to$ 512 $\\to$ 256; sharing ends at the conditioning vectors; one small flow per head",
+            "joint 2-D flow over (P2, P3): correlated band errors cancel in the ratio $\\to$ per-source HR posteriors",
+            "losses: availability masks (missing bands contribute nothing) + per-head EMA normalization",
+            "cost of 8 heads $\\approx$ 1.2$\\times$ one head: K/V reads are shared; readers cannot interact (unit-tested)",
+        ], fontsize=13.5, dy=0.13)
+        pdf.savefig(fig); plt.close(fig)
+
+        # ---- 9 Calibration grid + batching decisions
+        fig, ax = new_slide("Efficiency: measure, then choose",
+                            "2-epoch calibration grid on full A100s; GPU wall-time is the entire fairshare cost (A100 = 836 CPU-core-eq)")
+        grid = pd.DataFrame([
+            {"config": "bs 224", "samp/s": "53.2", "peak GB": "27.6", "val NLL sum": "9.96"},
+            {"config": "bs 448", "samp/s": "44.3", "peak GB": "53.3", "val NLL sum": "10.62"},
+            {"config": "bs 896", "samp/s": "OOM", "peak GB": ">79", "val NLL sum": "-"},
+            {"config": "bs 448, wd 0.1", "samp/s": "45.6", "peak GB": "53.3", "val NLL sum": "10.41"},
+            {"config": "bs 448, lr 3e-4", "samp/s": "46.8", "peak GB": "53.3", "val NLL sum": "10.74"},
+        ])
+        metric_table(ax, grid, rect=(0.03, 0.35, 0.46, 0.55), fontsize=11.5)
+        ax2 = fig.add_axes([0.55, 0.22, 0.43, 0.52]); ax2.axis("off")
+        bullets(ax2, [
+            "bs 224 beats 448 on throughput AND\n   convergence: attention is bandwidth-\n   bound; more steps win below B$_{crit}$",
+            "adapter wd 0.1 free; lr 3e-4 destabilizes",
+            "chosen: bs 224, lr 1e-4, wd 0.1, 30 ep",
+        ], fontsize=13, dy=0.24)
+        bullets(ax, [
+            "batching: combos packed by token LENGTH - 4 buckets, padding $\\leq$ 1.5%, one step per bucket forward",
+        ], y=0.10, fontsize=13, dy=0.1)
+        pdf.savefig(fig); plt.close(fig)
+
+        # ---- 10 Next
+        fig, ax = new_slide("Next")
+        bullets(ax, [
+            "overnight multi-target V3b run (staged, awaiting go)",
+            "joint-posterior HR evaluation vs the composed-HR baseline",
+            "Shapley guard audit; band-sigma inflation probes",
+            "50-epoch paper reproduction",
+        ], fontsize=17, dy=0.14)
+        pdf.savefig(fig); plt.close(fig)
+
 
     print(f"wrote {args.output}")
 
