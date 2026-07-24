@@ -370,9 +370,11 @@ def run_train_multi(args) -> None:
                             payload[f"train/nll_{name}"] = val
                     tracker.log(payload, step=global_step)
 
-        # validation: all-inputs combo, plain NLL (no injection), per head
+        # validation: all-inputs combo, plain NLL (no injection) + posterior-mean
+        # R^2 per scalar head so the review does not need a separate eval pass
         encoder.eval(); head.eval(); flows.eval()
         sums = np.zeros(N_HEADS); counts = np.zeros(N_HEADS)
+        preds = [[] for _ in range(N_TARGETS)]; trues = [[] for _ in range(N_TARGETS)]
         with torch.no_grad():
             for batch in val_loader:
                 batch = tuple(t.to(device, non_blocking=True) for t in batch)
@@ -387,6 +389,18 @@ def run_train_multi(args) -> None:
                 for j, val in enumerate(raw):
                     if val is not None:
                         sums[j] += val * n; counts[j] += n
+                for j in range(N_TARGETS):
+                    mask = torch.isfinite(y[:, j])
+                    if bool(mask.any()):
+                        samp = flows.flows[j].sample(contexts[mask, j], num_samples=64)
+                        preds[j].append(samp.mean(dim=0).cpu().numpy())
+                        trues[j].append(standardizers[j].transform_tensor(y[mask, j]).cpu().numpy())
+        val_r2 = np.full(N_TARGETS, np.nan)
+        for j in range(N_TARGETS):
+            if preds[j]:
+                yp, yt = np.concatenate(preds[j]), np.concatenate(trues[j])
+                ss = np.sum((yt - yt.mean()) ** 2)
+                val_r2[j] = 1.0 - np.sum((yt - yp) ** 2) / ss if ss > 0 else np.nan
         val_nll = sums / np.maximum(counts, 1)
         val_sum = float(val_nll.sum())
         dt = time.monotonic() - t0
@@ -397,6 +411,7 @@ def run_train_multi(args) -> None:
         payload = {"epoch": epoch, "val/multi_nll_sum": val_sum, "epoch_seconds": dt,
                    "throughput/samples_per_second": n_seen / dt, "vram/peak_gb": peak}
         payload.update({f"val/nll_{n}": float(v) for n, v in zip(HEAD_NAMES, val_nll)})
+        payload.update({f"val/r2_{n}": float(v) for n, v in zip(HEAD_NAMES[:N_TARGETS], val_r2) if np.isfinite(v)})
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
         save(run_dir / "last.pt", epoch, val_sum)
