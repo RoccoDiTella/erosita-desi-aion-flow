@@ -157,7 +157,7 @@ def main() -> None:
         ax2 = fig.add_axes([0.62, 0.15, 0.36, 0.55]); ax2.axis("off")
         bullets(ax2, [
             "the catalog reports the error borders;\n     in log space these are the ±1σ\n     points of the split normal",
-            "draws truncated at 1.5σ per side",
+            "draws truncated at 1.5σ per side;\n     50 draws/step, broadcast under one\n     conditioner pass (free)",
             "logM★ has no catalog σ →\n     class floor: 0.2 (GALAXY) / 0.3 (QSO) dex",
             "eval: plain likelihood at observed y,\n     no σ involved",
         ], fontsize=12.5, dy=0.17)
@@ -325,7 +325,8 @@ def main() -> None:
             ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
             bullets(ax2, [
                 "Balmer lines dominate: Ha, Hb, OIII",
-                "lines alone keep 92% of the info,\n   continuum alone 96%: redundant",
+                "Hbeta+[OIII] merged: one player\n   (4959 doublet inseparable)",
+                "line vs continuum split under\n   re-measurement (guard-band audit)",
                 "MgII slightly negative",
             ], fontsize=12, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
@@ -358,8 +359,9 @@ def main() -> None:
         bullets(ax2, [
             "bs 224 beats 448 on throughput AND\n   convergence: attention is bandwidth-\n   bound; more steps win below B$_{crit}$",
             "adapter wd 0.1 free; lr 3e-4 destabilizes",
-            "chosen: bs 224, lr 1e-4, wd 0.1, 30 ep",
-        ], fontsize=13, dy=0.24)
+            "k=50 broadcast injection: val 9.95 $\\to$ 9.75\n   at identical wall-time and VRAM",
+            "chosen: bs 224-equiv chunks, lr 1e-4,\n   wd 0.1, 40 ep + early stop (patience 6)",
+        ], fontsize=12.5, dy=0.20)
         bullets(ax, [
             "batching: combos packed by token LENGTH - 4 buckets, padding $\\leq$ 1.5%, one step per bucket forward",
         ], y=0.10, fontsize=13, dy=0.1)
@@ -368,7 +370,7 @@ def main() -> None:
         # ---- 10 Next
         fig, ax = new_slide("Next")
         bullets(ax, [
-            "overnight multi-target V3b run (staged, awaiting go)",
+            "overnight multi-target V3b run: RUNNING (8 heads, bucketed)",
             "joint-posterior HR evaluation vs the composed-HR baseline",
             "Shapley guard audit; band-sigma inflation probes",
             "50-epoch paper reproduction",
