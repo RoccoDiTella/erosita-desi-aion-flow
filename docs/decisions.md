@@ -165,6 +165,23 @@ patience 6, 8h limit. Gated on 4 smokes: bucketing verified, chunk cap added
 Broadcast injection also retrofitted to the single-target path (old loop
 re-ran the conditioner per draw).
 
+**MULTI-TARGET V3B RESULTS (job 34994658 + eval 35017708, 2026-07-25) — the
+project's best numbers, from ONE 3-hour run:** early stop at ep 25 (best 19),
+46.5 samp/s bucketed, 28.3 GB. Test all-inputs vs the single-target baselines:
+**flux 0.603 (vs 0.572)**, **Lx 0.917 (vs 0.905)**, **logM★ 0.731 (vs
+0.648)**, P1 0.374 (0.320), P2 0.415 (0.380), P3 0.415 (0.378); only P4 loses
+(−0.06 vs 0.071 — noise-bound). Six of seven heads BEAT their specialized
+runs: multi-task transfer is a broad win, and flux 0.603 is the best flux
+number to date (published 0.549 → clean single 0.572 → multi 0.603). IG:
+mstar 1.36 (vs 1.09), Lx 1.19 (vs 1.17); flux IG 0.282 slightly under the
+single-target 0.323 (sharpness traded for point accuracy).
+**HR from the JOINT (P2,P3) posterior: corr +0.238 on the hr32_ok subset vs
++0.10 for independent bands — the correlated posterior more than doubles the
+hardness signal**, per-source width 0.508 vs 0.551. Still corr²≈0.06 (eRASS1
+noise floor stands), but the joint-flow mechanism works exactly as designed.
+Outputs: `outputs/mt-v3b-8head-34994658/eval/` (multi_test_metrics.csv —
+15 combos × 8 heads; hr_joint_posteriors.csv).
+
 **wandb retention policy (2026-07-25, applied):** delete failed/crashed/
 superseded runs and plumbing smokes whose numbers live in this registry
 (17 deleted); KEEP every finished run with results, the calibration-grid runs
