@@ -157,3 +157,45 @@ def test_broadcast_draws_match_per_draw_calls() -> None:
             else:
                 single = flow.distribution(ctx).log_prob(draws[k])
             assert torch.allclose(broadcast[k], single, atol=1e-5)
+
+
+def test_configure_heads_drops_and_restores() -> None:
+    import multitarget as mt
+
+    try:
+        mt.configure_heads(("log_flux_p4",))
+        assert mt.N_TARGETS == 6 and mt.N_HEADS == 7
+        assert "log_flux_p4" not in mt.HEAD_NAMES
+        # the joint head must still point at the right two bands after reindexing
+        j2, j3 = mt.JOINT_IDX
+        assert mt.MULTI_TARGETS[j2]["name"] == "log_flux_p2"
+        assert mt.MULTI_TARGETS[j3]["name"] == "log_flux_p3"
+        # dropping a band the joint head needs is refused
+        try:
+            mt.configure_heads(("log_flux_p2",))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("dropping a joint-pair band must raise")
+    finally:
+        mt.configure_heads(())
+        assert mt.N_TARGETS == 7 and mt.N_HEADS == 8
+
+
+def test_head_influence_attributes_gradient_to_the_right_head() -> None:
+    from multitarget import head_influence
+
+    flows = _stub_flows()
+    B = 6
+    targets = torch.randn(B, N_TARGETS)
+    contexts = torch.randn(B, N_HEADS, 256, requires_grad=True)
+    stds = [TargetStandardizer(0.0, 1.0) for _ in range(N_TARGETS)]
+    _, _, terms = multi_target_nll(
+        contexts=contexts, flows=flows, targets=targets,
+        sig_lo=torch.zeros(B, N_TARGETS), sig_hi=torch.zeros(B, N_TARGETS),
+        standardizers=stds, weights=np.ones(N_HEADS), inject=False, return_terms=True,
+    )
+    inf = head_influence(terms, contexts)
+    assert all(f"influence/{h}" in inf for h in ("log_ml_flux_1", "log_lx"))
+    shares = [v for k, v in inf.items() if k.startswith("influence_share/")]
+    assert abs(sum(shares) - 1.0) < 1e-5          # shares are a distribution

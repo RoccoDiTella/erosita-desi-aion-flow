@@ -994,6 +994,17 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--no-inject", action="store_true")
     mt.add_argument("--inject-samples", type=int, default=50,
                     help="Broadcast noise draws per source per step (one conditioner pass).")
+    mt.add_argument("--accumulate-buckets", action="store_true",
+                    help="Accumulate gradients over all buckets into ONE optimizer step, so every "
+                    "update sees the full combo mix (lower gradient variance, fewer steps).")
+    mt.add_argument("--drop-heads", nargs="*", default=None,
+                    help="Scalar heads to omit, e.g. log_flux_p4 (never learns; P2/P3 are required "
+                    "by the joint head).")
+    mt.add_argument("--train-probe-size", type=int, default=2520,
+                    help="Fixed training-split subset scored with the VAL protocol each epoch "
+                    "(0 disables). Makes train and val directly comparable.")
+    mt.add_argument("--diag-every", type=int, default=50,
+                    help="Steps between diagnostic logs (head influence, group norms/movement).")
     mt.add_argument("--bucket-chunk", type=int, default=224,
                     help="Max sources per bucket forward (buckets larger than this are chunked).")
     mt.add_argument("--early-stop-patience", type=int, default=6,

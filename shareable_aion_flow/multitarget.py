@@ -36,11 +36,30 @@ MULTI_TARGETS: list[dict] = [
     {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": 1.0, "sidecar": True},
     {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": 1.0, "sidecar": True},
 ]
-N_TARGETS = len(MULTI_TARGETS)          # 7 scalar heads
+_ALL_TARGETS = list(MULTI_TARGETS)
+N_TARGETS = len(MULTI_TARGETS)          # scalar heads (P4 droppable)
 JOINT_PAIR = ("log_flux_p2", "log_flux_p3")  # 8th head: joint 2-D flow for HR
 JOINT_IDX = tuple(next(j for j, t in enumerate(MULTI_TARGETS) if t["name"] == n) for n in JOINT_PAIR)
 N_HEADS = N_TARGETS + 1
 HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
+
+
+def configure_heads(drop: tuple[str, ...] = ()) -> None:
+    """Drop scalar heads (e.g. P4, which never learns) before building the model.
+
+    Rebinds the module-level head configuration; call once at startup, before
+    anything reads N_TARGETS / N_HEADS / HEAD_NAMES.
+    """
+    global MULTI_TARGETS, N_TARGETS, JOINT_IDX, N_HEADS, HEAD_NAMES
+    MULTI_TARGETS = [t for t in _ALL_TARGETS if t["name"] not in set(drop)]
+    N_TARGETS = len(MULTI_TARGETS)
+    missing = [n for n in JOINT_PAIR if n not in {t["name"] for t in MULTI_TARGETS}]
+    if missing:
+        raise ValueError(f"cannot drop {missing}: the joint head needs both bands")
+    JOINT_IDX = tuple(next(j for j, t in enumerate(MULTI_TARGETS) if t["name"] == n)
+                      for n in JOINT_PAIR)
+    N_HEADS = N_TARGETS + 1
+    HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
 
 
 def load_multi_target_matrix(
@@ -157,6 +176,7 @@ def multi_target_nll(
     weights: np.ndarray,               # [K] detached loss weights
     inject: bool = True,
     inject_samples: int = 50,
+    return_terms: bool = False,
 ) -> tuple[torch.Tensor, list[float | None]]:
     """Weighted joint NLL over available (source, target) pairs.
 
@@ -164,6 +184,7 @@ def multi_target_nll(
     """
     total = contexts.new_zeros(())
     raw: list[float | None] = []
+    terms: list[torch.Tensor | None] = []
 
     def _std_inject(j: int, mask: torch.Tensor) -> torch.Tensor:
         """Standardized targets as draw stacks: [k, m] with k=1 when not injecting.
@@ -190,9 +211,11 @@ def multi_target_nll(
         mask = torch.isfinite(targets[:, j])
         if not bool(mask.any()):
             raw.append(None)
+            terms.append(None)
             continue
         nll = -flow.log_prob_draws(_std_inject(j, mask), contexts[mask, j]).mean()
         raw.append(float(nll.item()))
+        terms.append(nll)
         # availability weighting (user): sources without this target do not
         # count, so the head's effective weight in the batch is its coverage.
         total = total + float(weights[j]) * float(mask.float().mean()) * nll
@@ -205,10 +228,84 @@ def multi_target_nll(
         pair = torch.stack([_std_inject(j2, mask), _std_inject(j3, mask)], dim=-1)
         nll = -flows.joint.log_prob_draws(pair, contexts[mask, N_TARGETS]).mean()
         raw.append(float(nll.item()))
+        terms.append(nll)
         total = total + float(weights[N_TARGETS]) * float(mask.float().mean()) * nll
     else:
         raw.append(None)
-    return total, raw
+        terms.append(None)
+    return (total, raw, terms) if return_terms else (total, raw)
+
+
+# ---------------------------------------------------------------- diagnostics
+def param_diagnostic_groups(encoder, head, flows) -> dict[str, list[torch.Tensor]]:
+    """Named parameter groups for LR / weight-decay diagnostics.
+
+    Adapters are split by encoder depth so a per-depth learning-rate decision
+    has evidence behind it.
+    """
+    groups: dict[str, list[torch.Tensor]] = {"cls_tokens": [encoder.cls_token]}
+    adapters = list(encoder.cls_read_adapters)
+    n = len(adapters)
+    for label, lo, hi in (("adapters_low", 0, n // 3),
+                          ("adapters_mid", n // 3, 2 * n // 3),
+                          ("adapters_high", 2 * n // 3, n)):
+        params = [p for a in adapters[lo:hi] for p in a.parameters()]
+        if params:
+            groups[label] = params
+    groups["shared_mlp"] = list(head.parameters())
+    for j, f in enumerate(flows.flows):
+        groups[f"flow_{HEAD_NAMES[j]}"] = list(f.parameters())
+    groups["flow_p2xp3_joint"] = list(flows.joint.parameters())
+    return groups
+
+
+@torch.no_grad()
+def group_snapshot(groups: dict[str, list[torch.Tensor]]) -> dict[str, torch.Tensor]:
+    return {k: torch.cat([p.detach().reshape(-1) for p in v]).clone() for k, v in groups.items()}
+
+
+@torch.no_grad()
+def group_metrics(groups, prev: dict[str, torch.Tensor] | None) -> dict[str, float]:
+    """Weight norm, grad norm, and relative movement since the last snapshot.
+
+    ``move`` (|w_t - w_{t-k}| / |w_t|) is the update-to-weight ratio aggregated
+    over k steps: groups moving orders of magnitude faster or slower than the
+    rest are the candidates for a different learning rate; ``wnorm`` drifting
+    up means weight decay is not binding.
+    """
+    out: dict[str, float] = {}
+    for name, params in groups.items():
+        flat = torch.cat([p.detach().reshape(-1) for p in params])
+        wn = float(flat.norm())
+        out[f"wnorm/{name}"] = wn
+        gs = [p.grad.detach().reshape(-1) for p in params if p.grad is not None]
+        if gs:
+            out[f"gnorm/{name}"] = float(torch.cat(gs).norm())
+        if prev is not None and name in prev and wn > 0:
+            out[f"move/{name}"] = float((flat - prev[name]).norm() / wn)
+    return out
+
+
+def head_influence(loss_terms, contexts) -> dict[str, float]:
+    """How hard each head pulls on the SHARED representation.
+
+    d(head loss)/d(context) at the shared/private boundary: one small backward
+    per head through its flow only. This is the honest measure of a head's
+    influence on the shared trunk -- loss weight is not it, since a converged
+    head has small gradients whatever its weight.
+    """
+    out: dict[str, float] = {}
+    for j, term in enumerate(loss_terms):
+        if term is None:
+            continue
+        g = torch.autograd.grad(term, contexts, retain_graph=True, allow_unused=True)[0]
+        if g is None:
+            continue
+        out[f"influence/{HEAD_NAMES[j]}"] = float(g.detach().norm())
+    tot = sum(out.values())
+    if tot > 0:
+        out.update({k.replace("influence/", "influence_share/"): v / tot for k, v in list(out.items())})
+    return out
 
 
 class MultiTargetLookup:
@@ -256,6 +353,9 @@ def run_train_multi(args) -> None:
 
     import pandas as pd
 
+    configure_heads(tuple(args.drop_heads or ()))
+    if args.drop_heads:
+        print(f"[multi] dropped heads: {list(args.drop_heads)} -> {N_HEADS} heads", flush=True)
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     run_dir = Path(args.output_dir) / args.run_id
@@ -270,6 +370,15 @@ def run_train_multi(args) -> None:
         num_workers=args.num_workers, seed=args.seed,
         clean_split_csv=Path(args.clean_split_csv) if args.clean_split_csv else None,
     )
+    # Train probe: a FIXED slice of the training split, scored with the exact
+    # validation protocol, so train and val curves measure the same estimand
+    # and their gap is the generalization gap.
+    from torch.utils.data import DataLoader, Subset
+    probe_n = min(int(args.train_probe_size), len(train_loader.dataset))
+    probe_loader = DataLoader(
+        Subset(train_loader.dataset, list(range(probe_n))),
+        batch_size=eval_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True,
+    ) if probe_n > 0 else None
     lookup = MultiTargetLookup(Path(args.staged_dir), Path(args.extra_targets_csv) if args.extra_targets_csv else None)
     assign = pd.read_csv(args.clean_split_csv)
     train_tids = assign.loc[assign.split == "train", "targetid"].to_numpy(np.int64)
@@ -312,6 +421,9 @@ def run_train_multi(args) -> None:
         "inject": not args.no_inject, "inject_samples": int(args.inject_samples),
         "grad_checkpoint": args.grad_checkpoint,
         "bucketed": bool(args.bucketed),
+        "accumulate_buckets": bool(args.accumulate_buckets),
+        "drop_heads": list(args.drop_heads or []),
+        "heads": HEAD_NAMES,
         "cls_variant": "readonly", "num_cls": N_HEADS, "adapter": "full-rank",
         "standardizers": [s.state_dict() for s in standardizers],
         "clean_split_csv": str(args.clean_split_csv), "extra_targets_csv": str(args.extra_targets_csv),
@@ -333,6 +445,8 @@ def run_train_multi(args) -> None:
             "ema": ema.state_dict(), "val_multi_nll_sum": val_sum,
         }, path)
 
+    diag_groups = param_diagnostic_groups(encoder, head, flows)
+    prev_snapshot = None
     best = float("inf"); best_epoch = 0; global_step = 0
     for epoch in range(1, args.epochs + 1):
         t0 = time.monotonic()
@@ -351,6 +465,7 @@ def run_train_multi(args) -> None:
                 B = int(batch[6].shape[0])
                 combos_ps = [sampler.sample(generator) for _ in range(B)]
                 steps = []
+                bucket_names = []
                 for bucket, idx in bucket_assignments(combos_ps):
                     # Chunk cap: bucket shares are uneven (the heavy bucket is
                     # ~46% of the size-stratified mix), so cap each forward at
@@ -362,36 +477,86 @@ def run_train_multi(args) -> None:
                         drop = {k: v.to(device) for k, v in
                                 bucket_modality_dropout(bucket, combos_ps, part).items()}
                         steps.append((bucket["union"], sub, drop, rows))
+                        bucket_names.append(bucket["name"])
             else:
                 steps = [(sampler.sample(generator), batch, None, None)]
-            for combo, sub, drop, rows in steps:
+                bucket_names = ["all"]
+            # With --accumulate-buckets every optimizer step sees the FULL combo
+            # mix (gradients summed over all buckets) instead of alternating
+            # between combo families: fewer, much lower-variance updates.
+            accumulate = bool(args.accumulate_buckets)
+            if accumulate:
+                optimizer.zero_grad(set_to_none=True)
+            n_steps = len(steps)
+            want_diag = (global_step % args.diag_every == 0)
+            for si, (combo, sub, drop, rows) in enumerate(steps):
                 if rows is None:
                     y, slo, shi = y_all, slo_all, shi_all
                 else:
                     y, slo, shi = y_all[rows], slo_all[rows], shi_all[rows]
                 cls_seq, _ = encoder.encode_tokens(sub, tuple(combo), modality_dropout=drop)
                 contexts = head(cls_seq)
-                loss, raw = multi_target_nll(
+                loss, raw, terms = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=weights, inject=not args.no_inject,
-                    inject_samples=args.inject_samples,
+                    inject_samples=args.inject_samples, return_terms=True,
                 )
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                if want_diag and si == 0:
+                    diag_extra.update(head_influence(terms, contexts))
+                if not accumulate:
+                    optimizer.zero_grad(set_to_none=True)
+                (loss / n_steps if accumulate else loss).backward()
+                nb = int(sub[6].shape[0])
+                bname = bucket_names[si] if si < len(bucket_names) else "mixed"
+                for name, val in zip(HEAD_NAMES, raw):
+                    if val is not None:
+                        ep_sum[name] += val * nb; ep_cnt[name] += nb
+                        bk_sum[(bname, name)] = bk_sum.get((bname, name), 0.0) + val * nb
+                        bk_cnt[(bname, name)] = bk_cnt.get((bname, name), 0) + nb
+                n_seen += nb
+                if not accumulate:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
+                    optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    weights = ema.update_and_weights(raw)
+                    global_step += 1
+                last_raw, last_loss = raw, float(loss.item())
+            if accumulate:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
-                weights = ema.update_and_weights(raw)
-                n_seen += int(sub[6].shape[0]); global_step += 1
-                if tracker.enabled and global_step % args.log_every == 0:
-                    payload = {"train/weighted_loss": float(loss.item()),
-                               "train/grad_norm": float(grad_norm),
-                               "train/lr": float(optimizer.param_groups[0]["lr"]), "epoch": epoch}
-                    for name, val in zip(HEAD_NAMES, raw):
-                        if val is not None:
-                            payload[f"train/nll_{name}"] = val
-                    tracker.log(payload, step=global_step)
+                weights = ema.update_and_weights(last_raw)
+                global_step += 1
+            if tracker.enabled and want_diag:
+                payload = {"train/weighted_loss": last_loss,
+                           "train/grad_norm": float(grad_norm),
+                           "train/lr": float(optimizer.param_groups[0]["lr"]), "epoch": epoch}
+                payload.update(diag_extra)
+                payload.update(group_metrics(diag_groups, prev_snapshot))
+                prev_snapshot = group_snapshot(diag_groups)
+                payload.update({f"weight/{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
+                tracker.log(payload, step=global_step)
+                diag_extra = {}
+
+        def evaluate(loader):
+            """Plain-LL NLL per head on the all-inputs combo (the val protocol)."""
+            sums_ = np.zeros(N_HEADS); counts_ = np.zeros(N_HEADS)
+            with torch.no_grad():
+                for b in loader:
+                    b = tuple(t.to(device, non_blocking=True) for t in b)
+                    yv, slov, shiv = lookup.batch(b[7], device)
+                    cs, _ = encoder.encode_tokens(b, ("spectra", "z", "wise", "image"))
+                    _, raw_ = multi_target_nll(
+                        contexts=head(cs), flows=flows, targets=yv, sig_lo=slov, sig_hi=shiv,
+                        standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
+                    )
+                    nb = int(b[6].shape[0])
+                    for jj, vv in enumerate(raw_):
+                        if vv is not None:
+                            sums_[jj] += vv * nb; counts_[jj] += nb
+            return sums_ / np.maximum(counts_, 1)
 
         # validation: all-inputs combo, plain NLL (no injection) + posterior-mean
         # R^2 per scalar head so the review does not need a separate eval pass
@@ -436,6 +601,23 @@ def run_train_multi(args) -> None:
                    "val/pair_mean_nll": val_pair_mean, "epoch_seconds": dt,
                    "throughput/samples_per_second": n_seen / dt, "vram/peak_gb": peak}
         payload.update({f"val/nll_{n}": float(v) for n, v in zip(HEAD_NAMES, val_nll)})
+        # per-epoch train means (count-weighted): smooth convergence signal,
+        # still on injected targets so NOT comparable to val
+        payload.update({f"trainmean/nll_{n}": ep_sum[n] / max(ep_cnt[n], 1)
+                        for n in HEAD_NAMES if ep_cnt[n]})
+        # per-bucket series: makes the combo-composition effect explicit
+        # instead of aliasing it into the step-level curve
+        for (bname, hname), tot in bk_sum.items():
+            c = bk_cnt[(bname, hname)]
+            if c:
+                payload[f"bucket/{bname}/nll_{hname}"] = tot / c
+        # train probe: SAME protocol as val, so the gap is the generalization gap
+        if probe_loader is not None:
+            probe_nll = evaluate(probe_loader)
+            payload.update({f"probe/nll_{n}": float(v) for n, v in zip(HEAD_NAMES, probe_nll)})
+            payload.update({f"gap/nll_{n}": float(v - p_) for n, v, p_
+                            in zip(HEAD_NAMES, val_nll, probe_nll)})
+            payload["gap/pair_mean"] = float(np.mean(val_nll - probe_nll))
         payload.update({f"val/r2_{n}": float(v) for n, v in zip(HEAD_NAMES[:N_TARGETS], val_r2) if np.isfinite(v)})
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
