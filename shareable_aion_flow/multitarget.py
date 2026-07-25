@@ -176,6 +176,7 @@ def multi_target_nll(
                 y = torch.where(has, y + eps, y)
         return y
 
+    B = targets.shape[0]
     for j, flow in enumerate(flows.flows):
         mask = torch.isfinite(targets[:, j])
         if not bool(mask.any()):
@@ -183,7 +184,9 @@ def multi_target_nll(
             continue
         nll = -flow.log_prob(_std_inject(j, mask), contexts[mask, j]).mean()
         raw.append(float(nll.item()))
-        total = total + float(weights[j]) * nll
+        # availability weighting (user): sources without this target do not
+        # count, so the head's effective weight in the batch is its coverage.
+        total = total + float(weights[j]) * float(mask.float().mean()) * nll
 
     # Joint (P2, P3) head: only sources with BOTH bands available; per-band
     # injection is independent (band counts are Poisson-independent).
@@ -193,7 +196,7 @@ def multi_target_nll(
         pair = torch.stack([_std_inject(j2, mask), _std_inject(j3, mask)], dim=-1)
         nll = -flows.joint.log_prob(pair, contexts[mask, N_TARGETS]).mean()
         raw.append(float(nll.item()))
-        total = total + float(weights[N_TARGETS]) * nll
+        total = total + float(weights[N_TARGETS]) * float(mask.float().mean()) * nll
     else:
         raw.append(None)
     return total, raw
@@ -316,7 +319,7 @@ def run_train_multi(args) -> None:
             "ema": ema.state_dict(), "val_multi_nll_sum": val_sum,
         }, path)
 
-    best = float("inf"); global_step = 0
+    best = float("inf"); best_epoch = 0; global_step = 0
     for epoch in range(1, args.epochs + 1):
         t0 = time.monotonic()
         if torch.cuda.is_available():
@@ -403,22 +406,29 @@ def run_train_multi(args) -> None:
                 val_r2[j] = 1.0 - np.sum((yt - yp) ** 2) / ss if ss > 0 else np.nan
         val_nll = sums / np.maximum(counts, 1)
         val_sum = float(val_nll.sum())
+        val_pair_mean = float(sums.sum() / max(counts.sum(), 1))
         dt = time.monotonic() - t0
         peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
         print(f"epoch={epoch} val_sum={val_sum:.3f} " +
               " ".join(f"{n}={v:.3f}" for n, v in zip(HEAD_NAMES, val_nll)) +
               f" ({dt:.0f}s, {n_seen/dt:.1f}/s, {peak:.1f}GB)", flush=True)
-        payload = {"epoch": epoch, "val/multi_nll_sum": val_sum, "epoch_seconds": dt,
+        payload = {"epoch": epoch, "val/multi_nll_sum": val_sum,
+                   "val/pair_mean_nll": val_pair_mean, "epoch_seconds": dt,
                    "throughput/samples_per_second": n_seen / dt, "vram/peak_gb": peak}
         payload.update({f"val/nll_{n}": float(v) for n, v in zip(HEAD_NAMES, val_nll)})
         payload.update({f"val/r2_{n}": float(v) for n, v in zip(HEAD_NAMES[:N_TARGETS], val_r2) if np.isfinite(v)})
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
-        save(run_dir / "last.pt", epoch, val_sum)
-        if val_sum < best:
-            best = val_sum
-            save(run_dir / "best.pt", epoch, val_sum)
-    tracker.summary({"val/best_multi_nll_sum": best})
+        save(run_dir / "last.pt", epoch, val_pair_mean)
+        if val_pair_mean < best:
+            best = val_pair_mean
+            best_epoch = epoch
+            save(run_dir / "best.pt", epoch, val_pair_mean)
+        if epoch - best_epoch >= args.early_stop_patience:
+            print(f"[early-stop] no improvement for {args.early_stop_patience} epochs "
+                  f"(best epoch {best_epoch})", flush=True)
+            break
+    tracker.summary({"val/best_pair_mean_nll": best, "best_epoch": best_epoch})
     tracker.finish()
 
 
