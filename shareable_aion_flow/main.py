@@ -986,6 +986,12 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--lr-schedule", choices=["constant", "cosine"], default="constant")
     mt.add_argument("--weight-decay", type=float, default=1e-4, help="Head + flows.")
     mt.add_argument("--adapter-wd", type=float, default=1e-2, help="Full-rank read adapters (capacity control).")
+    mt.add_argument("--adapter-lr", type=float, default=None,
+                    help="Separate LR for the read adapters (default: --lr). They are zero-init, so "
+                    "a shared LR moves them ~30x faster in update/weight terms than the flows.")
+    mt.add_argument("--beta1", type=float, default=0.9,
+                    help="Adam beta1. Higher averages gradients over more steps, which implicitly "
+                    "damps heads whose gradient has gone incoherent (saturated).")
     mt.add_argument("--grad-checkpoint", action="store_true")
     mt.add_argument("--bucketed", action="store_true",
                     help="Length-bucketed combo packing: per-source combos grouped into 4 "

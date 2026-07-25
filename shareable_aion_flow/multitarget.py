@@ -406,14 +406,19 @@ def run_train_multi(args) -> None:
     ).to(device)
     head = SharedCLSHead().to(device)
     flows = MultiTargetFlows().to(device)
+    # Separate LR for the zero-initialized read adapters: on a single LR they
+    # move ~30x faster in update/weight terms than the standard-initialized
+    # MLP and flows (|w| ~3 vs ~40), which left the flows within a few percent
+    # of their initialization for a whole run.
+    adapter_lr = args.adapter_lr if args.adapter_lr is not None else args.lr
     param_groups = [
         {"params": list(head.parameters()) + list(flows.parameters()), "lr": args.lr,
          "weight_decay": args.weight_decay},
         {"params": [encoder.cls_token], "lr": args.lr, "weight_decay": 0.0},
-        {"params": list(encoder.cls_read_adapters.parameters()), "lr": args.lr,
+        {"params": list(encoder.cls_read_adapters.parameters()), "lr": adapter_lr,
          "weight_decay": args.adapter_wd},
     ]
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(args.beta1, 0.999))
     trainable = [p for g in param_groups for p in g["params"]]
     steps_per_epoch = max(1, len(train_loader)) * (len(LENGTH_BUCKETS) if args.bucketed else 1)
     scheduler = None
@@ -428,6 +433,7 @@ def run_train_multi(args) -> None:
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
+        "adapter_lr": adapter_lr, "beta1": args.beta1,
         "inject": not args.no_inject, "inject_samples": int(args.inject_samples),
         "grad_checkpoint": args.grad_checkpoint,
         "bucketed": bool(args.bucketed),
