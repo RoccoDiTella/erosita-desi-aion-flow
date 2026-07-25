@@ -155,6 +155,16 @@ failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
 - Loaders exclude non-finite targets (secondary targets are partially measured).
 - Idempotency by count, not existence (the fits_pool lesson).
 
+**OVERNIGHT multi-target V3b launched (job 34994658, 2026-07-25 ~01:30):**
+`train-multi --bucketed` — 8 heads, bs 896 / chunk 224, **inject-samples 50
+broadcast** (user choice; smoke A/B: k=50 improved 1-epoch val 9.95→9.75 at
+IDENTICAL wall/VRAM — draws are free under one conditioner pass), lr 1e-4
+constant, adapter wd 1e-1, availability-weighted pair-mean criterion, 40 ep /
+patience 6, 8h limit. Gated on 4 smokes: bucketing verified, chunk cap added
+(heavy bucket = 46% of mix), validation batch capped (MIG OOM), k=50 verified.
+Broadcast injection also retrofitted to the single-target path (old loop
+re-ran the conditioner per draw).
+
 **wandb retention policy (2026-07-25, applied):** delete failed/crashed/
 superseded runs and plumbing smokes whose numbers live in this registry
 (17 deleted); KEEP every finished run with results, the calibration-grid runs
