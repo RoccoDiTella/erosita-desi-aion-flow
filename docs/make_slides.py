@@ -163,35 +163,6 @@ def main() -> None:
         ], fontsize=12.5, dy=0.17)
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- 5b Band coverage
-        fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632; selection is in the broad band")
-        band_table = pd.DataFrame([
-            {"band": "broad 0.2–2.3", "measured": "100%", "detected": "100%"},
-            {"band": "P1  0.2–0.6",   "measured": "79%",  "detected": "31%"},
-            {"band": "P2  0.6–2.3",   "measured": "94%",  "detected": "56%"},
-            {"band": "P3  2.3–5.0",   "measured": "92%",  "detected": "51%"},
-            {"band": "P4  5.0–8.0",   "measured": "48%",  "detected": "5%"},
-            {"band": "P5",             "measured": "22%",  "detected": "0.2%"},
-        ])
-        metric_table(ax, band_table, rect=(0.05, 0.20, 0.48, 0.62), fontsize=13)
-        ax2 = fig.add_axes([0.60, 0.22, 0.37, 0.46]); ax2.axis("off")
-        bullets(ax2, [
-            "HR32 = (P3−P2) / (P3+P2), from rates",
-            "both HR bands measured: 86%;\n     both detected: 30%",
-        ], fontsize=14, dy=0.26)
-        fig.text(0.05, 0.115,
-                 "measured: forced photometry gives a positive rate in this band\n"
-                 "detected: DET_LIKE ≥ 6, the catalog threshold. About 14% of sources at the "
-                 "threshold are spurious, 4% at ≥ 8 (Seppi+2022)",
-                 fontsize=10.5, color=MUTED)
-        pdf.savefig(fig); plt.close(fig)
-
-        # ---- 5c Line coverage
-        fig, ax = new_slide("Emission-line coverage",
-                            "each spectrum covers 3600-9824 A observed; in rest frame that window slides with z")
-        image_panel(fig, FIGS / "fig_line_coverage.png", (0.06, 0.05, 0.88, 0.72))
-        pdf.savefig(fig); plt.close(fig)
-
         # ---- 6 Results
         runs = [
             ("V_simple · convolve", args.v1_metrics),
@@ -270,6 +241,29 @@ def main() -> None:
             metric_table(ax, mstar_table, rect=(0.24, 0.02, 0.52, 0.90), fontsize=12)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- Band coverage (sets up per-band results)
+        fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632; selection is in the broad band")
+        band_table = pd.DataFrame([
+            {"band": "broad 0.2–2.3", "measured": "100%", "detected": "100%"},
+            {"band": "P1  0.2–0.6",   "measured": "79%",  "detected": "31%"},
+            {"band": "P2  0.6–2.3",   "measured": "94%",  "detected": "56%"},
+            {"band": "P3  2.3–5.0",   "measured": "92%",  "detected": "51%"},
+            {"band": "P4  5.0–8.0",   "measured": "48%",  "detected": "5%"},
+            {"band": "P5",             "measured": "22%",  "detected": "0.2%"},
+        ])
+        metric_table(ax, band_table, rect=(0.05, 0.20, 0.48, 0.62), fontsize=13)
+        ax2 = fig.add_axes([0.60, 0.22, 0.37, 0.46]); ax2.axis("off")
+        bullets(ax2, [
+            "HR32 = (P3−P2) / (P3+P2), from rates",
+            "both HR bands measured: 86%;\n     both detected: 30%",
+        ], fontsize=14, dy=0.26)
+        fig.text(0.05, 0.115,
+                 "measured: forced photometry gives a positive rate in this band\n"
+                 "detected: DET_LIKE ≥ 6, the catalog threshold. About 14% of sources at the "
+                 "threshold are spurious, 4% at ≥ 8 (Seppi+2022)",
+                 fontsize=10.5, color=MUTED)
+        pdf.savefig(fig); plt.close(fig)
+
         # ---- 6b2 Per-band performance + composed hardness
         fig, ax = new_slide("Per-band prediction and composed hardness",
                             "V_simple + inject, gate sigma <= 1.0 · HR32 from the P2/P3 predicted posteriors (independence approx.)")
@@ -315,6 +309,12 @@ def main() -> None:
                 "flux: mild redundancy\n   everywhere",
             ], fontsize=12, dy=0.28)
             pdf.savefig(fig); plt.close(fig)
+
+        # ---- Line coverage (sets up line Shapley)
+        fig, ax = new_slide("Emission-line coverage",
+                            "each spectrum covers 3600-9824 A observed; in rest frame that window slides with z")
+        image_panel(fig, FIGS / "fig_line_coverage.png", (0.06, 0.05, 0.88, 0.72))
+        pdf.savefig(fig); plt.close(fig)
 
         # ---- 6d Line/continuum Shapley (flux, spectra-only surrogate)
         if (FIGS / "fig_shapley_heatmap.png").exists():
