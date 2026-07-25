@@ -184,13 +184,16 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 9 Training diagnostics
-        fig, ax = new_slide("Training diagnostics, per head",
-                            "train NLL is on injected targets (harder by construction); val is the plain likelihood · dotted line = selected epoch")
-        image_panel(fig, FIGS / "fig_v3b_curves.png", (0.02, 0.13, 0.96, 0.66))
-        fig.text(0.05, 0.085,
-                 "log L$_X$ and logM★ converge by epoch ~5, the bands by ~12–15, P4 never moves. "
-                 "Room to improve: per-head schedules, and a shorter run.",
-                 fontsize=12, color=INK)
+        fig, ax = new_slide("Training diagnostics",
+                            "accumulated-bucket run: every update sees the full input mix · train probe = training data scored with the validation protocol")
+        image_panel(fig, FIGS / "fig_v3b_training.png", (0.015, 0.10, 0.97, 0.72))
+        fig.text(0.045, 0.082,
+                 "Convergence is uneven: P1/P2 by epoch 5, logM$_*$ still improving at 20.  "
+                 "Overfitting grows linearly, 0.009 $\\to$ 0.062 nats.\n"
+                 "The old spiky curve was the 0.35-nat spread between input buckets, not optimizer noise.  "
+                 "No head dominates the shared trunk;\nthe adapters move 10-20$\\times$ more than the CLS "
+                 "tokens and the shared MLP.",
+                 fontsize=11.5, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 10 vs the paper architecture
