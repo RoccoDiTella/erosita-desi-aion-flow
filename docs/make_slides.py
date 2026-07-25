@@ -177,7 +177,7 @@ def main() -> None:
                             "test set, all inputs · HR32 is implied: marginalized out of the joint (P2,P3) posterior, never trained")
         image_panel(fig, FIGS / "fig_v3b_results.png", (0.03, 0.20, 0.94, 0.60))
         fig.text(0.05, 0.155,
-                 "log flux 0.603 is the best to date (published 0.549).\n"
+                 "log flux 0.603 against V_PAI's 0.565 on the same test split.\n"
                  "Hardness was never trained, yet still gains information: 1.13$\\times$ and correlation +0.25 on\n"
                  "well-measured sources, purely by marginalizing the joint (P2,P3) posterior.",
                  fontsize=12, color=INK, va="top")
@@ -198,10 +198,9 @@ def main() -> None:
 
         # ---- 10 vs the paper architecture
         fig, ax = new_slide("Against the paper architecture",
-                            "same cleaned data, same test split")
+                            "V_PAI trained on the same cleaned data and scored on the same test split · the published 0.549 used the noisy split and is not row-comparable")
         cmp = pd.DataFrame([
-            {"": "paper (published)", "targets": "1 (flux)", "runs": "1", "flux R²": "0.549"},
-            {"": "V_PAI, our clean data", "targets": "1 (flux)", "runs": "1", "flux R²": "0.565"},
+            {"": "V_PAI (paper head)", "targets": "1 (flux)", "runs": "1", "flux R²": "0.565"},
             {"": "V3b multi-head", "targets": "7 + hardness", "runs": "1", "flux R²": "0.603"},
         ])
         metric_table(ax, cmp, rect=(0.04, 0.46, 0.62, 0.34), fontsize=13)

@@ -63,8 +63,10 @@ def results_figure(metrics_csv: Path | None, hr: dict | None, out: Path) -> None
     ax1.barh(ypos, np.clip(r2, 0, None), color=cols, height=0.62)
     for y, v in zip(ypos, r2):
         ax1.text(max(v, 0) + 0.015, y, f"{v:+.3f}", va="center", fontsize=11, color=INK)
-    ax1.axvline(0.549, color=WARM, lw=1.6, ls="--")
-    ax1.text(0.562, 0.55, "paper flux 0.549", color=WARM, fontsize=9.5,
+    # V_PAI on the SAME cleaned test split is the honest baseline; the published
+    # 0.549 used the noisy paper split and is not row-comparable.
+    ax1.axvline(0.565, color=WARM, lw=1.6, ls="--")
+    ax1.text(0.578, 0.55, "V_PAI flux 0.565\n(same test set)", color=WARM, fontsize=9.5,
              ha="left", va="center")
     ax1.set_yticks(ypos, labels, fontsize=11)
     ax1.set_xlim(0, 1.05)
