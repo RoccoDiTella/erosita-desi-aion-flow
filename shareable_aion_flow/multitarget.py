@@ -252,9 +252,13 @@ def run_train_multi(args) -> None:
     run_dir = Path(args.output_dir) / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Validation forwards are all-inputs at full length; cap their batch so the
+    # attention transient (B x H x N^2) stays bounded regardless of loader size.
+    eval_bs = min(args.batch_size, args.bucket_chunk if args.bucketed else 224)
     train_loader, val_loader, _ = build_dataloaders(
         staged_dir=Path(args.staged_dir), target_name="log_ml_flux_1",
-        batch_size=args.batch_size, num_workers=args.num_workers, seed=args.seed,
+        batch_size=args.batch_size, eval_batch_size=eval_bs,
+        num_workers=args.num_workers, seed=args.seed,
         clean_split_csv=Path(args.clean_split_csv) if args.clean_split_csv else None,
     )
     lookup = MultiTargetLookup(Path(args.staged_dir), Path(args.extra_targets_csv) if args.extra_targets_csv else None)
