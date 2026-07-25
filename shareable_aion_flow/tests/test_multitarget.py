@@ -199,3 +199,19 @@ def test_head_influence_attributes_gradient_to_the_right_head() -> None:
     assert all(f"influence/{h}" in inf for h in ("log_ml_flux_1", "log_lx"))
     shares = [v for k, v in inf.items() if k.startswith("influence_share/")]
     assert abs(sum(shares) - 1.0) < 1e-5          # shares are a distribution
+
+
+def test_model_pieces_follow_dropped_head_count() -> None:
+    """Regression: default args must not capture the head count at import time."""
+    import multitarget as mt
+
+    try:
+        mt.configure_heads(("log_flux_p4",))
+        flows = mt.MultiTargetFlows(context_dim=8)
+        assert len(flows.flows) == mt.N_TARGETS == 6
+        assert len(mt.EMALossWeights().ema) == mt.N_HEADS == 7
+    finally:
+        mt.configure_heads(())
+    flows = mt.MultiTargetFlows(context_dim=8)
+    assert len(flows.flows) == mt.N_TARGETS == 7
+    assert len(mt.EMALossWeights().ema) == mt.N_HEADS == 8

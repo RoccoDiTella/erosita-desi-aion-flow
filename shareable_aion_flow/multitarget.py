@@ -136,8 +136,11 @@ class SharedCLSHead(nn.Module):
 class MultiTargetFlows(nn.Module):
     """7 scalar 1-D flows + one joint 2-D flow over (P2, P3) for hardness."""
 
-    def __init__(self, context_dim: int = 256, n_targets: int = N_TARGETS) -> None:
+    def __init__(self, context_dim: int = 256, n_targets: int | None = None) -> None:
         super().__init__()
+        # resolved at CALL time: configure_heads() may have changed the head
+        # count after import, and a default argument would capture the old one
+        n_targets = N_TARGETS if n_targets is None else n_targets
         self.flows = nn.ModuleList(ConditionalNSFFlow(context_dim=context_dim) for _ in range(n_targets))
         self.joint = ConditionalNSFFlow(context_dim=context_dim, features=2)
 
@@ -145,7 +148,8 @@ class MultiTargetFlows(nn.Module):
 class EMALossWeights:
     """Detached EMA of each target's mean loss; weight = 1/EMA (unit-scale grads)."""
 
-    def __init__(self, n_targets: int = N_HEADS, beta: float = 0.98) -> None:
+    def __init__(self, n_targets: int | None = None, beta: float = 0.98) -> None:
+        n_targets = N_HEADS if n_targets is None else n_targets   # call-time, see above
         self.ema = np.ones(n_targets)
         self.beta = float(beta)
         self.seen = np.zeros(n_targets, dtype=bool)
