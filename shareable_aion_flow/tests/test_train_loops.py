@@ -37,6 +37,9 @@ class StubFlow(torch.nn.Module):
     def log_prob(self, target_std, context):
         return -0.5 * target_std**2 - 0.5 * float(np.log(2 * np.pi))
 
+    def log_prob_draws(self, y_draws, context):
+        return -0.5 * y_draws**2 - 0.5 * float(np.log(2 * np.pi))
+
     def log_prob_convolved(self, target_std, sig_lo, sig_hi, context):
         var = 1.0 + 0.5 * (sig_lo**2 + sig_hi**2)
         return -0.5 * target_std**2 / var - 0.5 * torch.log(2 * torch.pi * var)

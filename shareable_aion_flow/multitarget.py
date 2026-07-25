@@ -156,6 +156,7 @@ def multi_target_nll(
     standardizers: list[TargetStandardizer],
     weights: np.ndarray,               # [K] detached loss weights
     inject: bool = True,
+    inject_samples: int = 50,
 ) -> tuple[torch.Tensor, list[float | None]]:
     """Weighted joint NLL over available (source, target) pairs.
 
@@ -165,16 +166,24 @@ def multi_target_nll(
     raw: list[float | None] = []
 
     def _std_inject(j: int, mask: torch.Tensor) -> torch.Tensor:
+        """Standardized targets as draw stacks: [k, m] with k=1 when not injecting.
+
+        Broadcast injection (user design): k independent split-normal draws per
+        source, all evaluated under one context-conditioned distribution.
+        Sources without sigma get zero perturbation in every draw.
+        """
         std = standardizers[j]
         y = std.transform_tensor(targets[mask, j])
-        if inject:
-            lo = (sig_lo[mask, j].abs() / std.std).clamp_min(0.0)
-            hi = (sig_hi[mask, j].abs() / std.std).clamp_min(0.0)
-            has = (lo + hi) > 1e-8
-            if bool(has.any()):
-                eps = sample_split_normal(lo.clamp_min(1e-6), hi.clamp_min(1e-6))
-                y = torch.where(has, y + eps, y)
-        return y
+        if not inject:
+            return y.unsqueeze(0)
+        k = max(1, int(inject_samples))
+        lo = (sig_lo[mask, j].abs() / std.std).clamp_min(0.0)
+        hi = (sig_hi[mask, j].abs() / std.std).clamp_min(0.0)
+        has = ((lo + hi) > 1e-8).unsqueeze(0)
+        lo_k = lo.clamp_min(1e-6).unsqueeze(0).expand(k, -1)
+        hi_k = hi.clamp_min(1e-6).unsqueeze(0).expand(k, -1)
+        eps = sample_split_normal(lo_k, hi_k) * has
+        return y.unsqueeze(0) + eps
 
     B = targets.shape[0]
     for j, flow in enumerate(flows.flows):
@@ -182,7 +191,7 @@ def multi_target_nll(
         if not bool(mask.any()):
             raw.append(None)
             continue
-        nll = -flow.log_prob(_std_inject(j, mask), contexts[mask, j]).mean()
+        nll = -flow.log_prob_draws(_std_inject(j, mask), contexts[mask, j]).mean()
         raw.append(float(nll.item()))
         # availability weighting (user): sources without this target do not
         # count, so the head's effective weight in the batch is its coverage.
@@ -194,7 +203,7 @@ def multi_target_nll(
     mask = torch.isfinite(targets[:, j2]) & torch.isfinite(targets[:, j3])
     if bool(mask.any()):
         pair = torch.stack([_std_inject(j2, mask), _std_inject(j3, mask)], dim=-1)
-        nll = -flows.joint.log_prob(pair, contexts[mask, N_TARGETS]).mean()
+        nll = -flows.joint.log_prob_draws(pair, contexts[mask, N_TARGETS]).mean()
         raw.append(float(nll.item()))
         total = total + float(weights[N_TARGETS]) * float(mask.float().mean()) * nll
     else:
@@ -300,7 +309,8 @@ def run_train_multi(args) -> None:
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
-        "inject": not args.no_inject, "grad_checkpoint": args.grad_checkpoint,
+        "inject": not args.no_inject, "inject_samples": int(args.inject_samples),
+        "grad_checkpoint": args.grad_checkpoint,
         "bucketed": bool(args.bucketed),
         "cls_variant": "readonly", "num_cls": N_HEADS, "adapter": "full-rank",
         "standardizers": [s.state_dict() for s in standardizers],
@@ -364,6 +374,7 @@ def run_train_multi(args) -> None:
                 loss, raw = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=weights, inject=not args.no_inject,
+                    inject_samples=args.inject_samples,
                 )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()

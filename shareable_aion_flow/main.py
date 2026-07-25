@@ -249,15 +249,15 @@ def _log_prob_with_error(
         if error_mode == "convolve":
             return flow.log_prob_convolved(target_std, sig_lo, sig_hi, context)
         if error_mode == "inject":
-            # Multi-draw injection: the AION context is already paid for, and the
-            # flow forward is tiny, so k draws per step cost ~nothing and reduce
-            # gradient variance. Mean of log-probs (point-wise training on
-            # perturbed targets) — accepts the documented broadening bias.
-            draws = [
-                flow.log_prob(target_std + sample_split_normal(sig_lo, sig_hi), context)
-                for _ in range(max(1, int(inject_samples)))
-            ]
-            return torch.stack(draws).mean(dim=0)
+            # Multi-draw injection, broadcast form: the context-conditioned
+            # distribution is built once and all k perturbed targets evaluate
+            # under it in a single call (the old per-draw loop re-ran the
+            # conditioner k times for identical output).
+            k = max(1, int(inject_samples))
+            lo = sig_lo.unsqueeze(0).expand(k, -1)
+            hi = sig_hi.unsqueeze(0).expand(k, -1)
+            draws = target_std.unsqueeze(0) + sample_split_normal(lo, hi)
+            return flow.log_prob_draws(draws, context).mean(dim=0)
         raise ValueError(f"Unknown error_mode {error_mode!r}.")
     return flow.log_prob(target_std, context)
 
@@ -992,6 +992,8 @@ def parse_args() -> argparse.Namespace:
                     "token-length buckets; one forward + one step per bucket. Use a LARGE "
                     "--batch-size (e.g. 896) so each bucket lands near the calibrated 224.")
     mt.add_argument("--no-inject", action="store_true")
+    mt.add_argument("--inject-samples", type=int, default=50,
+                    help="Broadcast noise draws per source per step (one conditioner pass).")
     mt.add_argument("--bucket-chunk", type=int, default=224,
                     help="Max sources per bucket forward (buckets larger than this are chunked).")
     mt.add_argument("--early-stop-patience", type=int, default=6,

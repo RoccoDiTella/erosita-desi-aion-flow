@@ -237,6 +237,29 @@ class ConditionalNSFFlow(nn.Module):
             )
         return self.distribution(context).log_prob(target).reshape(-1)
 
+    def log_prob_draws(self, y_draws: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """Log-density of k perturbed targets per source in ONE broadcasted call.
+
+        ``y_draws``: [k, B] (features=1) or [k, B, D]; ``context``: [B, ctx].
+        The context-conditioned distribution is built once; the k draws are
+        evaluated under it in a single batched pass (for 1-D flows the spline
+        parameters are point-independent, so extra draws are ~free).
+        Returns [k, B].
+        """
+        if y_draws.dim() == 2 and self.features == 1:
+            x = y_draws.unsqueeze(-1)
+        elif y_draws.dim() == 3 and y_draws.shape[-1] == self.features:
+            x = y_draws
+        else:
+            raise ValueError(
+                f"Expected draws [k, B] or [k, B, {self.features}], got {tuple(y_draws.shape)}."
+            )
+        if x.shape[1] != context.shape[0]:
+            raise ValueError(
+                f"Draws batch dim {x.shape[1]} does not match context batch {context.shape[0]}."
+            )
+        return self.distribution(context).log_prob(x)
+
     def log_prob_convolved(
         self,
         standardized_target: torch.Tensor,

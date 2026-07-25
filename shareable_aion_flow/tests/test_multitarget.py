@@ -34,6 +34,9 @@ class _StubFlow(nn.Module):
     def log_prob(self, y, context):
         return -((y - self.w * context.mean(dim=-1)) ** 2)
 
+    def log_prob_draws(self, y_draws, context):
+        return -((y_draws - self.w * context.mean(dim=-1)) ** 2)
+
 
 class _StubJointFlow(nn.Module):
     def __init__(self) -> None:
@@ -41,6 +44,9 @@ class _StubJointFlow(nn.Module):
         self.w = nn.Parameter(torch.ones(1))
 
     def log_prob(self, pair, context):
+        return -((pair.mean(dim=-1) - self.w * context.mean(dim=-1)) ** 2)
+
+    def log_prob_draws(self, pair, context):
         return -((pair.mean(dim=-1) - self.w * context.mean(dim=-1)) ** 2)
 
 
@@ -132,3 +138,22 @@ def test_length_buckets_partition_all_15_combos() -> None:
         for k, group in enumerate(bucket["union"]):
             for row, i in enumerate(idx):
                 assert drop[group][row].item() == (group not in combos[i])
+
+
+def test_broadcast_draws_match_per_draw_calls() -> None:
+    torch.manual_seed(0)
+    from normalizing_flow import ConditionalNSFFlow
+
+    for features in (1, 2):
+        flow = ConditionalNSFFlow(context_dim=8, transforms=2, hidden_features=(16,), features=features)
+        ctx = torch.randn(5, 8)
+        shape = (3, 5) if features == 1 else (3, 5, 2)
+        draws = torch.randn(*shape)
+        broadcast = flow.log_prob_draws(draws, ctx)
+        assert broadcast.shape == (3, 5)
+        for k in range(3):
+            if features == 1:
+                single = flow.log_prob(draws[k], ctx)
+            else:
+                single = flow.distribution(ctx).log_prob(draws[k])
+            assert torch.allclose(broadcast[k], single, atol=1e-5)
