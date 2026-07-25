@@ -64,7 +64,7 @@ def results_figure(metrics_csv: Path | None, hr: dict | None, out: Path) -> None
     for y, v in zip(ypos, r2):
         ax1.text(max(v, 0) + 0.015, y, f"{v:+.3f}", va="center", fontsize=11, color=INK)
     ax1.axvline(0.549, color=WARM, lw=1.6, ls="--")
-    ax1.text(0.549, len(rows) - 0.55, " paper flux\n 0.549", color=WARM, fontsize=9.5,
+    ax1.text(0.562, 0.55, "paper flux 0.549", color=WARM, fontsize=9.5,
              ha="left", va="center")
     ax1.set_yticks(ypos, labels, fontsize=11)
     ax1.set_xlim(0, 1.05)

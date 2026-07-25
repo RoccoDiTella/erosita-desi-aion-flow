@@ -182,6 +182,24 @@ noise floor stands), but the joint-flow mechanism works exactly as designed.
 Outputs: `outputs/mt-v3b-8head-34994658/eval/` (multi_test_metrics.csv —
 15 combos × 8 heads; hr_joint_posteriors.csv).
 
+**HR32 AS AN IMPLIED TARGET (job 35049997, 2026-07-25) — a real IG for a
+target that was never trained.** Because the per-band ECFs are exactly
+constant, HR = tanh(d·ln10/2) with d = logF3 − logF2 + (C2−C3): hardness is a
+monotone function of the log-flux DIFFERENCE alone, so p(HR|x) is the joint
+(P2,P3) posterior marginalized along a shear (unit Jacobian) times an analytic
+transform factor. Computed by line-integral quadrature (96 nodes, broadcast
+under one conditioner pass); algebra + quadrature validated against an
+analytic Gaussian to 1e-14. Strictly preferable to sample+KDE (no bandwidth
+bias, no MC noise) — user's call.
+Results: all measured (n=2,169) **IG +0.090 nats (1.09×), corr +0.166**;
+well-measured hr32_ok (n=415) **IG +0.121 (1.13×), corr +0.249**, median 68%
+half-width 0.408. R² stays ≈0 (posterior is under-dispersed vs noisy measured
+values), so the honest claim is *information*, not point accuracy. Note the IG
+magnitude is comparable to the direct-HR model's flat 1.13× — but THAT was
+shape-only (flat across all 15 combos, corr≈0); here corr +0.25 is genuine
+per-source signal. Ranking of evidence: correlation > IG for this target.
+Runtime 2m50s. Output: `eval/hr_implied_target.csv`.
+
 **wandb retention policy (2026-07-25, applied):** delete failed/crashed/
 superseded runs and plumbing smokes whose numbers live in this registry
 (17 deleted); KEEP every finished run with results, the calibration-grid runs

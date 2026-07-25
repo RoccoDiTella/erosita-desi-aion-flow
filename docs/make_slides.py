@@ -176,10 +176,11 @@ def main() -> None:
         fig, ax = new_slide("V3b results: every target from one 3-hour run",
                             "test set, all inputs · HR32 is implied: marginalized out of the joint (P2,P3) posterior, never trained")
         image_panel(fig, FIGS / "fig_v3b_results.png", (0.03, 0.20, 0.94, 0.60))
-        fig.text(0.05, 0.145,
-                 "log flux 0.603 is the best to date (published 0.549). logM★ and log L$_X$ carry the most information; "
-                 "P4 and hardness sit at the eRASS1 noise floor.",
-                 fontsize=12, color=INK)
+        fig.text(0.05, 0.155,
+                 "log flux 0.603 is the best to date (published 0.549).\n"
+                 "Hardness was never trained, yet still gains information: 1.13$\\times$ and correlation +0.25 on\n"
+                 "well-measured sources, purely by marginalizing the joint (P2,P3) posterior.",
+                 fontsize=12, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 9 Training diagnostics
