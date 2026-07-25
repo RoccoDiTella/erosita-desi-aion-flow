@@ -459,6 +459,10 @@ def run_train_multi(args) -> None:
         encoder.eval(); head.train(); flows.train()
         weights = ema.update_and_weights([None] * N_HEADS)
         n_seen = 0
+        ep_sum = {n: 0.0 for n in HEAD_NAMES}; ep_cnt = {n: 0 for n in HEAD_NAMES}
+        bk_sum: dict[tuple[str, str], float] = {}; bk_cnt: dict[tuple[str, str], int] = {}
+        diag_extra: dict[str, float] = {}
+        grad_norm = 0.0; last_raw = [None] * N_HEADS; last_loss = float("nan")
         for batch in train_loader:
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
             y_all, slo_all, shi_all = lookup.batch(batch[7], device)
