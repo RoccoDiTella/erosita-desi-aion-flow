@@ -155,6 +155,12 @@ failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
 - Loaders exclude non-finite targets (secondary targets are partially measured).
 - Idempotency by count, not existence (the fits_pool lesson).
 
+**wandb retention policy (2026-07-25, applied):** delete failed/crashed/
+superseded runs and plumbing smokes whose numbers live in this registry
+(17 deleted); KEEP every finished run with results, the calibration-grid runs
+(decision evidence), and v3-cls-34356743 (state "failed" from its eval OOM but
+holds the real V3a curves). Project now: 19 runs, all meaningful.
+
 ## 6. Run registry and performance
 
 All runs: wandb project `erosita-desi-aion-flow`; outputs under
