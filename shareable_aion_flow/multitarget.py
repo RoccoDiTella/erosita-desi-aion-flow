@@ -338,11 +338,16 @@ def run_train_multi(args) -> None:
                 combos_ps = [sampler.sample(generator) for _ in range(B)]
                 steps = []
                 for bucket, idx in bucket_assignments(combos_ps):
-                    rows = torch.from_numpy(idx).to(device)
-                    sub = tuple(t[rows] for t in batch)
-                    drop = {k: v.to(device) for k, v in
-                            bucket_modality_dropout(bucket, combos_ps, idx).items()}
-                    steps.append((bucket["union"], sub, drop, rows))
+                    # Chunk cap: bucket shares are uneven (the heavy bucket is
+                    # ~46% of the size-stratified mix), so cap each forward at
+                    # the calibrated size instead of trusting the bucket split.
+                    for lo in range(0, len(idx), args.bucket_chunk):
+                        part = idx[lo : lo + args.bucket_chunk]
+                        rows = torch.from_numpy(part).to(device)
+                        sub = tuple(t[rows] for t in batch)
+                        drop = {k: v.to(device) for k, v in
+                                bucket_modality_dropout(bucket, combos_ps, part).items()}
+                        steps.append((bucket["union"], sub, drop, rows))
             else:
                 steps = [(sampler.sample(generator), batch, None, None)]
             for combo, sub, drop, rows in steps:

@@ -992,6 +992,8 @@ def parse_args() -> argparse.Namespace:
                     "token-length buckets; one forward + one step per bucket. Use a LARGE "
                     "--batch-size (e.g. 896) so each bucket lands near the calibrated 224.")
     mt.add_argument("--no-inject", action="store_true")
+    mt.add_argument("--bucket-chunk", type=int, default=224,
+                    help="Max sources per bucket forward (buckets larger than this are chunked).")
     mt.add_argument("--early-stop-patience", type=int, default=6,
                     help="Stop when the val pair-mean NLL has not improved for this many epochs.")
     mt.add_argument("--num-workers", type=int, default=8)
