@@ -200,6 +200,31 @@ shape-only (flat across all 15 combos, corr≈0); here corr +0.25 is genuine
 per-source signal. Ranking of evidence: correlation > IG for this target.
 Runtime 2m50s. Output: `eval/hr_implied_target.csv`.
 
+**V2 TRAINING RUN (accumulated buckets, P4 dropped; job 35073203, 20 ep,
+2.41 GPU-h) — diagnostics, not a performance win.** 7-head val sum 7.263 vs the
+per-step run's 7.017, BUT still descending at epoch 20 (last-5 slope
+−0.034/epoch), so the gap is undertraining: accumulation gives ~22 steps/epoch
+instead of ~114. Per-epoch wall-time identical (433 s), so epochs are the fair
+unit and ~27 epochs would match. Verdict: accumulation is roughly wall-time
+NEUTRAL and buys interpretability, not accuracy.
+**What the diagnostics establish:**
+- Per-head convergence is wildly uneven: P1/P2 by epoch 5, Lx/P3 by 10, flux
+  and the joint head by 13, **logM★ still improving at 20** (−0.031/epoch) and
+  is the only reason the total keeps falling. Per-head schedules or freezing
+  are justified.
+- **Overfitting is real and linear from epoch 1**: val−probe gap (identical
+  protocol) grows 0.009 → 0.062 nats. First honest generalization measurement.
+- **Spikiness fully explained**: per-bucket decomposition of log Lx separates
+  into four smooth curves, z/W 0.70 > image 0.60 > spectra 0.37 > all 0.33.
+  The old step-level "noise" was this 0.35-nat spread aliased by logging.
+- **No head dominates the shared trunk**: influence shares stay 0.10–0.20 all
+  run, so the EMA weighting is NOT misallocating despite loss weights spanning
+  4×. The earlier concern is measured and dismissed.
+- **Adapters move 10–20× more than CLS tokens and the shared MLP** (relative
+  movement 0.06 vs 0.005 vs 0.003 at step 450, still decaying) — evidence for
+  a lower adapter LR or stronger decay in the next regime.
+Figure: `docs/figures/fig_v3b_training.png` (docs/make_training_diagnostics.py).
+
 **wandb retention policy (2026-07-25, applied):** delete failed/crashed/
 superseded runs and plumbing smokes whose numbers live in this registry
 (17 deleted); KEEP every finished run with results, the calibration-grid runs
