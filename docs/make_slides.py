@@ -344,6 +344,28 @@ def main() -> None:
         ], fontsize=13.5, dy=0.13)
         pdf.savefig(fig); plt.close(fig)
 
+        # ---- V3b RESULTS (one run, all heads)
+        fig, ax = new_slide("V3b multi-target: one 3-hour run, all targets",
+                            "test all-inputs vs each single-target specialized run · early stop at epoch 25")
+        res = pd.DataFrame([
+            {"head": "flux",  "multi R2": "0.603", "single R2": "0.572", "delta": "+0.031"},
+            {"head": "Lx",    "multi R2": "0.917", "single R2": "0.905", "delta": "+0.012"},
+            {"head": "logM*", "multi R2": "0.731", "single R2": "0.648", "delta": "+0.083"},
+            {"head": "P1",    "multi R2": "0.374", "single R2": "0.320", "delta": "+0.054"},
+            {"head": "P2",    "multi R2": "0.415", "single R2": "0.380", "delta": "+0.035"},
+            {"head": "P3",    "multi R2": "0.415", "single R2": "0.378", "delta": "+0.037"},
+            {"head": "P4",    "multi R2": "-0.06", "single R2": "0.071", "delta": "-0.13"},
+        ])
+        metric_table(ax, res, rect=(0.03, 0.18, 0.46, 0.74), fontsize=12)
+        ax2 = fig.add_axes([0.55, 0.18, 0.43, 0.60]); ax2.axis("off")
+        bullets(ax2, [
+            "6 of 7 heads BEAT their specialized runs:\n   multi-task transfer, not a compromise",
+            "flux 0.603 = best to date\n   (published 0.549, clean single 0.572)",
+            "HR from the joint (P2,P3) posterior:\n   corr +0.24 on detected subset\n   vs +0.10 independent bands",
+            "one 3-h run replaces six (~9 h)",
+        ], fontsize=13, dy=0.22)
+        pdf.savefig(fig); plt.close(fig)
+
         # ---- 9 Calibration grid + batching decisions
         fig, ax = new_slide("Efficiency: measure, then choose",
                             "2-epoch calibration grid on full A100s; GPU wall-time is the entire fairshare cost (A100 = 836 CPU-core-eq)")
