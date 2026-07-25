@@ -379,8 +379,14 @@ def run_train_multi(args) -> None:
     # and their gap is the generalization gap.
     from torch.utils.data import DataLoader, Subset
     probe_n = min(int(args.train_probe_size), len(train_loader.dataset))
+    # A SEEDED RANDOM subset, not the first N: the staged rows are ordered by
+    # source_row, so a head slice is a biased sample of the sky and reads as a
+    # systematic train/val offset rather than a generalization gap.
+    probe_idx = np.random.default_rng(args.seed).choice(
+        len(train_loader.dataset), size=probe_n, replace=False
+    ).tolist() if probe_n > 0 else []
     probe_loader = DataLoader(
-        Subset(train_loader.dataset, list(range(probe_n))),
+        Subset(train_loader.dataset, probe_idx),
         batch_size=eval_bs, shuffle=False, num_workers=args.num_workers, pin_memory=True,
     ) if probe_n > 0 else None
     lookup = MultiTargetLookup(Path(args.staged_dir), Path(args.extra_targets_csv) if args.extra_targets_csv else None)
