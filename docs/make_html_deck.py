@@ -48,9 +48,15 @@ def embed(path: Path) -> str:
     return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
 
 
-def build_payload(metrics_csv: Path, hr_csv: Path | None) -> dict:
+def build_payload(metrics_csv: Path, hr_csv: Path | None,
+                  compare_csv: Path | None = None, compare_label: str = "V_PAI") -> dict:
     t = pd.read_csv(metrics_csv)
     payload: dict[str, list[dict]] = {}
+    # single-target baseline (same target, same test split) for a like-for-like column
+    cmp_r2: dict[str, float] = {}
+    if compare_csv and compare_csv.exists():
+        c = pd.read_csv(compare_csv)
+        cmp_r2 = {marker(r.input_group): float(r.r2) for r in c.itertuples()}
     for head, label in HEAD_LABELS.items():
         rows = t[t["head"] == head]
         if not len(rows):
@@ -59,6 +65,8 @@ def build_payload(metrics_csv: Path, hr_csv: Path | None) -> dict:
         payload[label] = [
             {
                 "inputs": marker(r.input_group),
+                "cmp": (round(cmp_r2[marker(r.input_group)], 4)
+                        if head == "log_ml_flux_1" and marker(r.input_group) in cmp_r2 else None),
                 "n": int(r.n_test),
                 "r2": None if pd.isna(r.r2) else round(float(r.r2), 4),
                 "rmse": None if pd.isna(r.rmse_dex) else round(float(r.rmse_dex), 4),
@@ -68,6 +76,15 @@ def build_payload(metrics_csv: Path, hr_csv: Path | None) -> dict:
             }
             for r in rows.itertuples()
         ]
+    if compare_csv and compare_csv.exists():
+        c = pd.read_csv(compare_csv).sort_values("r2", ascending=False)
+        payload[f"{compare_label}: log flux (single-target)"] = [
+            {"inputs": marker(r.input_group), "cmp": None, "n": int(r.n_test),
+             "r2": round(float(r.r2), 4), "rmse": round(float(r.rmse), 4),
+             "nll": round(-float(r.mean_posterior_log_prob_nats), 4),
+             "ig": round(float(r.info_gain_nats), 4),
+             "expig": round(float(r.exp_info_gain), 3)}
+            for r in c.itertuples()]
     if hr_csv and hr_csv.exists():
         h = pd.read_csv(hr_csv)
         ok = h[h["ok"]] if "ok" in h.columns else h
@@ -76,7 +93,7 @@ def build_payload(metrics_csv: Path, hr_csv: Path | None) -> dict:
             if len(d) < 30:
                 return None
             r2 = 1 - np.sum((d.hr_meas - d.hr_p50) ** 2) / np.sum((d.hr_meas - d.hr_meas.mean()) ** 2)
-            return {"inputs": name, "n": int(len(d)),
+            return {"inputs": name, "cmp": None, "n": int(len(d)),
                     "r2": round(float(r2), 4),
                     "rmse": round(float(np.sqrt(np.mean((d.hr_meas - d.hr_p50) ** 2))), 4),
                     "nll": round(float(-d.log_post.mean()), 4),
@@ -115,6 +132,8 @@ HTML = """<!doctype html>
  th {{ background:var(--accent); color:#fff; position:sticky; top:0; }}
  tbody tr:hover {{ background:rgba(0,114,178,.07); }}
  .best td {{ font-weight:700; }}
+ td.up {{ color:#009E73; font-weight:600; }}
+ td.down {{ color:#D55E00; }}
  .wrap {{ overflow-x:auto; }}
  figure {{ margin:1.2rem 0; }}
  figure img {{ width:100%; max-width:100%; height:auto; }}
@@ -123,12 +142,13 @@ HTML = """<!doctype html>
 </style>
 <h1>AION-flow: full results</h1>
 <div class="sub">V3b multi-target, test set. Pick a target to see every input combination.
-Inputs: <code>S</code> spectra, <code>Z</code> redshift, <code>W</code> WISE, <code>I</code> image.</div>
+Inputs: <code>S</code> spectra, <code>Z</code> redshift, <code>W</code> WISE, <code>I</code> image.
+The V_PAI column is the paper-head model trained on flux alone, same cleaned data and same test split.</div>
 
 <h2>Per-target results</h2>
 <div class="tabs" id="tabs"></div>
 <div class="wrap"><table>
- <thead><tr><th>inputs</th><th>n</th><th>R²</th><th>RMSE (dex)</th><th>NLL</th><th>IG (nats)</th><th>exp(IG)</th></tr></thead>
+ <thead><tr><th>inputs</th><th>n</th><th>R²</th><th>V_PAI R²</th><th>Δ</th><th>RMSE (dex)</th><th>NLL</th><th>IG (nats)</th><th>exp(IG)</th></tr></thead>
  <tbody id="rows"></tbody>
 </table></div>
 <p class="note" id="foot"></p>
@@ -151,10 +171,15 @@ const foot = document.getElementById('foot');
 const fmt = (v, d=3) => v === null || v === undefined ? '—' : v.toFixed(d);
 function render(name) {{
   const d = DATA[name] || [];
-  rows.innerHTML = d.map((r, i) => `<tr class="${{i === 0 ? 'best' : ''}}">
+  rows.innerHTML = d.map((r, i) => {{
+    const dlt = (r.cmp === null || r.cmp === undefined || r.r2 === null) ? null : r.r2 - r.cmp;
+    const dcls = dlt === null ? '' : (dlt >= 0 ? 'up' : 'down');
+    return `<tr class="${{i === 0 ? 'best' : ''}}">
       <td>${{r.inputs}}</td><td>${{r.n}}</td><td>${{fmt(r.r2)}}</td>
+      <td>${{fmt(r.cmp)}}</td><td class="${{dcls}}">${{dlt === null ? '—' : (dlt >= 0 ? '+' : '') + dlt.toFixed(3)}}</td>
       <td>${{fmt(r.rmse)}}</td><td>${{fmt(r.nll)}}</td>
-      <td>${{fmt(r.ig)}}</td><td>${{r.expig === null ? '—' : fmt(r.expig, 2) + '×'}}</td></tr>`).join('');
+      <td>${{fmt(r.ig)}}</td><td>${{r.expig === null ? '—' : fmt(r.expig, 2) + '×'}}</td></tr>`;
+  }}).join('');
   foot.textContent = d.length ? `${{d.length}} rows, best first.` : 'no rows for this target.';
   [...tabs.children].forEach(b => b.setAttribute('aria-selected', String(b.textContent === name)));
 }}
@@ -172,10 +197,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mt-metrics", type=Path, required=True)
     ap.add_argument("--hr-csv", type=Path, default=None)
+    ap.add_argument("--compare-metrics", type=Path, default=None,
+                    help="Single-target baseline table (V_PAI on flux) for the comparison column.")
     ap.add_argument("--output", type=Path, default=DOCS / "results.html")
     args = ap.parse_args()
 
-    payload = build_payload(args.mt_metrics, args.hr_csv)
+    payload = build_payload(args.mt_metrics, args.hr_csv, args.compare_metrics)
     html = HTML.format(
         payload=json.dumps(payload),
         results_img=embed(FIGS / "fig_v3b_results.png"),
