@@ -21,6 +21,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -28,6 +29,23 @@ DOCS = Path(__file__).resolve().parent
 FIGS = DOCS / "figures"
 ASSETS = DOCS.parent / "assets"
 SLIDE = (13.333, 7.5)
+
+APPENDIX_HEADS = [
+    ("log_ml_flux_1", "log flux, 0.2-2.3 keV"),
+    ("log_lx", "log L$_X$"),
+    ("logmstar", "log M$_*$"),
+    ("log_flux_p1", "P1 flux, 0.2-0.6 keV"),
+    ("log_flux_p2", "P2 flux, 0.6-2.3 keV"),
+    ("log_flux_p3", "P3 flux, 2.3-5.0 keV"),
+    ("p2xp3_joint", "P2 $\\times$ P3 joint"),
+]
+MODS = [("spectra", "S"), ("z", "Z"), ("wise", "W"), ("image", "I")]
+
+
+def marker(group: str) -> str:
+    parts = set(str(group).split("+"))
+    return " ".join(short if name in parts else "·" for name, short in MODS)
+
 
 INK = "#1a1a1a"
 ACCENT = "#0072B2"
@@ -79,6 +97,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mt-metrics", type=Path, default=None,
                         help="multi_test_metrics.csv from the V3b eval")
+    parser.add_argument("--compare-metrics", type=Path, default=None,
+                        help="V_PAI single-target flux table, for the appendix comparison column")
+    parser.add_argument("--hr-csv", type=Path, default=None,
+                        help="hr_implied_target.csv, for the appendix hardness slide")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
     args = parser.parse_args()
 
@@ -261,6 +283,69 @@ def main() -> None:
             "8 targets in 3 GPU-hours, where 6 separate runs cost ~9",
         ], fontsize=15, dy=0.15)
         pdf.savefig(fig); plt.close(fig)
+
+        # ---- Appendix: full per-target tables, every input combination
+        if args.mt_metrics and Path(args.mt_metrics).exists():
+            mt = pd.read_csv(args.mt_metrics)
+            cmp_r2 = {}
+            if args.compare_metrics and Path(args.compare_metrics).exists():
+                c = pd.read_csv(args.compare_metrics)
+                cmp_r2 = {marker(r.input_group): float(r.r2) for r in c.itertuples()}
+            fig, ax = new_slide("Appendix", "every target, every input combination")
+            bullets(ax, [
+                "one slide per target; rows are the 15 input combinations",
+                "inputs: S spectra, Z redshift, W WISE, I image",
+                "V_PAI is the paper head trained on flux alone, same data and test split",
+            ], fontsize=15, dy=0.15)
+            pdf.savefig(fig); plt.close(fig)
+
+            for head, label in APPENDIX_HEADS:
+                rows = mt[mt["head"] == head]
+                if not len(rows):
+                    continue
+                rows = rows.sort_values("r2", ascending=False, na_position="last")
+                table, joint = [], head == "p2xp3_joint"
+                for r in rows.itertuples():
+                    mk = marker(r.input_group)
+                    row = {"inputs": mk,
+                           "R²": "—" if pd.isna(r.r2) else f"{r.r2:.3f}",
+                           "RMSE": "—" if pd.isna(r.rmse_dex) else f"{r.rmse_dex:.3f}",
+                           "NLL": f"{r.nll:.3f}",
+                           "exp(IG)": "—" if pd.isna(r.info_gain_nats) else f"{np.exp(r.info_gain_nats):.2f}"}
+                    if head == "log_ml_flux_1" and mk in cmp_r2:
+                        row["V_PAI R²"] = f"{cmp_r2[mk]:.3f}"
+                        row["Δ"] = f"{r.r2 - cmp_r2[mk]:+.3f}"
+                    table.append(row)
+                sub = f"n = {int(rows.iloc[0].n_test):,} test sources · sorted by R²"
+                if joint:
+                    sub = f"n = {int(rows.iloc[0].n_test):,} · 2-D flow, R² not defined for a joint density"
+                fig, ax = new_slide(f"Appendix: {label}", sub)
+                metric_table(ax, pd.DataFrame(table), rect=(0.10, 0.02, 0.80, 0.88), fontsize=10.5)
+                pdf.savefig(fig); plt.close(fig)
+
+            if args.hr_csv and Path(args.hr_csv).exists():
+                h = pd.read_csv(args.hr_csv)
+                ok = h[h["ok"]] if "ok" in h.columns else h
+                rows = []
+                for name, d in (("all measured", h), ("well measured", ok)):
+                    if len(d) < 30:
+                        continue
+                    r2 = 1 - np.sum((d.hr_meas - d.hr_p50) ** 2) / np.sum((d.hr_meas - d.hr_meas.mean()) ** 2)
+                    rows.append({"subset": name, "n": f"{len(d):,}",
+                                 "R²": f"{r2:+.3f}",
+                                 "corr": f"{np.corrcoef(d.hr_p50, d.hr_meas)[0,1]:+.3f}",
+                                 "IG (nats)": f"{d.info_gain.mean():+.3f}",
+                                 "exp(IG)": f"{np.exp(d.info_gain.mean()):.2f}",
+                                 "68% half-width": f"{np.median(0.5*(d.hr_p84-d.hr_p16)):.3f}"})
+                if rows:
+                    fig, ax = new_slide("Appendix: HR32, implied",
+                                        "marginalized from the joint (P2,P3) posterior by quadrature · never a trained target")
+                    metric_table(ax, pd.DataFrame(rows), rect=(0.06, 0.42, 0.88, 0.34), fontsize=12)
+                    bullets(ax, [
+                        "R² stays near zero: the posterior is narrower than the noisy measured values",
+                        "the information gain is real, and it comes from a head that was never trained on hardness",
+                    ], y=0.30, fontsize=12.5, dy=0.10)
+                    pdf.savefig(fig); plt.close(fig)
 
         # ---- 16 Next
         fig, ax = new_slide("Next")
