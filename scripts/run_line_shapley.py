@@ -161,7 +161,7 @@ def main() -> None:
         loader=test_loader, standardizer=standardizer, players=players,
         device=device, n_full_sweeps=args.full_sweeps, n_line_sweeps=args.line_sweeps,
         n_pair_sweeps=args.pair_sweeps, mask_mode=mask_mode,
-        line_guard_tokens=args.line_guard_tokens, seed=args.seed,
+        line_guard_tokens=args.line_guard_tokens, seed=args.seed, z_edges=z_edges,
     )
 
     phi, se, count = acc.table()
@@ -199,9 +199,15 @@ def main() -> None:
         zt, index=[f"zbin_{i}" for i in range(zt.shape[0])],
         columns=[p["name"] for p in players],
     )
+    assert zt.shape[0] == len(z_edges) - 1, (
+        f"z-table has {zt.shape[0]} bins but {len(z_edges)-1} edges were requested")
     zdf.insert(0, "z_hi", [z_edges[i + 1] for i in range(zt.shape[0])])
     zdf.insert(0, "z_lo", [z_edges[i] for i in range(zt.shape[0])])
     zdf.to_csv(out_dir / "shapley_by_zbin.csv")
+    pd.DataFrame(
+        acc.z_count, index=[f"zbin_{i}" for i in range(zt.shape[0])],
+        columns=[p["name"] for p in players],
+    ).to_csv(out_dir / "shapley_by_zbin_counts.csv")
     z_labels = ["z<0.5", "0.5-1.0", "1.0-1.7", "z>1.7"]
     order = np.argsort([p["rest_center"] for p in players])
     fig, ax = plt.subplots(figsize=(11, 3.6))
