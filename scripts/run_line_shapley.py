@@ -178,6 +178,12 @@ def main() -> None:
 
     # ---- heatmap: z-bins x players on the rest-wavelength axis
     zt = acc.z_table()
+    # persist the z-resolved values too: the redshift-vs-rest-wavelength figure
+    # needs them, and re-running a sweep just to recover them is wasteful
+    pd.DataFrame(
+        zt, index=[f"zbin_{i}" for i in range(zt.shape[0])],
+        columns=[p["name"] for p in players],
+    ).to_csv(out_dir / "shapley_by_zbin.csv")
     z_labels = ["z<0.5", "0.5-1.0", "1.0-1.7", "z>1.7"]
     order = np.argsort([p["rest_center"] for p in players])
     fig, ax = plt.subplots(figsize=(11, 3.6))
