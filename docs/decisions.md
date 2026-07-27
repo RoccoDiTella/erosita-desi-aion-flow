@@ -225,6 +225,23 @@ NEUTRAL and buys interpretability, not accuracy.
   a lower adapter LR or stronger decay in the next regime.
 Figure: `docs/figures/fig_v3b_training.png` (docs/make_training_diagnostics.py).
 
+**V3 RUN: accumulation + separated adapter LR (job 35416432, 30 ep, early stop
+at 22, 4.05 h) — closes the accumulation question.** Config: accumulated
+buckets, P4 dropped, lr 3e-4 for flows/MLP/CLS with **adapter-lr 1e-4** and
+beta1 0.95. Test all-inputs vs the per-step multi-target run: **flux 0.604
+(was 0.603), Lx 0.919 (0.917), logM★ 0.744 (0.731)**; bands ~0.010 lower
+(P1 0.364, P2 0.404, P3 0.406). Flux IG 0.300 (was 0.282). HR implied:
+IG +0.115 / 1.12x on hr32_ok, corr +0.173 (was +0.249 — the correlation is
+noisier than the IG and moved against us).
+**Mechanism confirmed:** the flows had been frozen by a shared LR (update/weight
+1.2e-4, ~10x below the healthy band) because they are standard-init (|w|~40)
+while the adapters are zero-init (|w|~3); separating the LR moved them to
+7.5e-4, and logM★ — the head that had been furthest from converged — gained
+most. **Verdict: accumulation is wall-time neutral and now matches per-step;
+it buys interpretability, not accuracy.** New binding constraint is
+overfitting: the train-probe gap reaches 0.157 nats (3x the previous run), so
+the next lever is regularization or a shorter schedule, not more LR.
+
 **wandb retention policy (2026-07-25, applied):** delete failed/crashed/
 superseded runs and plumbing smokes whose numbers live in this registry
 (17 deleted); KEEP every finished run with results, the calibration-grid runs

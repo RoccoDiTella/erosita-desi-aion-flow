@@ -163,7 +163,7 @@ def main() -> None:
         fig, ax = new_slide("V3b: read-only CLS, one frozen forward, 8 heads",
                             "no token attends to a CLS: the data stream is bit-identical to frozen AION and runs without gradients")
         bullets(ax, [
-            "8 CLS tokens read every block with the block's own frozen attention",
+            "one CLS token per target reads every block with the block's own frozen attention",
             "shared full-rank deltas on the CLS query + consumed-value projections; capacity control = weight decay",
             "shared MLP 768 $\\to$ 512 $\\to$ 256; sharing ends at the conditioning vectors; one flow per head",
             "joint 2-D flow over (P2, P3) $\\to$ hardness by exact marginalization, never a trained target",
@@ -173,26 +173,26 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 8 MAIN RESULT
-        fig, ax = new_slide("V3b results: every target from one 3-hour run",
-                            "test set, all inputs · HR32 is implied: marginalized out of the joint (P2,P3) posterior, never trained")
+        fig, ax = new_slide("V3b results: every target from one run",
+                            "test set, all inputs · P4 dropped (no signal) · HR32 is implied: marginalized out of the joint (P2,P3) posterior, never trained")
         image_panel(fig, FIGS / "fig_v3b_results.png", (0.03, 0.20, 0.94, 0.60))
         fig.text(0.05, 0.155,
-                 "log flux 0.603 against V_PAI's 0.565 on the same test split.\n"
-                 "Hardness was never trained, yet still gains information: 1.13$\\times$ and correlation +0.25 on\n"
-                 "well-measured sources, purely by marginalizing the joint (P2,P3) posterior.",
+                 "log flux 0.604 against V_PAI's 0.565 on the same test split.\n"
+                 "Hardness was never trained, yet still gains information: 1.12$\\times$ on well-measured "
+                 "sources,\npurely by marginalizing the joint (P2,P3) posterior.",
                  fontsize=12, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 9 Training diagnostics
         fig, ax = new_slide("Training diagnostics",
-                            "accumulated-bucket run: every update sees the full input mix · train probe = training data scored with the validation protocol")
+                            "accumulated buckets, separate adapter learning rate · train probe = training data scored with the validation protocol")
         image_panel(fig, FIGS / "fig_v3b_training.png", (0.015, 0.10, 0.97, 0.72))
         fig.text(0.045, 0.082,
-                 "Convergence is uneven: P1/P2 by epoch 5, logM$_*$ still improving at 20.  "
-                 "Overfitting grows linearly, 0.009 $\\to$ 0.062 nats.\n"
-                 "The old spiky curve was the 0.35-nat spread between input buckets, not optimizer noise.  "
-                 "No head dominates the shared trunk;\nthe adapters move 10-20$\\times$ more than the CLS "
-                 "tokens and the shared MLP.",
+                 "Separating the adapter learning rate moved the flows into the healthy update band "
+                 "(1.2e-4 $\\to$ 7.5e-4 per step), and logM$_*$ gained the most.\n"
+                 "The bucket panel shows the old spiky curve was input composition, not optimizer noise. "
+                 "No head dominates the shared trunk.\nOverfitting is now the binding constraint: the gap "
+                 "reaches 0.16 nats, so early stopping fires at epoch 22.",
                  fontsize=11.5, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
@@ -201,7 +201,7 @@ def main() -> None:
                             "V_PAI trained on the same cleaned data and scored on the same test split · the published 0.549 used the noisy split and is not row-comparable")
         cmp = pd.DataFrame([
             {"": "V_PAI (paper head)", "targets": "1 (flux)", "runs": "1", "flux R²": "0.565"},
-            {"": "V3b multi-head", "targets": "7 + hardness", "runs": "1", "flux R²": "0.603"},
+            {"": "V3b multi-head", "targets": "6 + hardness", "runs": "1", "flux R²": "0.604"},
         ])
         metric_table(ax, cmp, rect=(0.04, 0.46, 0.62, 0.34), fontsize=13)
         ax2 = fig.add_axes([0.70, 0.42, 0.28, 0.38]); ax2.axis("off")
