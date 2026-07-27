@@ -343,39 +343,11 @@ def main() -> None:
                 cmp_r2 = {marker(r.input_group): float(r.r2) for r in c.itertuples()}
             fig, ax = new_slide("Appendix", "every target, every input combination")
             bullets(ax, [
-                "one slide per target; rows are the 15 input combinations",
-                "inputs: S spectra, Z redshift, W WISE, I image",
-                "V_PAI is the paper head trained on flux alone, same data and test split",
-            ], fontsize=15, dy=0.15)
+                "first the single-target baselines on flux: V_PAI (paper head) and V_simple (minimal head)",
+                "then one slide per multi-target head; rows are the 15 input combinations",
+                "inputs: S spectra, Z redshift, W WISE, I image; all on the same cleaned data and test split",
+            ], fontsize=14.5, dy=0.15)
             pdf.savefig(fig); plt.close(fig)
-
-            for head, label in APPENDIX_HEADS:
-                rows = mt[mt["head"] == head]
-                if not len(rows):
-                    continue
-                rows = rows.sort_values("r2", ascending=True, na_position="first")
-                recs = []
-                for r in rows.itertuples():
-                    parts = set(str(r.input_group).split("+"))
-                    rec = {"Redshift": "Z" if "z" in parts else "",
-                           "Spectra": "S" if "spectra" in parts else "",
-                           "WISE": "W" if "wise" in parts else "",
-                           "Images": "I" if "image" in parts else ""}
-                    rec[r"$R^2$"] = "—" if pd.isna(r.r2) else f"{r.r2:.3f}"
-                    rec["Info Gain"] = "—" if pd.isna(r.info_gain_nats) else f"{r.info_gain_nats:.3f}"
-                    rec["exp(Info Gain)"] = ("—" if pd.isna(r.info_gain_nats)
-                                             else f"{np.exp(r.info_gain_nats):.3f}")
-                    recs.append(rec)
-                sub = f"n = {int(rows.iloc[0].n_test):,} test sources"
-                if head == "p2xp3_joint":
-                    sub += " · 2-D flow: R² is not defined for a joint density"
-                fig, ax = new_slide(f"Appendix: {label}", sub)
-                paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
-                            numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
-                                           "Info Gain": _ramp(plt.cm.Purples),
-                                           "exp(Info Gain)": _ramp(plt.cm.Greens, 0.05, 0.5)},
-                            rect=(0.06, 0.02, 0.88, 0.88), fontsize=10)
-                pdf.savefig(fig); plt.close(fig)
 
             baselines = []
             if args.compare_metrics and Path(args.compare_metrics).exists():
@@ -407,6 +379,34 @@ def main() -> None:
                                            "Info Gain": _ramp(plt.cm.Purples),
                                            "exp(Info Gain)": _ramp(plt.cm.Greens, 0.05, 0.5)},
                             rect=(0.10, 0.02, 0.80, 0.88), fontsize=10)
+                pdf.savefig(fig); plt.close(fig)
+
+            for head, label in APPENDIX_HEADS:
+                rows = mt[mt["head"] == head]
+                if not len(rows):
+                    continue
+                rows = rows.sort_values("r2", ascending=True, na_position="first")
+                recs = []
+                for r in rows.itertuples():
+                    parts = set(str(r.input_group).split("+"))
+                    rec = {"Redshift": "Z" if "z" in parts else "",
+                           "Spectra": "S" if "spectra" in parts else "",
+                           "WISE": "W" if "wise" in parts else "",
+                           "Images": "I" if "image" in parts else ""}
+                    rec[r"$R^2$"] = "—" if pd.isna(r.r2) else f"{r.r2:.3f}"
+                    rec["Info Gain"] = "—" if pd.isna(r.info_gain_nats) else f"{r.info_gain_nats:.3f}"
+                    rec["exp(Info Gain)"] = ("—" if pd.isna(r.info_gain_nats)
+                                             else f"{np.exp(r.info_gain_nats):.3f}")
+                    recs.append(rec)
+                sub = f"n = {int(rows.iloc[0].n_test):,} test sources"
+                if head == "p2xp3_joint":
+                    sub += " · 2-D flow: R² is not defined for a joint density"
+                fig, ax = new_slide(f"Appendix: {label}", sub)
+                paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
+                            numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
+                                           "Info Gain": _ramp(plt.cm.Purples),
+                                           "exp(Info Gain)": _ramp(plt.cm.Greens, 0.05, 0.5)},
+                            rect=(0.06, 0.02, 0.88, 0.88), fontsize=10)
                 pdf.savefig(fig); plt.close(fig)
 
             if args.hr_csv and Path(args.hr_csv).exists():
