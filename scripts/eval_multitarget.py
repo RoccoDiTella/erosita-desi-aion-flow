@@ -48,6 +48,13 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location=device)
+    # The checkpoint may have been trained with heads dropped; rebind the head
+    # constants before building anything, since module-level imports captured
+    # the default set at import time.
+    import shareable_aion_flow.multitarget as _mt
+    _mt.configure_heads(tuple(ckpt.get("config", {}).get("drop_heads", ()) or ()))
+    HEAD_NAMES, N_HEADS, N_TARGETS, JOINT_IDX = _mt.HEAD_NAMES, _mt.N_HEADS, _mt.N_TARGETS, _mt.JOINT_IDX
+    print(f"[eval] heads: {HEAD_NAMES}", flush=True)
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
                                num_cls=N_HEADS).to(device)
     missing, unexpected = encoder.load_state_dict(ckpt["encoder_trainable_state_dict"], strict=False)
