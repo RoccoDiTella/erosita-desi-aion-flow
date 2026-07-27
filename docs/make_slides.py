@@ -232,24 +232,17 @@ def main() -> None:
             ], fontsize=12, dy=0.28)
             pdf.savefig(fig); plt.close(fig)
 
-        # ---- 13 Line coverage
-        fig, ax = new_slide("Emission-line coverage",
-                            "each spectrum covers 3600-9824 A observed; in rest frame that window slides with z")
-        image_panel(fig, FIGS / "fig_line_coverage.png", (0.05, 0.06, 0.90, 0.74))
-        pdf.savefig(fig); plt.close(fig)
-
-        # ---- 14 Line/continuum Shapley
-        if (FIGS / "fig_shapley_heatmap.png").exists():
+        # ---- 13 Spectral information on the coverage plane
+        if (FIGS / "fig_coverage_shapley.png").exists():
             fig, ax = new_slide("Where in the spectrum is the flux information?",
-                                "line/continuum Shapley, AION-native token dropping (guard band from measured codec receptive field)")
-            image_panel(fig, FIGS / "fig_shapley_heatmap.png", (0.03, 0.42, 0.94, 0.40))
-            image_panel(fig, FIGS / "fig_shapley_lines.png", (0.16, 0.01, 0.48, 0.40))
-            ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
-            bullets(ax2, [
-                "Balmer lines dominate",
-                "Hbeta+[OIII] merged: one player\n   (4959 doublet inseparable)",
-                "line vs continuum split under\n   re-measurement (guard audit)",
-            ], fontsize=12, dy=0.30)
+                                "line/continuum Shapley on the plane of rest wavelength and redshift · a spectrum only sees the band between the black curves")
+            image_panel(fig, FIGS / "fig_coverage_shapley.png", (0.02, 0.14, 0.72, 0.68))
+            image_panel(fig, FIGS / "fig_shapley_lines.png", (0.74, 0.30, 0.25, 0.38))
+            fig.text(0.045, 0.105,
+                     "H$\\alpha$ is the strongest single region but exists only below z $\\approx$ 0.5; the Balmer group "
+                     "carries the signal out to z $\\approx$ 1.\nAbove that a spectrum sees only rest-UV, where there is "
+                     "little to read. Mg II is mildly negative.",
+                     fontsize=11.5, color=INK, va="top")
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 15 Efficiency (concise)
