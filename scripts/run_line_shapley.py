@@ -113,6 +113,9 @@ def main() -> None:
                     help="Extra tokens dropped on each side of a line window "
                     "(codec effective receptive field; see codec_leakage_probe.py).")
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--z-bins", type=int, default=4,
+                    help="Redshift bins for the z-resolved table, quantile-spaced so each holds a "
+                    "similar number of sources (4 reproduces the original coarse binning).")
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -128,6 +131,18 @@ def main() -> None:
         num_workers=args.num_workers, clean_split_csv=args.clean_split_csv,
     )
     players = player_catalog()
+    # quantile z edges from the sources actually being swept
+    zs_all = []
+    for b in test_loader:
+        zs_all.append(b[3].detach().cpu().numpy().ravel())
+    zs_all = np.concatenate(zs_all)
+    if args.z_bins <= 4:
+        z_edges = (0.0, 0.5, 1.0, 1.7, 99.0)
+    else:
+        qs = np.linspace(0, 100, args.z_bins + 1)[1:-1]
+        z_edges = tuple([0.0] + list(np.percentile(zs_all, qs)) + [99.0])
+    print(f"[sweep] {args.z_bins} z bins, edges "
+          + " ".join(f"{v:.2f}" for v in z_edges[:-1]) + " ...", flush=True)
     print(f"mask_mode={mask_mode}", flush=True)
 
     out_dir = args.checkpoint.parent / "shapley"
@@ -180,10 +195,13 @@ def main() -> None:
     zt = acc.z_table()
     # persist the z-resolved values too: the redshift-vs-rest-wavelength figure
     # needs them, and re-running a sweep just to recover them is wasteful
-    pd.DataFrame(
+    zdf = pd.DataFrame(
         zt, index=[f"zbin_{i}" for i in range(zt.shape[0])],
         columns=[p["name"] for p in players],
-    ).to_csv(out_dir / "shapley_by_zbin.csv")
+    )
+    zdf.insert(0, "z_hi", [z_edges[i + 1] for i in range(zt.shape[0])])
+    zdf.insert(0, "z_lo", [z_edges[i] for i in range(zt.shape[0])])
+    zdf.to_csv(out_dir / "shapley_by_zbin.csv")
     z_labels = ["z<0.5", "0.5-1.0", "1.0-1.7", "z>1.7"]
     order = np.argsort([p["rest_center"] for p in players])
     fig, ax = plt.subplots(figsize=(11, 3.6))
