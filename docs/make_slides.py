@@ -93,6 +93,53 @@ def metric_table(ax, frame: pd.DataFrame, *, rect, fontsize=12):
             cell.set_text_props(color="white", fontweight="bold")
 
 
+def _ramp(cmap, lo: float = 0.05, hi: float = 0.62):
+    """Use only the light end of a colormap, so cell text stays legible."""
+    return lambda t: cmap(lo + (hi - lo) * float(np.clip(t, 0.0, 1.0)))
+
+
+def paper_table(ax, frame: pd.DataFrame, *, indicator_cols: int, numeric_cmaps: dict,
+                rect=(0.08, 0.02, 0.84, 0.90), fontsize: int = 10) -> None:
+    """The paper's results-table styling.
+
+    Modality indicators as separate blank-or-letter columns, each numeric column
+    shaded by its own colour ramp, dark header, NLL deliberately absent.
+    """
+    text = frame.astype(str)
+    colors = [["white"] * len(frame.columns) for _ in range(len(frame))]
+    for col, cmap in numeric_cmaps.items():
+        if col not in frame.columns:
+            continue
+        vals = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+        finite = vals[np.isfinite(vals)]
+        if not len(finite):
+            continue
+        vmin, vmax = float(finite.min()), float(finite.max())
+        denom = max(vmax - vmin, 1e-8)
+        ci = list(frame.columns).index(col)
+        for ri, v in enumerate(vals):
+            if np.isfinite(v):
+                colors[ri][ci] = cmap((v - vmin) / denom)
+    artist = ax.table(cellText=text.values, colLabels=list(frame.columns),
+                      cellColours=colors, cellLoc="center", colLoc="center", bbox=rect)
+    artist.auto_set_font_size(False)
+    artist.set_fontsize(fontsize)
+    for (row, col), cell in artist.get_celld().items():
+        cell.set_linewidth(0.4)
+        if row == 0:
+            cell.set_facecolor("#222222")
+            cell.get_text().set_color("white")
+            cell.get_text().set_weight("bold")
+            continue
+        if col < indicator_cols and cell.get_text().get_text().strip():
+            cell.set_facecolor("#e9edf3")
+            cell.get_text().set_weight("bold")
+        # keep numbers readable at the dark end of each colour ramp
+        r, g, b = cell.get_facecolor()[:3]
+        if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5:
+            cell.get_text().set_color("white")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mt-metrics", type=Path, default=None,
@@ -303,24 +350,50 @@ def main() -> None:
                 rows = mt[mt["head"] == head]
                 if not len(rows):
                     continue
-                rows = rows.sort_values("r2", ascending=False, na_position="last")
-                table, joint = [], head == "p2xp3_joint"
+                rows = rows.sort_values("r2", ascending=True, na_position="first")
+                recs = []
                 for r in rows.itertuples():
-                    mk = marker(r.input_group)
-                    row = {"inputs": mk,
-                           "R²": "—" if pd.isna(r.r2) else f"{r.r2:.3f}",
-                           "RMSE": "—" if pd.isna(r.rmse_dex) else f"{r.rmse_dex:.3f}",
-                           "NLL": f"{r.nll:.3f}",
-                           "exp(IG)": "—" if pd.isna(r.info_gain_nats) else f"{np.exp(r.info_gain_nats):.2f}"}
-                    if head == "log_ml_flux_1" and mk in cmp_r2:
-                        row["V_PAI R²"] = f"{cmp_r2[mk]:.3f}"
-                        row["Δ"] = f"{r.r2 - cmp_r2[mk]:+.3f}"
-                    table.append(row)
-                sub = f"n = {int(rows.iloc[0].n_test):,} test sources · sorted by R²"
-                if joint:
-                    sub = f"n = {int(rows.iloc[0].n_test):,} · 2-D flow, R² not defined for a joint density"
+                    parts = set(str(r.input_group).split("+"))
+                    rec = {"Redshift": "Z" if "z" in parts else "",
+                           "Spectra": "S" if "spectra" in parts else "",
+                           "WISE": "W" if "wise" in parts else "",
+                           "Images": "I" if "image" in parts else ""}
+                    rec[r"$R^2$"] = "—" if pd.isna(r.r2) else f"{r.r2:.3f}"
+                    rec["Info Gain"] = "—" if pd.isna(r.info_gain_nats) else f"{r.info_gain_nats:.3f}"
+                    rec["exp(Info Gain)"] = ("—" if pd.isna(r.info_gain_nats)
+                                             else f"{np.exp(r.info_gain_nats):.3f}")
+                    recs.append(rec)
+                sub = f"n = {int(rows.iloc[0].n_test):,} test sources"
+                if head == "p2xp3_joint":
+                    sub += " · 2-D flow: R² is not defined for a joint density"
                 fig, ax = new_slide(f"Appendix: {label}", sub)
-                metric_table(ax, pd.DataFrame(table), rect=(0.10, 0.02, 0.80, 0.88), fontsize=10.5)
+                paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
+                            numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
+                                           "Info Gain": _ramp(plt.cm.Purples),
+                                           "exp(Info Gain)": _ramp(plt.cm.Greens, 0.05, 0.5)},
+                            rect=(0.06, 0.02, 0.88, 0.88), fontsize=10)
+                pdf.savefig(fig); plt.close(fig)
+
+            if args.compare_metrics and Path(args.compare_metrics).exists():
+                c = pd.read_csv(args.compare_metrics).sort_values("r2", ascending=True)
+                recs = []
+                for r in c.itertuples():
+                    parts = set(str(r.input_group).split("+"))
+                    recs.append({
+                        "Redshift": "Z" if "z" in parts else "",
+                        "Spectra": "S" if "spectra" in parts else "",
+                        "WISE": "W" if "wise" in parts else "",
+                        "Images": "I" if "image" in parts else "",
+                        r"$R^2$": f"{r.r2:.3f}",
+                        "Info Gain": f"{r.info_gain_nats:.3f}",
+                        "exp(Info Gain)": f"{r.exp_info_gain:.3f}"})
+                fig, ax = new_slide("Appendix: V_PAI, log flux (single-target)",
+                                    f"paper head trained on flux alone · n = {int(c.iloc[0].n_test):,} · same cleaned data and test split")
+                paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
+                            numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
+                                           "Info Gain": _ramp(plt.cm.Purples),
+                                           "exp(Info Gain)": _ramp(plt.cm.Greens, 0.05, 0.5)},
+                            rect=(0.10, 0.02, 0.80, 0.88), fontsize=10)
                 pdf.savefig(fig); plt.close(fig)
 
             if args.hr_csv and Path(args.hr_csv).exists():
