@@ -146,6 +146,9 @@ def main() -> None:
                         help="multi_test_metrics.csv from the V3b eval")
     parser.add_argument("--compare-metrics", type=Path, default=None,
                         help="V_PAI single-target flux table, for the appendix comparison column")
+    parser.add_argument("--baseline", action="append", default=None, metavar="LABEL=PATH",
+                        help="Extra single-target baseline table to render in the appendix; "
+                        "repeatable, e.g. --baseline 'V_simple=v1_inject_metrics.csv'")
     parser.add_argument("--hr-csv", type=Path, default=None,
                         help="hr_implied_target.csv, for the appendix hardness slide")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
@@ -374,8 +377,15 @@ def main() -> None:
                             rect=(0.06, 0.02, 0.88, 0.88), fontsize=10)
                 pdf.savefig(fig); plt.close(fig)
 
+            baselines = []
             if args.compare_metrics and Path(args.compare_metrics).exists():
-                c = pd.read_csv(args.compare_metrics).sort_values("r2", ascending=True)
+                baselines.append(("V_PAI", Path(args.compare_metrics)))
+            for spec in (args.baseline or []):
+                lbl, _, path = spec.partition("=")
+                if path and Path(path).exists():
+                    baselines.append((lbl, Path(path)))
+            for lbl, path in baselines:
+                c = pd.read_csv(path).sort_values("r2", ascending=True)
                 recs = []
                 for r in c.itertuples():
                     parts = set(str(r.input_group).split("+"))
@@ -387,8 +397,11 @@ def main() -> None:
                         r"$R^2$": f"{r.r2:.3f}",
                         "Info Gain": f"{r.info_gain_nats:.3f}",
                         "exp(Info Gain)": f"{r.exp_info_gain:.3f}"})
-                fig, ax = new_slide("Appendix: V_PAI, log flux (single-target)",
-                                    f"paper head trained on flux alone · n = {int(c.iloc[0].n_test):,} · same cleaned data and test split")
+                head_note = ("paper head" if lbl == "V_PAI" else
+                             "minimal head, 1 query and 1 layer" if lbl == "V_simple" else lbl)
+                fig, ax = new_slide(f"Appendix: {lbl}, log flux (single-target)",
+                                    f"{head_note} trained on flux alone · n = {int(c.iloc[0].n_test):,} · "
+                                    "same cleaned data and test split")
                 paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
                             numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
                                            "Info Gain": _ramp(plt.cm.Purples),
