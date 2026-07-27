@@ -171,9 +171,7 @@ def main() -> None:
         bullets(ax2, [
             "frozen AION-1 base",
             "pooled context → NSF flow",
-            "V_PAI: the paper head",
-            "V3b: read-only CLS,\n     one head per target",
-        ], fontsize=14, dy=0.16)
+        ], fontsize=15, dy=0.16)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 3 Buchner comment (screenshot only)
@@ -183,18 +181,14 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 4 NWAY cleaning
-        fig, ax = new_slide("Crossmatch cleaning with NWAY",
-                            "Salvato+2025 (A&A 704 A344): Bayesian matching of eRASS1 X-ray sources to optical counterparts")
+        fig, ax = new_slide("Crossmatch cleaning with NWAY", "Salvato+2025 (A&A 704 A344)")
         image_panel(fig, FIGS / "fig_dz_log.png", (0.04, 0.08, 0.52, 0.62))
         ax2 = fig.add_axes([0.58, 0.08, 0.40, 0.66]); ax2.axis("off")
         bullets(ax2, [
-            "in NWAY, ~95% of our sources have a\n     confirmed optical match",
-            "3.3%: z mismatch > 0.01",
-            "3.4%: no z, so no way to check",
-            "we keep only NWAY-confirmed sources",
-            "PAI performance: R² 0.549",
-            "PAI on mismatched objects: R² 0.29",
-        ], fontsize=13, dy=0.15)
+            "95% have a confirmed counterpart;\n     3.3% disagree in z, 3.4% unverifiable",
+            "we keep only the confirmed ones",
+            "R² 0.549 overall, 0.29 on the mismatches",
+        ], fontsize=14, dy=0.18)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 5 Errors
@@ -202,15 +196,14 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_split_normal.png", (0.04, 0.08, 0.55, 0.66))
         ax2 = fig.add_axes([0.62, 0.15, 0.36, 0.55]); ax2.axis("off")
         bullets(ax2, [
-            "the catalog reports the error borders;\n     in log space these are the ±1σ\n     points of the split normal",
-            "draws truncated at 1.5σ per side;\n     50 draws/step, broadcast under one\n     conditioner pass (free)",
-            "logM★ has no catalog σ →\n     class floor: 0.2 (GALAXY) / 0.3 (QSO) dex",
-            "eval: plain likelihood at observed y,\n     no σ involved",
-        ], fontsize=12.5, dy=0.17)
+            "catalog error borders are the ±1σ\n     points in log space",
+            "50 draws per step, truncated at 1.5σ",
+            "logM★ has no σ: class floor instead",
+        ], fontsize=13.5, dy=0.20)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 6 Band coverage (what is measurable at all)
-        fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632; selection is in the broad band")
+        fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632")
         band_table = pd.DataFrame([
             {"band": "broad 0.2–2.3", "measured": "100%", "detected": "100%"},
             {"band": "P1  0.2–0.6", "measured": "79%", "detected": "31%"},
@@ -221,56 +214,50 @@ def main() -> None:
         metric_table(ax, band_table, rect=(0.05, 0.30, 0.48, 0.52), fontsize=13)
         ax2 = fig.add_axes([0.60, 0.30, 0.37, 0.44]); ax2.axis("off")
         bullets(ax2, [
-            "HR32 = (P3−P2)/(P3+P2), from rates",
-            "both HR bands measured: 86%;\n     both detected: 30%",
-            "training gate: σ ≤ 1.0 per band:\n     precision, not detection",
-        ], fontsize=13, dy=0.24)
-        fig.text(0.05, 0.155,
-                 "measured: forced photometry gives a positive rate in this band\n"
-                 "detected: DET_LIKE ≥ 6, the catalog threshold (≈14% spurious at 6, 4% at ≥8; Seppi+2022)",
-                 fontsize=10.5, color=MUTED)
+            "HR32 = (P3−P2)/(P3+P2)",
+            "both bands measured 86%, detected 30%",
+            "we gate on σ, not on detection",
+        ], fontsize=13.5, dy=0.22)
+        fig.text(0.05, 0.145,
+                 "measured: forced photometry gives a positive rate.   "
+                 "detected: DET_LIKE ≥ 6, the catalog threshold.",
+                 fontsize=11, color=MUTED)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 7 V3b design
-        fig, ax = new_slide("V3b: read-only CLS, one frozen forward, 8 heads",
-                            "no token attends to a CLS: the data stream is bit-identical to frozen AION and runs without gradients")
+        fig, ax = new_slide("V3b: read-only CLS, one frozen forward",
+                            "no token attends to a CLS, so the encoder's view of the data is unchanged")
         bullets(ax, [
-            "one CLS token per target reads every block with the block's own frozen attention",
-            "shared full-rank deltas on the CLS query + consumed-value projections; capacity control = weight decay",
-            "shared MLP 768 $\\to$ 512 $\\to$ 256; sharing ends at the conditioning vectors; one flow per head",
-            "joint 2-D flow over (P2, P3) $\\to$ hardness by exact marginalization, never a trained target",
-            "losses: per-source availability masks + per-head EMA normalization",
-            "cost of 8 heads $\\approx$ 1.2$\\times$ one head: the K/V reads are shared",
-        ], fontsize=13.5, dy=0.13)
+            "one CLS per target, reading each block through its own frozen attention",
+            "shared adapters and MLP; sharing ends at the conditioning vector",
+            "a joint (P2, P3) flow gives hardness by marginalization, never trained on it",
+            "seven heads for 1.2$\\times$ the cost of one",
+        ], fontsize=15, dy=0.15)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 8 MAIN RESULT
         fig, ax = new_slide("V3b results: every target from one run",
-                            "test set, all inputs · P4 dropped (no signal) · HR32 is implied: marginalized out of the joint (P2,P3) posterior, never trained")
+                            "test set, all inputs · P4 dropped for want of signal · HR32 marginalized from the joint (P2,P3) posterior")
         image_panel(fig, FIGS / "fig_v3b_results.png", (0.03, 0.20, 0.94, 0.60))
-        fig.text(0.05, 0.155,
-                 "log flux 0.604 against V_PAI's 0.565 on the same test split.\n"
-                 "Hardness was never trained, yet still gains information: 1.12$\\times$ on well-measured "
-                 "sources,\npurely by marginalizing the joint (P2,P3) posterior.",
-                 fontsize=12, color=INK, va="top")
+        fig.text(0.05, 0.145,
+                 "Flux 0.604 against V_PAI's 0.565 on the same test split. Hardness was never trained, "
+                 "yet still gains information.",
+                 fontsize=12.5, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 9 Training diagnostics
         fig, ax = new_slide("Training diagnostics",
-                            "accumulated buckets, separate adapter learning rate · train probe = training data scored with the validation protocol")
+                            "the train probe is training data scored the way validation is, so the gap is real")
         image_panel(fig, FIGS / "fig_v3b_training.png", (0.015, 0.10, 0.97, 0.72))
-        fig.text(0.045, 0.082,
-                 "Separating the adapter learning rate moved the flows into the healthy update band "
-                 "(1.2e-4 $\\to$ 7.5e-4 per step), and logM$_*$ gained the most.\n"
-                 "The bucket panel shows the old spiky curve was input composition, not optimizer noise. "
-                 "No head dominates the shared trunk.\nOverfitting is now the binding constraint: the gap "
-                 "reaches 0.16 nats, so early stopping fires at epoch 22.",
+        fig.text(0.045, 0.075,
+                 "The spiky training curve was input composition, not optimizer noise. No head dominates "
+                 "the shared trunk.\nOverfitting is now the binding constraint.",
                  fontsize=11.5, color=INK, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 10 vs the paper architecture
         fig, ax = new_slide("Against the paper architecture",
-                            "V_PAI trained on the same cleaned data and scored on the same test split · the published 0.549 used the noisy split and is not row-comparable")
+                            "same cleaned data, same test split")
         cmp = pd.DataFrame([
             {"": "V_PAI (paper head)", "targets": "1 (flux)", "runs": "1", "flux R²": "0.565"},
             {"": "V3b multi-head", "targets": "6 + hardness", "runs": "1", "flux R²": "0.604"},
@@ -278,60 +265,53 @@ def main() -> None:
         metric_table(ax, cmp, rect=(0.04, 0.46, 0.62, 0.34), fontsize=13)
         ax2 = fig.add_axes([0.70, 0.42, 0.28, 0.38]); ax2.axis("off")
         bullets(ax2, [
-            "better flux, and every\n     other target for free",
-            "one run replaces six",
-            "the encoder never moves;\n     only the readers learn",
-        ], fontsize=13, dy=0.28)
+            "better flux, every other\n     target for free",
+            "the encoder never moves",
+        ], fontsize=14, dy=0.30)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 11 Modality Shapley
         if (FIGS / "fig_modality_shapley.png").exists():
-            fig, ax = new_slide("Information by input type",
-                                "exact Shapley over the 4 inputs, from the 16-coalition test tables")
+            fig, ax = new_slide("Information by input type", "exact Shapley over the four inputs")
             image_panel(fig, FIGS / "fig_modality_shapley.png", (0.08, 0.08, 0.84, 0.72))
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 12 Pairwise interactions
         if (FIGS / "fig_modality_interactions.png").exists():
-            fig, ax = new_slide("Input-type interactions",
-                                "exact pairwise Shapley interaction index of info gain, same 16 coalitions")
+            fig, ax = new_slide("Input-type interactions", "negative is redundant, positive is synergistic")
             image_panel(fig, FIGS / "fig_modality_interactions.png", (0.16, 0.05, 0.60, 0.75))
             ax2 = fig.add_axes([0.76, 0.15, 0.23, 0.55]); ax2.axis("off")
             bullets(ax2, [
-                "L$_X$: spectra + z redundant\n   (spectrum carries z)",
-                "logM$_*$: spectra + WISE\n   synergistic",
-                "flux: mild redundancy\n   everywhere",
-            ], fontsize=12, dy=0.28)
+                "L$_X$: spectra and z are\n   redundant",
+                "logM$_*$: spectra and WISE\n   are synergistic",
+            ], fontsize=13, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 13 Line coverage
-        fig, ax = new_slide("Emission-line coverage",
-                            "each spectrum covers 3600-9824 A observed; in rest frame that window slides with z")
+        fig, ax = new_slide("Emission-line coverage", "the observed window slides in rest frame as z grows")
         image_panel(fig, FIGS / "fig_line_coverage.png", (0.05, 0.06, 0.90, 0.74))
         pdf.savefig(fig); plt.close(fig)
 
         # ---- 14 Line/continuum Shapley
         if (FIGS / "fig_shapley_heatmap.png").exists():
             fig, ax = new_slide("Where in the spectrum is the flux information?",
-                                "line/continuum Shapley, AION-native token dropping (guard band from measured codec receptive field)")
+                                "Shapley values over line and continuum regions, dropping tokens the way AION was pretrained")
             image_panel(fig, FIGS / "fig_shapley_heatmap.png", (0.03, 0.42, 0.94, 0.40))
             image_panel(fig, FIGS / "fig_shapley_lines.png", (0.16, 0.01, 0.48, 0.40))
             ax2 = fig.add_axes([0.68, 0.06, 0.30, 0.32]); ax2.axis("off")
             bullets(ax2, [
                 "Balmer lines dominate",
-                "Hbeta+[OIII] merged: one player\n   (4959 doublet inseparable)",
-                "line vs continuum split under\n   re-measurement (guard audit)",
-            ], fontsize=12, dy=0.30)
+                "H$\\beta$ and [O III] are inseparable,\n   so they count as one",
+            ], fontsize=13, dy=0.30)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- 15 Efficiency (concise)
-        fig, ax = new_slide("Efficiency", "GPU wall-time is the entire fairshare cost (A100 = 836 CPU-core-equivalents)")
+        fig, ax = new_slide("Efficiency", "GPU wall-time is the whole cost")
         bullets(ax, [
-            "batches sized at the measured throughput knee, not at the memory limit",
-            "combos packed by token length: 4 buckets, padding $\\leq$ 1.5%",
-            "50 noise draws per step, broadcast under one conditioner pass: free",
-            "8 targets in 3 GPU-hours, where 6 separate runs cost ~9",
-        ], fontsize=15, dy=0.15)
+            "batches sized at the measured throughput knee, not the memory limit",
+            "inputs packed by token length: four buckets, under 1.5% padding",
+            "every target in 4 GPU-hours, where separate runs cost nine",
+        ], fontsize=16, dy=0.16)
         pdf.savefig(fig); plt.close(fig)
 
         # ---- Appendix: full per-target tables, every input combination
@@ -341,12 +321,9 @@ def main() -> None:
             if args.compare_metrics and Path(args.compare_metrics).exists():
                 c = pd.read_csv(args.compare_metrics)
                 cmp_r2 = {marker(r.input_group): float(r.r2) for r in c.itertuples()}
-            fig, ax = new_slide("Appendix", "every target, every input combination")
-            bullets(ax, [
-                "first the single-target baselines on flux: V_PAI (paper head) and V_simple (minimal head)",
-                "then one slide per multi-target head; rows are the 15 input combinations",
-                "inputs: S spectra, Z redshift, W WISE, I image; all on the same cleaned data and test split",
-            ], fontsize=14.5, dy=0.15)
+            fig, ax = new_slide("Appendix",
+                                "single-target baselines first, then every multi-target head · "
+                                "S spectra, Z redshift, W WISE, I image")
             pdf.savefig(fig); plt.close(fig)
 
             baselines = []
@@ -372,8 +349,7 @@ def main() -> None:
                 head_note = ("paper head" if lbl == "V_PAI" else
                              "minimal head, 1 query and 1 layer" if lbl == "V_simple" else lbl)
                 fig, ax = new_slide(f"Appendix: {lbl}, log flux (single-target)",
-                                    f"{head_note} trained on flux alone · n = {int(c.iloc[0].n_test):,} · "
-                                    "same cleaned data and test split")
+                                    f"{head_note}, flux only · n = {int(c.iloc[0].n_test):,}")
                 paper_table(ax, pd.DataFrame(recs), indicator_cols=4,
                             numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
                                            "Info Gain": _ramp(plt.cm.Purples),
@@ -424,23 +400,21 @@ def main() -> None:
                                  "exp(IG)": f"{np.exp(d.info_gain.mean()):.2f}",
                                  "68% half-width": f"{np.median(0.5*(d.hr_p84-d.hr_p16)):.3f}"})
                 if rows:
-                    fig, ax = new_slide("Appendix: HR32, implied",
-                                        "marginalized from the joint (P2,P3) posterior by quadrature · never a trained target")
+                    fig, ax = new_slide("Appendix: HR32, implied", "marginalized from the joint (P2,P3) posterior")
                     metric_table(ax, pd.DataFrame(rows), rect=(0.06, 0.42, 0.88, 0.34), fontsize=12)
                     bullets(ax, [
-                        "R² stays near zero: the posterior is narrower than the noisy measured values",
-                        "the information gain is real, and it comes from a head that was never trained on hardness",
-                    ], y=0.30, fontsize=12.5, dy=0.10)
+                        "R² near zero: the posterior is narrower than the noisy measurements",
+                        "the information gain is real, from a head never trained on hardness",
+                    ], y=0.30, fontsize=13, dy=0.10)
                     pdf.savefig(fig); plt.close(fig)
 
         # ---- 16 Next
         fig, ax = new_slide("Next")
         bullets(ax, [
-            "training regime: per-head schedules, shorter run (see diagnostics)",
-            "hardness IG by exact marginalization of the joint posterior",
-            "band-σ inflation probes; Shapley guard audit",
-            "predictions for X-ray non-detections (Buchner's test)",
-        ], fontsize=17, dy=0.14)
+            "regularize: overfitting is now the binding constraint",
+            "per-head schedules, since the heads converge at very different times",
+            "predictions for X-ray non-detections",
+        ], fontsize=17, dy=0.15)
         pdf.savefig(fig); plt.close(fig)
 
     print(f"wrote {args.output}")
