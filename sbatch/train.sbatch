@@ -23,7 +23,7 @@ source scripts/fasrc_env.sh
 
 HEAD_ARGS="${HEAD_ARGS---num-queries 1 --num-layers 1 --context-hidden 128}"
 TARGET="${TARGET:-log_ml_flux_1}"
-ERROR_MODE="${ERROR_MODE:-convolve}"
+ERROR_MODE="${ERROR_MODE:-none}"   # p(y|x); pass ERROR_MODE=inject for the adopted training mode
 STAGED_DIR="${STAGED_DIR:-$AIONFLOW_STAGED}"
 # Cleaned re-split view over the superset; set CLEAN_SPLIT_CSV="" for native (paper) splits.
 CLEAN_SPLIT_CSV="${CLEAN_SPLIT_CSV-$AIONFLOW_DATA/clean_split.csv}"

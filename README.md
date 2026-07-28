@@ -67,6 +67,16 @@ redshift, while WISE and redshift become more informative at high redshift:
   <img src="results/performance_by_redshift.png" width="600" alt="Predictive performance as a function of redshift for different input combinations.">
 </p>
 
+### Work since the paper
+
+The numbers above are the published ones, on the original 5″ crossmatch. Current work runs on an
+NWAY-cleaned sample and predicts several targets at once from a single frozen-encoder pass. Headline
+test numbers (n = 2,520, all four inputs): log flux **0.604**, log L$_X$ **0.919**, log M★ **0.744**,
+band fluxes P1/P2/P3 0.364/0.404/0.406, and a hardness posterior marginalized from a joint (P2,P3)
+flow. See [`docs/decisions.md`](docs/decisions.md) for the run registry and the reasoning behind each
+choice.
+
+
 ## Architecture
 
 <p align="center">
@@ -94,12 +104,19 @@ erosita-desi-aion-flow/
 ├── shareable_aion_flow/
 │   ├── attention_pooling_head.py   # q4/l2 attention-pooling head (ModalityAffine, queries, blocks)
 │   ├── normalizing_flow.py         # conditional Zuko NSF + KDE prior + target standardizer
-│   ├── data_to_aion_embeddings.py  # data staging, AION tokenizer, dataloaders
+│   ├── data_to_aion_embeddings.py  # data staging, AION tokenizer, read-only CLS, dataloaders
+│   ├── multitarget.py              # multi-head training: shared CLS trunk, one flow per target
+│   ├── line_shapley.py             # spectrum-token player catalog + Shapley/Owen sweeps
 │   ├── evals.py                    # posterior metrics + readable results table
-│   ├── main.py                     # CLI: prepare-data / train / eval / make-table
+│   ├── main.py                     # CLI: prepare-data / train / train-multi / eval / make-table
 │   ├── tests/                      # lightweight unit tests
 │   └── data/manifests/             # train/val/test split + target coordinates
+├── scripts/                        # eval, Shapley, HR marginalization, FASRC staging + submit
+├── sbatch/                         # SLURM job templates
 ├── docs/DATA.md                    # how to obtain the (public) data
+├── docs/decisions.md               # running log: data, targets, errors, architecture, run registry
+├── docs/pipeline.md                # end-to-end pipeline walkthrough
+├── docs/build_deck.sh              # rebuild slides.pdf + results.html from an eval directory
 ├── results/                        # paper results table + figures + metrics CSVs
 ├── assets/                         # README figures
 ├── .github/workflows/test.yml      # CI: run the test suite on push / PR

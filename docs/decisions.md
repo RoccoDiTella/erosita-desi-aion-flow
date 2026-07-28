@@ -68,7 +68,8 @@ view ≡ the previously materialized version (verified targetid-exact).
 | `log_ml_flux_1` | log10(ML_FLUX_1) — broad band 0.2–2.3 keV | eRASS1 `ML_FLUX_1` |
 | `log_lx` | log10(4π D_L(z)² · ML_FLUX_1), Planck18 D_L | + DESI `z` |
 | `hr32_u` | arctanh-space hardness, see below | eRASS1 `ML_RATE_P2/P3` |
-| `logmstar` | LS photometric stellar mass (VAC) | DESI VAC `logmstar` |
+| `logmstar` | stellar mass, h=1.0 Chabrier IMF — this is **FastSpecFit's** LOGMSTAR, reaching us via the `agngal` VAC | DESI VAC `logmstar` |
+| `log_sfr` | log10 SFR averaged over 10 Myr, Chabrier IMF — **CIGALE**, a different SED fit than logmstar (deliberately; see 2026-07-28) | DESI DR1 CIGALE VAC `LOGSFR` |
 
 **HR32, specifically** (all verified to ≤2e-15 on 30,375 rows):
 - Bands: **P2 = 0.6–2.3 keV (soft), P3 = 2.3–5.0 keV (hard)** count rates.
@@ -267,6 +268,16 @@ All runs: wandb project `erosita-desi-aion-flow`; outputs under
 | `v1-clean-none-logmstar-34185562` | V_simple, none (no real σ) | clean view | 15 | **0.648** (S-only 0.383, S+W 0.561 — WISE is the big adder) | 2.98 (IG +1.090) | ✅ done |
 | `v1-spec-mask-log_ml_flux_1-34193770` | V_simple, none, spectra-only + token-mask augment | clean view | 12 | spectra-only 0.529 (vs 0.541 unmasked full model → surrogate faithful, augment costs ~0.01) | 1.34 | ✅ done (Shapley surrogate) |
 | shapley sweeps 34193771 | 2 full + 4 line(Owen) sweeps | test view | | 7 lines Σφ 0.007 nats vs continuum 0.070; MgII top line | | ✅ done (33 min) |
+| `band-p1-34629507` | V_simple, inject(8), σ≤1.0 | clean view (n_test 1,976) | 15 | 0.320 | 1.15 | ✅ done |
+| `band-p2-34629508` | V_simple, inject(8), σ≤1.0 | clean view (n_test 2,372) | 15 | **0.380** | 1.17 | ✅ done |
+| `band-p3-34629519` | V_simple, inject(8), σ≤1.0 | clean view (n_test 2,310) | 15 | 0.378 | 1.14 | ✅ done |
+| `band-p4-34629535` | V_simple, inject(8), σ≤1.0 | clean view (n_test 1,176) | 15 | 0.071 (no signal → dropped from V3) | 0.94 | ✅ done |
+| `v3-cls-34356743` | **V3a**: LoRA r8 all blocks + trainable CLS, bs 128 + ckpt | clean view | 15 | 0.575 flux (tie with frozen V_simple) | 1.32 | ✅ done, not pursued |
+| `multi-35073203` | **V3b** read-only CLS, 7 heads, accumulated buckets, shared LR | clean view | 20 | flux 0.603 / Lx 0.917 / logM★ 0.731 | — | ✅ done (diagnostics run) |
+| `multi-35416432` | **V3b** + separated adapter LR (1e-4), β₁ 0.95 | clean view | 30 (early stop 22, 4.05 h) | **flux 0.604 · Lx 0.919 · logM★ 0.744 · P1 0.364 · P2 0.404 · P3 0.406** | 1.35 / 3.28 / 3.92 | ✅ **current best** |
+| shapley 34345374 | 13-line catalog, drop-mode | test view | | Hα 64.0 > Hβ 36.8 > OIII 27.6 mnats | | ✅ done (1h22) |
+| shapley 34672894 | v4, merged Hβ+OIII player, guard 10 | test view | | merge 48.5; guard 10 caused dilation artifacts | | ⚠️ superseded |
+| shapley 35483424 | 12 redshift bins, pinned guard | test view | | — | | ⏳ to harvest |
 | paper reproduction | q4/l2, none | noisy, paper split | 50 | *deferred* | | planned |
 
 **Queue decision (2026-07-21):** compare **V1 vs paper head, everything else
@@ -654,3 +665,93 @@ encoder toward joint context at the cost of marginal encodings. Read: the
 frozen AION representation is not the bottleneck at this sample size; caveats
 (15 epochs is short for a fine-tune, one warmup epoch, single LR config) noted
 but not compelling enough to iterate further now. V_simple stays the workhorse.
+
+**Deck restructure (2026-07-27).** `docs/slides.pdf` is 21 slides, built by
+`docs/build_deck.sh`. Order: framing (title, architecture, Buchner, NWAY,
+errors, band coverage) -> validation loss -> the per-target tables in the
+paper's format (V_PAI and V_simple first, then the six heads and implied HR)
+-> V3b summary -> modality Shapley -> spectral Shapley. Removed: every
+text-only slide, the "against the paper architecture" slide, the P2xP3 joint
+table (the joint head is only a means to HR, its NLL is not comparable to the
+scalar heads), and the bullet annotations on the Shapley slides.
+`fig_loss_curves.png` gives each head its own y-axis: on a shared axis all
+seven curves collapse into one band. Per-head reading at 30 epochs: P1 never
+learns (oscillates in a 0.07-nat band), P2 and P3 are still descending, flux
+and Lx are flat from ~epoch 15.
+
+**Defaults aligned with the estimand (2026-07-27).** `--error-mode` had still
+defaulted to `convolve` in `main.py` and to `ERROR_MODE=convolve` in both
+`sbatch/train.sbatch` and `sbatch/train_smoke.sbatch`, six days after convolve
+was demoted to a latent-analysis tool. Every run in the registry passed the mode
+explicitly, so no result is affected, but a launch that forgot the variable would
+silently have trained through the kernel. All three now default to **`none`**,
+the primary estimand p(y|x) and the mode eval already scores in; `inject` (the
+adopted training mode, with `--inject-samples 8`) stays an explicit opt-in, which
+is right since it needs per-source sigmas that some targets lack (logM* has none).
+
+**SFR added as a 9th head, from CIGALE not FastSpecFit (2026-07-28, user
+request: "what we should be predicting is star formation rate").**
+
+*Why SFR is not a relabel of stellar mass.* Measured on the only subset where an
+SFR can be derived independently of any stellar-mass fit (BPT star-forming,
+Balmer-decrement-corrected Halpha, Kennicutt & Evans 2012, n=536): corr(logM*,
+logSFR) = +0.543, so **logM* explains 29.5% of logSFR variance and 70.5% is
+orthogonal to mass**. Fitted slope 0.476 (shallower than the canonical main
+sequence, expected for X-ray-selected AGN hosts); log sSFR spread 0.906 dex.
+Treat as an order of magnitude, not a main-sequence measurement.
+
+*Why not FastSpecFit.* Our `logmstar` IS FastSpecFit's LOGMSTAR: it arrives via
+the DESI DR1 `agngal` VAC, whose column description is verbatim FastSpecFit's
+("Logarithmic stellar mass (h=1.0, Chabrier+2003 initial mass function)"), and
+whose `z` is "Redshift from the FastSpecFit catalog". FastSpecFit's SFR comes out
+of the SAME stellar-continuum fit, so it shares that fit's priors and
+degeneracies -- an SFR head trained on it could score well by re-predicting mass.
+FastSpecFit is also 79 GB (43 GB main-dark + 27 GB main-bright to cover our 94%).
+
+*What we used.* The DR1 **CIGALE** VAC (Siudek+2024, `IronPhysProp_v1.2.fits`,
+7.3 GB, 17,149,172 rows), fetched from the public S3 bucket `desidata` (the
+documented `data.desi.lbl.gov/public/` root 404s from here; Astro Data Lab's
+`desi_dr1` schema hosts `agngal` and `emfit` but NOT fastspecfit). CIGALE is an
+independent SED fit, reports `LOGSFR`/`LOGSFR_ERR` already in log space (no
+linear->log propagation, no SFR<=0 censoring), and fits an explicit AGN component
+(`AGNFRAC`) -- which matters at 87% QSO. 26,506 of our 26,632 match (99.5%).
+
+*Join verified before trusting anything*: CIGALE Z agrees with our z to <1e-3 on
+**99.44%** of rows and spectype agrees on 99.88%, so the row match is right and
+any disagreement below is astrophysical, not a bad join.
+
+*Cuts (`scripts/make_sfr_sidecar.py`).* Failed fits are written as EXACTLY zero
+in both LOGM and LOGSFR **and carry a small LOGSFR_ERR (0.02)**, so an error gate
+alone admits them as spurious "log SFR = 0" labels -- 524 of ours. Dropped
+explicitly, with the -99 sentinels (25). `FLAG_MASSPDF`/`FLAG_SFRPDF` are NOT
+booleans: they are best-fit/Bayesian ratios running to ~1e11, and Siudek+2024
+recommend keeping 1/5 < ratio < 5 (drops 5,943). Plus err > 1.0 dex (2,268).
+**Survivors: 18,295 of 26,632 (68.7%)** -- GALAXY 1,911/3,462, QSO 16,384/23,044.
+log SFR p5/50/95 = 0.88/2.04/3.20, median error 0.235 dex.
+
+*The honest caveat.* Cross-checking the two independent stellar masses on the
+surviving rows: corr(CIGALE, FastSpecFit) = **+0.764 for GALAXY but only +0.297
+for QSO** (scatter 0.403 vs 0.857 dex). Against the independent Halpha SFR,
+CIGALE gives corr +0.396 (+0.487 at AGNFRAC<0.3) with ~1-2 dex scatter; against
+PROVABGS (n=114) corr +0.428. So the SFR label is sound for the galaxy minority
+and weak for the QSO majority. It is a masked head, `cigale_spectype` and
+`cigale_agnfrac` ride along in the sidecar, and results MUST be reported
+per-spectype rather than as a single number.
+
+*Guard against the degeneracy.* `scripts/eval_multitarget.py` now scores the SFR
+head against two mass-only baselines on the same test rows -- the main sequence
+fitted on train and applied through (a) the TRUE logmstar, the ceiling for any
+mass-only predictor, and (b) the model's PREDICTED logmstar. The head must beat
+both, or it is re-predicting stellar mass. Written to `sfr_vs_mass_baseline.csv`.
+
+*Plumbing.* `log_sfr` is APPENDED to `MULTI_TARGETS` (never inserted -- the flows
+are positionally indexed, so inserting renumbers every checkpoint). Sidecar
+columns merge into `targets_sidecar.csv` (26,632 rows, 22 cols, 9.0 MB), which
+replaces `targets_bands.csv` as `--extra-targets-csv`; the loader needed no
+change. Old checkpoints stay loadable via the new
+`configure_heads_from_config()`, which derives the head set from the
+checkpoint's stored `heads` list rather than `drop_heads` alone. 65 tests green.
+
+*Rejected: PROVABGS.* Held locally with full 100-sample MCMC posteriors, but it
+overlaps our sample by only 114 sources (0.43%) -- it is BGS (bright, low-z) and
+we are QSO-dominated at median z=0.86. Kept as a calibration set only.

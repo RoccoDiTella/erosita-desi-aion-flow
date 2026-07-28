@@ -74,27 +74,28 @@ Frozen **AION-base** tokenizer + backbone → per-modality token sequences (`spe
 ## 8. Key findings so far
 - Naive 5″ match is **~8% wrong** per NWAY; the paper's q4/l2 model is **~2× worse on the mismatches (R² 0.29 vs 0.57)**; dropping them lifts test R² from the published **0.549 → 0.567** (no retraining).
 - X-ray targets are measurement-noise-dominated (flux σ≈0.17 dex; HR σ≈its own spread) → uncertainty handling is essential.
+- **Hardness is not learnable at eRASS1 depth**: Var(u) < E[σ_u²] at every S/N gate, including both-detected. It survives only as an *implied* target, marginalized from a joint (P2,P3) flow.
+- **The frozen AION representation is not the bottleneck**: a LoRA fine-tune (V3a) ties with the frozen encoder; a read-only CLS that leaves the data stream untouched (V3b) is what wins.
+- Faint-band σ's in the eRASS1 catalog are systematically **overestimated** — P1 and P3 land far above their σ-derived R² ceilings, so those ceilings are lower bounds.
 
 ## 9. Status
-- ✅ Repo cloned; V1 head coded+tested; FASRC scaffolding + **verify-before-push staging scripts** (`scripts/fasrc_preflight.sh`, `scripts/fasrc_stage_data.sh`).
-- ✅ Sidecars built: `data/match_quality.csv` (clean filter), `data/targets_extra.csv` (targets + split-normal/arctanh errors).
-- ✅ **Error-aware flow** implemented + tested (`split_normal_log_kernel`, `convolve_logprob`, `ConditionalNSFFlow.log_prob_convolved`; 14/14 tests, recovers analytic Gaussian convolution).
-- ✅ **Clean → dedup → re-split** implemented + tested (`build_clean_manifest`; 25,200 clean rows, exact 80/10/10, leakage-safe, deterministic).
-- ✅ **Full wiring done + validated locally**: `prepare-data --clean` cleans/dedups/re-splits + writes extra target & error columns; `AIONHDF5Dataset` emits per-source σ (10-tuple); `main.py` `--target {…,logmstar,hr32_u} / --error-mode {none,inject,convolve} / --clean`; `batch_nll` uses `log_prob_convolved`. 14/14 tests; a real `prepare-data --clean --limit 12` produced correct columns.
-- ✅ **FASRC ready**: 17 GB data staged + `fits_pool` unzipped (10,355 cutouts); conda env built and verified (torch 2.6.0+cu124, aion, zuko all import); repo is a real git clone of `multitarget-clean-errors`; account `finkbeiner_lab` confirmed via `sbatch --test-only`.
-- ✅ **W&B tracking** wired into `train` (opt-in `--wandb`, offline-safe, no-op if absent). First live run confirmed end-to-end on `gpu_test`.
-- ✅ **Staged-data validation** (`scripts/validate_staged.py` + 13 tests + `sbatch/validate_staged.sbatch`), wired as a hard gate in `train.sbatch`: schema, row-count alignment, dedup/leakage/split-fractions, NWAY clean filter, σ positivity & coverage, value ranges, fits coverage, and the dataloader 10-tuple contract.
-- ⚠️ **Caught by that validation:** the `fits_pool` unzip had been interrupted (10,355 of 27,373 cutouts on disk). Because staging drops any object lacking a cutout, the first full run staged **9,592 rows instead of ~22k** with no error. Fixed (count-based unzip idempotency + a coverage check that fails above 20% loss); re-staging.
-- ✅ **One canonical staged copy** (`staged_paper`, 30,762 rows = the paper layout incl. its 3,389 duplicate rows; test = 3,054 rows **exactly matching the published table's n_test**) + the cleaned configuration as a **runtime view** (`clean_split.csv`, 25,200 targetids; verified EXACT vs the materialized version, which was then deleted). Superset validation: 103 passed / 0 failed; its extreme values (log_lx=48.07 at z=4.71, logmstar<5) are all NWAY-rejected wrong matches — independent confirmation the clean filter cuts exactly the garbage.
-- ✅ Smokes (plumbing only, 21 effective steps each): V1-clean-convolve R²=0.29; paper-head repro R²≈0.02 (big head needs real training). Both end-to-end incl. wandb + 15-combo eval.
-- ✅ **First results (2026-07-21), log flux on cleaned data, 15 epochs each:**
-  - V1 + convolve: **all-inputs R² 0.569** (best combo S+z+I 0.572), exp(IG) 1.23 — above published 0.549, at the paper-on-clean anchor 0.567, with the 2×-smaller head.
-  - paper q4/l2 + convolve: R² 0.555, exp(IG) 1.24 — **head A/B ≈ a 1σ wash → V1 adopted for the sweep.**
-  - Modality ordering reproduces the paper; QSO R² 0.60 vs GALAXY 0.40; signal concentrated at z<0.7; σ-stratified calibration shows precise-source overconfidence (candidate: AGN-variability floor) — details in `decisions.md`.
-- ▶ **Running now:** the same A/B under **`--error-mode inject` (multi-draw, k=8)** — the adopted operating mode (observation-space p(y|x), errors used as per-source label smearing; convolve demoted to optional latent tool). Jobs 34146030 (V1) / 34150667 (paper head).
-- ⏳ Then: per-target sweep (log_lx, logmstar, hr32_u) with V1+inject; **paper-table reproduction** (q4/l2, none, native splits, 50 ep) deferred; token cache (~185 GB, 5–15×) before any big sweep; `siag_gpu` once siag_lab membership lands; p(t|x)-deployment design memo out with a research agent (noise curves / p(σ|x) / Poisson forward model).
-- ⚠️ `siag_lab` membership pending (Coldfront) → `siag_gpu` invisible for now; using `gpu_test` (smokes) / `gpu` (real runs) under `finkbeiner_lab`.
-- Known refinement: `hr32_u` piles at the arctanh clip for low-S/N HR (huge σ) — fine for flux/lx/logmstar; the HR run wants an S/N gate/clip.
+Current best is the V3 multi-target run (job 35416432, 30 ep / 4 h): one frozen-encoder
+pass, seven heads, test all-inputs **flux 0.604 · Lx 0.919 · logM★ 0.744 · P1 0.364 ·
+P2 0.404 · P3 0.406**, plus a hardness posterior marginalized from the joint head. It
+beats every specialized single-target baseline it replaces. The binding constraint is now
+**overfitting** (train-probe gap 0.157 nats), not learning rate or capacity.
+
+Per-run detail, the full registry, and the reasoning behind each choice live in
+[`decisions.md`](decisions.md) — that is the source of truth for results. Presentation
+artifacts: `bash docs/build_deck.sh <eval-dir> <vpai-csv> <vsimple-csv> [histories]`.
+
+Open: harvest the 12-bin Shapley sweep; per-head LR schedules (convergence is very uneven —
+P1 never learns, P2/P3 still descending at 30 epochs); the σ-inflation probes; eval-side
+codec reuse; censored band-rate likelihood; the Buchner non-detection test.
 
 ## 10. Deferred / out of scope
-SFR (needs DESI FastSpecFit VAC), Γ (=HR relabel), X-ray upper-limit censoring, full Salvato re-crossmatch of "the rest", V2 self-trained encoder, saliency/attribution.
+Γ (=HR relabel), X-ray upper-limit censoring, full Salvato re-crossmatch of "the rest",
+V2 self-trained encoder, 50-epoch paper reproduction. (**SFR landed 2026-07-28** as a
+9th head from the DR1 CIGALE VAC — see `decisions.md`. Still open there: the joint
+(logM★, logSFR) flow that would give sSFR as an implied target by the same exact
+marginalization used for HR.)
