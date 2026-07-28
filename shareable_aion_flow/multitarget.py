@@ -1,8 +1,11 @@
-"""Multi-target read-only-CLS training: 8 heads, one frozen forward.
+"""Multi-target read-only-CLS training: 9 heads, one frozen forward.
 
-Heads: flux, Lx, logmstar, p1..p4 band fluxes (runtime sidecar) as 1-D flows,
-plus a JOINT 2-D flow over (P2, P3) whose samples give per-source hardness
-posteriors with correlated band errors (HR itself is never a direct target). Architecture: per-target CLS
+Heads: flux, Lx, logmstar, p1..p4 band fluxes and log SFR (runtime sidecar) as
+1-D flows, plus a JOINT 2-D flow over (P2, P3) whose samples give per-source
+hardness posteriors with correlated band errors (HR itself is never a direct
+target). SFR is a genuinely separate target from stellar mass: on the subset
+where an independent Halpha SFR can be derived, log M* explains only ~30% of
+log SFR variance. Architecture: per-target CLS
 vectors + SHARED per-block Q/V read adapters (data stream frozen, no_grad),
 one SHARED 768->512->256 MLP over the stacked CLS states, one small NSF flow
 per target. Joint loss: per-target NLL on standardized values, split-normal
@@ -35,10 +38,15 @@ MULTI_TARGETS: list[dict] = [
     {"name": "log_flux_p2", "sig": ("log_flux_p2_sig_lo", "log_flux_p2_sig_hi"), "max_sigma": 1.0, "sidecar": True},
     {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": 1.0, "sidecar": True},
     {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": 1.0, "sidecar": True},
+    # APPENDED, never inserted: the flows are indexed positionally, so adding a
+    # head anywhere but the end silently renumbers every existing checkpoint.
+    # log SFR comes from the CIGALE VAC, a DIFFERENT SED fit than the one that
+    # produced logmstar -- see scripts/make_sfr_sidecar.py for why that matters.
+    {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": 1.0, "sidecar": True},
 ]
 _ALL_TARGETS = list(MULTI_TARGETS)
-N_TARGETS = len(MULTI_TARGETS)          # scalar heads (P4 droppable)
-JOINT_PAIR = ("log_flux_p2", "log_flux_p3")  # 8th head: joint 2-D flow for HR
+N_TARGETS = len(MULTI_TARGETS)          # scalar heads (P4 and log_sfr droppable)
+JOINT_PAIR = ("log_flux_p2", "log_flux_p3")  # joint 2-D flow for HR
 JOINT_IDX = tuple(next(j for j, t in enumerate(MULTI_TARGETS) if t["name"] == n) for n in JOINT_PAIR)
 N_HEADS = N_TARGETS + 1
 HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
@@ -60,6 +68,26 @@ def configure_heads(drop: tuple[str, ...] = ()) -> None:
                       for n in JOINT_PAIR)
     N_HEADS = N_TARGETS + 1
     HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
+
+
+def configure_heads_from_config(config: dict | None) -> None:
+    """Rebind the head set to match a CHECKPOINT, not the current default list.
+
+    Checkpoints store the head names they were trained with. Reading `drop_heads`
+    alone is not enough: when a new head is appended to MULTI_TARGETS (log_sfr
+    was, after the band runs), an older checkpoint has fewer flows than the
+    current default and would fail to load with a shape mismatch. Deriving the
+    drop set from the stored `heads` list keeps every earlier checkpoint
+    loadable without hand-passing --drop-heads.
+    """
+    config = config or {}
+    stored = config.get("heads")
+    if stored:
+        keep = {h for h in stored if h != "p2xp3_joint"}
+        drop = tuple(t["name"] for t in _ALL_TARGETS if t["name"] not in keep)
+    else:                                    # pre-`heads` checkpoints
+        drop = tuple(config.get("drop_heads", ()) or ())
+    configure_heads(drop)
 
 
 def load_multi_target_matrix(

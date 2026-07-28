@@ -52,7 +52,7 @@ def main() -> None:
     # constants before building anything, since module-level imports captured
     # the default set at import time.
     import shareable_aion_flow.multitarget as _mt
-    _mt.configure_heads(tuple(ckpt.get("config", {}).get("drop_heads", ()) or ()))
+    _mt.configure_heads_from_config(ckpt.get("config", {}))
     HEAD_NAMES, N_HEADS, N_TARGETS, JOINT_IDX = _mt.HEAD_NAMES, _mt.N_HEADS, _mt.N_TARGETS, _mt.JOINT_IDX
     print(f"[eval] heads: {HEAD_NAMES}", flush=True)
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
@@ -84,12 +84,14 @@ def main() -> None:
     out_dir.mkdir(exist_ok=True)
     combos = all_nonempty_modality_combos()
     rows = []
+    allin_pred: dict = {}
     hr_records = []
 
     with torch.no_grad():
         for combo in combos:
             name = "+".join(m for m in MODALITIES if m in combo)
-            acc = {j: {"nll": 0.0, "plp": 0.0, "n": 0, "pred": [], "true": []} for j in range(N_TARGETS)}
+            acc = {j: {"nll": 0.0, "plp": 0.0, "n": 0, "pred": [], "true": [], "tid": []}
+                   for j in range(N_TARGETS)}
             jacc = {"nll": 0.0, "n": 0}
             for batch in test_loader:
                 batch = tuple(t.to(device, non_blocking=True) for t in batch)
@@ -110,6 +112,7 @@ def main() -> None:
                     acc[j]["n"] += m
                     acc[j]["pred"].append(samp.mean(dim=0).cpu().numpy())
                     acc[j]["true"].append(ys.cpu().numpy())
+                    acc[j]["tid"].append(batch[7][mask].cpu().numpy())
                 # joint head
                 j2, j3 = JOINT_IDX
                 jm = torch.isfinite(y[:, j2]) & torch.isfinite(y[:, j3])
@@ -146,12 +149,60 @@ def main() -> None:
                 rows.append({"head": "p2xp3_joint", "input_group": name, "n_test": jacc["n"],
                              "nll": jacc["nll"] / jacc["n"], "r2": np.nan, "rmse_dex": np.nan,
                              "info_gain_nats": np.nan})
+            if name == "spectra+z+wise+image":
+                allin_pred = {
+                    HEAD_NAMES[j]: pd.DataFrame({
+                        "targetid": np.concatenate(acc[j]["tid"]),
+                        "pred": np.concatenate(acc[j]["pred"]) * standardizers[j].std + standardizers[j].mean,
+                        "true": np.concatenate(acc[j]["true"]) * standardizers[j].std + standardizers[j].mean,
+                    })
+                    for j in range(N_TARGETS) if acc[j]["n"]
+                }
             print(f"[eval] combo {name} done", flush=True)
 
     table = pd.DataFrame(rows)
     table.to_csv(out_dir / "multi_test_metrics.csv", index=False)
     allin = table[table.input_group == "spectra+z+wise+image"]
     print(allin.to_string(index=False))
+
+    # ---- is the SFR head doing anything a stellar-mass predictor could not? ----
+    # SFR correlates with M* through the star-forming main sequence, so a head
+    # that merely re-predicted logmstar would still post a respectable SFR R2.
+    # Two reference points, both scored on the same test rows as the head:
+    #   true-M*  : the ceiling for ANY mass-only predictor (uses the real mass)
+    #   pred-M*  : what this model could achieve by routing its mass head's
+    #              output through the main sequence
+    # The SFR head has to beat both to be measuring star formation.
+    if "log_sfr" in allin_pred and "logmstar" in allin_pred:
+        sfr_df, m_df = allin_pred["log_sfr"], allin_pred["logmstar"]
+        j = sfr_df.merge(m_df, on="targetid", suffixes=("_sfr", "_m"))
+        tr = train_y                       # already loaded for the KDE priors
+        js, jm = HEAD_NAMES.index("log_sfr"), HEAD_NAMES.index("logmstar")
+        ok = np.isfinite(tr[:, js]) & np.isfinite(tr[:, jm])
+        if ok.sum() > 100 and len(j) > 50:
+            # main sequence fitted on TRAIN only, then applied to test
+            slope, icpt = np.polyfit(tr[ok, jm], tr[ok, js], 1)
+            yt = j.true_sfr.to_numpy()
+            ss = np.sum((yt - yt.mean()) ** 2)
+            def r2(pred):
+                return 1.0 - float(np.sum((yt - pred) ** 2)) / ss
+            r2_head = r2(j.pred_sfr.to_numpy())
+            r2_true_m = r2(slope * j.true_m.to_numpy() + icpt)
+            r2_pred_m = r2(slope * j.pred_m.to_numpy() + icpt)
+            print(f"\n[SFR vs mass-only baselines]  n={len(j)}  "
+                  f"main sequence: logSFR = {slope:+.3f}*logM* {icpt:+.3f} (train fit)")
+            print(f"  SFR head                       R2 = {r2_head:+.3f}")
+            print(f"  baseline, TRUE logmstar        R2 = {r2_true_m:+.3f}   "
+                  f"<- ceiling for any mass-only predictor")
+            print(f"  baseline, PREDICTED logmstar   R2 = {r2_pred_m:+.3f}")
+            verdict = ("MEASURING SFR" if r2_head > max(r2_true_m, r2_pred_m) + 0.02
+                       else "NOT clearly beating mass alone")
+            print(f"  verdict: {verdict} (head - best baseline = "
+                  f"{r2_head - max(r2_true_m, r2_pred_m):+.3f})")
+            pd.DataFrame([{"n": len(j), "ms_slope": slope, "ms_intercept": icpt,
+                           "r2_sfr_head": r2_head, "r2_true_mstar": r2_true_m,
+                           "r2_pred_mstar": r2_pred_m}]).to_csv(
+                out_dir / "sfr_vs_mass_baseline.csv", index=False)
 
     hr_df = pd.DataFrame(hr_records)
     hr_df.to_csv(out_dir / "hr_joint_posteriors.csv", index=False)

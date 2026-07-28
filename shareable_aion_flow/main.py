@@ -880,8 +880,12 @@ def parse_args() -> argparse.Namespace:
                               help="Runtime sidecar with <target>[,_sig_lo,_sig_hi] columns by targetid "
                               "(e.g. per-band fluxes) -- no re-staging needed.")
     train_parser.add_argument(
-        "--error-mode", choices=["none", "inject", "convolve"], default="convolve",
-        help="Fold per-source split-normal errors into the likelihood (convolve=deconvolve).",
+        "--error-mode", choices=["none", "inject", "convolve"], default="none",
+        help="How per-source split-normal errors enter the loss. Default 'none' is the primary "
+             "estimand p(y|x): plain likelihood at the observed values, matching how eval scores. "
+             "'inject' (the adopted training mode, with --inject-samples 8) smears labels by their "
+             "own errors; 'convolve' deconvolves to a latent p(t|x) and is kept for latent analysis "
+             "only. See docs/decisions.md.",
     )
     train_parser.add_argument("--output-dir", type=Path, default=OUTPUTS_DIR)
     train_parser.add_argument("--run-id", default=None)
@@ -976,10 +980,12 @@ def parse_args() -> argparse.Namespace:
     )
     train_parser.add_argument("--log-every", type=int, default=10, help="Log batch NLL every N steps.")
 
-    mt = subparsers.add_parser("train-multi", help="Train the 8-head read-only-CLS multi-target model.")
+    mt = subparsers.add_parser("train-multi", help="Train the 9-head read-only-CLS multi-target model.")
     mt.add_argument("--staged-dir", type=Path, required=True)
     mt.add_argument("--clean-split-csv", type=Path, required=True)
-    mt.add_argument("--extra-targets-csv", type=Path, required=True, help="Band-target sidecar (targets_bands.csv).")
+    mt.add_argument("--extra-targets-csv", type=Path, required=True,
+                    help="Runtime sidecar joined by targetid: band targets and log_sfr "
+                         "(targets_sidecar.csv, built by scripts/make_sfr_sidecar.py).")
     mt.add_argument("--epochs", type=int, default=30)
     mt.add_argument("--batch-size", type=int, default=448)
     mt.add_argument("--lr", type=float, default=1e-4)

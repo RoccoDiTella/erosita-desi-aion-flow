@@ -99,7 +99,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location=device)
     import shareable_aion_flow.multitarget as _mt
-    _mt.configure_heads(tuple(ckpt.get("config", {}).get("drop_heads", ()) or ()))
+    _mt.configure_heads_from_config(ckpt.get("config", {}))
     N_HEADS, N_TARGETS, JOINT_IDX = _mt.N_HEADS, _mt.N_TARGETS, _mt.JOINT_IDX
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
                                num_cls=N_HEADS).to(device)

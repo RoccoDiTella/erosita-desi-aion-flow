@@ -162,9 +162,12 @@ def test_broadcast_draws_match_per_draw_calls() -> None:
 def test_configure_heads_drops_and_restores() -> None:
     import multitarget as mt
 
+    # Relative to the full target list, not a literal: heads get appended over
+    # time (log_sfr was) and a hard-coded count turns that into a false failure.
+    n_all = len(mt._ALL_TARGETS)
     try:
         mt.configure_heads(("log_flux_p4",))
-        assert mt.N_TARGETS == 6 and mt.N_HEADS == 7
+        assert mt.N_TARGETS == n_all - 1 and mt.N_HEADS == n_all
         assert "log_flux_p4" not in mt.HEAD_NAMES
         # the joint head must still point at the right two bands after reindexing
         j2, j3 = mt.JOINT_IDX
@@ -179,7 +182,7 @@ def test_configure_heads_drops_and_restores() -> None:
             raise AssertionError("dropping a joint-pair band must raise")
     finally:
         mt.configure_heads(())
-        assert mt.N_TARGETS == 7 and mt.N_HEADS == 8
+        assert mt.N_TARGETS == n_all and mt.N_HEADS == n_all + 1
 
 
 def test_head_influence_attributes_gradient_to_the_right_head() -> None:
@@ -201,17 +204,49 @@ def test_head_influence_attributes_gradient_to_the_right_head() -> None:
     assert abs(sum(shares) - 1.0) < 1e-5          # shares are a distribution
 
 
+def test_configure_heads_from_config_reloads_older_checkpoints() -> None:
+    """A checkpoint trained before a head was appended must still build."""
+    import multitarget as mt
+
+    n_all = len(mt._ALL_TARGETS)
+    try:
+        # a pre-log_sfr checkpoint: it stored the head names it actually had
+        legacy = [t["name"] for t in mt._ALL_TARGETS if t["name"] != "log_sfr"]
+        mt.configure_heads_from_config({"heads": legacy + ["p2xp3_joint"]})
+        assert "log_sfr" not in mt.HEAD_NAMES
+        assert mt.N_TARGETS == n_all - 1
+        flows = mt.MultiTargetFlows(context_dim=8)
+        assert len(flows.flows) == n_all - 1        # matches the old state_dict
+        # the joint pair still resolves after the reindex
+        j2, j3 = mt.JOINT_IDX
+        assert mt.MULTI_TARGETS[j2]["name"] == "log_flux_p2"
+        assert mt.MULTI_TARGETS[j3]["name"] == "log_flux_p3"
+
+        # even older: no `heads` key at all, only drop_heads
+        mt.configure_heads_from_config({"drop_heads": ["log_flux_p4"]})
+        assert "log_flux_p4" not in mt.HEAD_NAMES and "log_sfr" in mt.HEAD_NAMES
+
+        # empty / missing config falls back to the full current set
+        mt.configure_heads_from_config({})
+        assert mt.N_TARGETS == n_all
+        mt.configure_heads_from_config(None)
+        assert mt.N_TARGETS == n_all
+    finally:
+        mt.configure_heads(())
+
+
 def test_model_pieces_follow_dropped_head_count() -> None:
     """Regression: default args must not capture the head count at import time."""
     import multitarget as mt
 
+    n_all = len(mt._ALL_TARGETS)
     try:
         mt.configure_heads(("log_flux_p4",))
         flows = mt.MultiTargetFlows(context_dim=8)
-        assert len(flows.flows) == mt.N_TARGETS == 6
-        assert len(mt.EMALossWeights().ema) == mt.N_HEADS == 7
+        assert len(flows.flows) == mt.N_TARGETS == n_all - 1
+        assert len(mt.EMALossWeights().ema) == mt.N_HEADS == n_all
     finally:
         mt.configure_heads(())
     flows = mt.MultiTargetFlows(context_dim=8)
-    assert len(flows.flows) == mt.N_TARGETS == 7
-    assert len(mt.EMALossWeights().ema) == mt.N_HEADS == 8
+    assert len(flows.flows) == mt.N_TARGETS == n_all
+    assert len(mt.EMALossWeights().ema) == mt.N_HEADS == n_all + 1

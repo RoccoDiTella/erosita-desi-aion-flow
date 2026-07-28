@@ -22,6 +22,10 @@ declare -A PLAN=(
   ["$ERO/erosita_desi_dr1_matches_all_properties.csv"]="$AIONFLOW_DATA/raw/erosita_desi"
   ["$SD/data/match_quality.csv"]="$AIONFLOW_DATA"
   ["$SD/data/targets_extra.csv"]="$AIONFLOW_DATA"
+  # Runtime sidecar for train-multi: band targets + log_sfr, joined by targetid.
+  # ~9 MB, rebuilt locally by scripts/make_sfr_sidecar.py -- the 7.3 GB CIGALE
+  # VAC it is derived from is NEVER pushed.
+  ["$SD/data/targets_sidecar.csv"]="$AIONFLOW_DATA"
   ["$MAN/"]="$AIONFLOW_DATA/manifests"
   ["$SD/fits_pool.zip"]="$AIONFLOW_DATA/raw/legacysurvey"
   ["$HOME/.cache/huggingface/hub/models--polymathic-ai--aion-base"]="$AIONFLOW_ROOT/hf_cache/hub"
