@@ -76,8 +76,11 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--metrics", type=Path, required=True)
     ap.add_argument("--baseline", type=Path, default=None)
-    ap.add_argument("--hr-r2", type=float, default=np.nan)
-    ap.add_argument("--hr-ig", type=float, default=np.nan)
+    ap.add_argument("--hr-csv", type=Path, default=None,
+                    help="hr_implied_target.csv; R2 and IG are computed from it directly "
+                         "rather than transcribed by hand")
+    ap.add_argument("--hr-r2", type=float, default=np.nan, help="override --hr-csv")
+    ap.add_argument("--hr-ig", type=float, default=np.nan, help="override --hr-csv")
     ap.add_argument("--out", type=Path, default=Path("docs/figures/fig_results_v3.png"))
     args = ap.parse_args()
 
@@ -96,9 +99,16 @@ def main() -> None:
         b = base[base["head"] == key] if base is not None else None
         br2.append(float(b.r2.iloc[0]) if b is not None and len(b) else np.nan)
         big.append(float(b.info_gain_nats.iloc[0]) if b is not None and len(b) else np.nan)
-    if np.isfinite(args.hr_r2) or np.isfinite(args.hr_ig):
+    hr_r2, hr_ig = args.hr_r2, args.hr_ig
+    if args.hr_csv and args.hr_csv.exists() and not (np.isfinite(hr_r2) and np.isfinite(hr_ig)):
+        h = pd.read_csv(args.hr_csv)
+        if len(h) > 30:
+            hr_r2 = 1.0 - float(np.sum((h.hr_meas - h.hr_p50) ** 2)
+                                / np.sum((h.hr_meas - h.hr_meas.mean()) ** 2))
+            hr_ig = float(h.info_gain.mean())
+    if np.isfinite(hr_r2) or np.isfinite(hr_ig):
         labels.append("HR32 (implied)")
-        r2.append(args.hr_r2); ig.append(args.hr_ig)
+        r2.append(hr_r2); ig.append(hr_ig)
         br2.append(np.nan); big.append(np.nan)
 
     fig, axes = plt.subplots(1, 2, figsize=(12.6, 0.62 * len(labels) + 2.2))

@@ -755,3 +755,59 @@ checkpoint's stored `heads` list rather than `drop_heads` alone. 65 tests green.
 *Rejected: PROVABGS.* Held locally with full 100-sample MCMC posteriors, but it
 overlaps our sample by only 114 sources (0.43%) -- it is BGS (bright, low-z) and
 we are QSO-dominated at median z=0.86. Kept as a calibration set only.
+
+**V4 with the SFR head: run `mt-v4-sfr-35828655` (2026-07-28/29).** 40 epochs,
+5 h 30 m on one A100, best epoch 34, 28.4 GB, `sbatch/train_multi.sbatch`.
+Eval `36028553` via the new `sbatch/eval_multi.sbatch`.
+
+Test set, all inputs (n = 2,520; SFR 1,714; HR 2,169):
+
+| head | R2 | IG (nats) | lines-only R2 |
+|---|---|---|---|
+| log Lx | 0.921 | 1.201 | 0.689 |
+| **log SFR** | **0.815** | **0.939** | 0.429 |
+| log M* | 0.765 | 1.353 | — |
+| log flux | 0.614 | 0.317 | 0.482 |
+| P3 | 0.418 | 0.182 | — |
+| P2 | 0.390 | 0.215 | — |
+| P1 | 0.366 | 0.150 | — |
+| HR32 implied | 0.015 | 0.084 (0.108 on hr32_ok) | — |
+
+**The SFR head is not re-predicting stellar mass.** The main sequence fitted on
+train is nearly flat in this sample (logSFR = 0.076*logM* + 1.233), so a mass-only
+predictor reaches R2 = 0.001 with the TRUE mass and 0.008 with the model's
+predicted mass, against the head's 0.815. Verdict recorded in
+`eval/sfr_vs_mass_baseline.csv`. Note this flatness is specific to an X-ray
+selected, 87% QSO sample -- on the BPT star-forming subset with an independent
+Halpha SFR, log M* explains ~30% of log SFR variance.
+
+**Adding the ninth head was free.** Best-epoch validation NLL against V3
+(35416432) on the seven shared heads: flux 0.975 vs 0.974, Lx 0.169 vs 0.166,
+M* 0.006 vs 0.018, P1 1.247 vs 1.244, P2 1.159 vs 1.158, P3 1.203 vs 1.202,
+joint 2.309 vs 2.300 -- summed +0.006 nats, indistinguishable. Epoch time +1.8%,
+GPU memory unchanged.
+
+**Trajectories say the run is far too long for every head except SFR.** 90% of
+all validation improvement arrives by epoch 10, 94% by epoch 20, while the total
+train-probe/validation gap grows +0.264 -> +1.301 nats. Validation gain AFTER
+epoch 10: log SFR +0.212, log M* +0.163, everything X-ray <= +0.022 (P3 exactly
+0.000). log SFR also has the second-smallest gap (+0.085) and was still
+descending at epoch 40 -- it is the only head not yet saturated. Heads peak at
+wildly different epochs (P1 5, P3 10, P2 22, joint 23, flux 26, Lx 29, M* 36,
+SFR 39), so the single global early stop at 34 is wrong for nearly all of them:
+**per-head checkpoint selection would gain 0.144 nats for free, no retraining.**
+This turns the deferred per-head LR-schedule item into a concrete one.
+
+**Modality UpSet, first real read.** log flux is spectra-dominated (spectra alone
+0.285 of 0.317 all-in) and z adds nothing on top of it (spectra+z 0.286). log Lx
+is the opposite: z alone reaches 0.94 of 1.20 because Lx is mostly distance, and
+spectra+z is heavily redundant since the spectrum carries z. **log SFR is the
+only target with no dominant single modality** -- spectra 0.59, image 0.29, z
+0.25, WISE 0.22 of 0.94 all-in -- and its combinations stack far more additively.
+That partly answers the label-leakage worry: CIGALE fits SFR from grz+WISE
+photometry, so if the head were merely reproducing that fit, WISE and image
+should dominate. They do not; the spectrum does.
+
+**Deck:** `docs/build_deck.sh` now regenerates every narrative figure, and
+`make_results_figure.py` reads HR straight from `hr_implied_target.csv` instead
+of the old hand-transcribed `--hr-r2/--hr-ig` flags.
