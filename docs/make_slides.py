@@ -234,7 +234,7 @@ def main() -> None:
              "column / formula": "LOGMASS_DAS_PAN25  (direct)", "n": n("log_mbh_pan25", 9373), "σ": "yes"},
             {"target": "log M$_{BH}$ (VO09)", "catalogue": "qmassiron BH VAC",
              "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,366", "σ": "yes"},
-            {"target": "log sSFR", "catalogue": "— not trained —",
+            {"target": "log sSFR", "catalogue": "CIGALE (Siudek+2024)",
              "column / formula": "implied from the (M★,SFR) joint", "n": "17,294", "σ": "from the joint"},
         ])
         metric_table(ax, tgt, rect=(0.02, 0.11, 0.96, 0.54), fontsize=10.5,
