@@ -237,10 +237,27 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_examples_images.png", (0.13, 0.02, 0.74, 0.30))
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- DATA 3: the empirical joint
+        # ---- DATA 3: the empirical joint, drawn NATIVELY so it stays sharp when
+        # zoomed. This is the one figure people zoom into, and a pasted raster
+        # stops being useful the moment they do.
         fig, ax = new_slide("The targets are not independent",
                             "empirical joint over the clean sample")
-        image_panel(fig, FIGS / "fig_corner.png", (0.16, 0.02, 0.68, 0.80))
+        npz = FIGS / "corner_data.npz"
+        if npz.exists():
+            import numpy as _np
+            from make_data_figures import VARS as _VARS, draw_corner
+            d = _np.load(npz)
+            data = {n: d[n].astype(float) for n, _ in _VARS}
+            k = len(_VARS)
+            gs = fig.add_gridspec(k, k, left=0.20, right=0.82, bottom=0.05, top=0.79,
+                                  wspace=0.13, hspace=0.13)
+            axes = _np.empty((k, k), dtype=object)
+            for i in range(k):
+                for j in range(k):
+                    axes[i, j] = fig.add_subplot(gs[i, j])
+            draw_corner(fig, data, axes=axes, label_size=8.0, tick_size=5.6)
+        else:
+            image_panel(fig, FIGS / "fig_corner.png", (0.16, 0.02, 0.68, 0.80))
         pdf.savefig(fig); plt.close(fig)
 
         # ---- DATA 4: NWAY counterpart validation
@@ -330,11 +347,16 @@ def main() -> None:
                  fontsize=11.5, color=MUTED, va="top")
         pdf.savefig(fig); plt.close(fig)
 
-        # ---- Modality UpSet
-        if (FIGS / "fig_modality_upset.png").exists():
-            fig, ax = new_slide("What is each input worth?",
-                                "information gain for every combination of the four inputs")
-            image_panel(fig, FIGS / "fig_modality_upset.png", (0.02, 0.03, 0.96, 0.79))
+        # ---- Modality UpSet, one slide per target
+        for head, lbl in (("log_ml_flux_1", "log flux"), ("log_lx", "log $L_X$"),
+                          ("log_sfr", "log SFR")):
+            f = FIGS / f"fig_upset_{head}.png"
+            if not f.exists():
+                continue
+            fig, ax = new_slide(f"What is each input worth?  {lbl}",
+                                "information gain for every combination of the four inputs · "
+                                "a bar below a dotted line it contains is redundancy")
+            image_panel(fig, f, (0.01, 0.02, 0.98, 0.80))
             pdf.savefig(fig); plt.close(fig)
 
         # ---- Line coverage

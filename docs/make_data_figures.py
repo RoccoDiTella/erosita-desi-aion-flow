@@ -58,10 +58,17 @@ def load(args) -> pd.DataFrame:
     return df
 
 
-def corner(df: pd.DataFrame, out: Path) -> None:
+def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
+                tick_size: float = 7.0) -> None:
+    """Draw the corner panels onto an existing figure.
+
+    Factored out so the slide deck can render this NATIVELY as vector art
+    instead of pasting a raster: a corner plot is the one figure people zoom
+    into, and a PNG stops being useful the moment they do.
+    """
     k = len(VARS)
-    fig, axes = plt.subplots(k, k, figsize=(11.0, 9.4))
-    data = {n: df[n].to_numpy(float) for n, _ in VARS}
+    if axes is None:
+        axes = fig.subplots(k, k)
     for i, (ni, li) in enumerate(VARS):
         for j, (nj, lj) in enumerate(VARS):
             ax = axes[i, j]
@@ -81,22 +88,33 @@ def corner(df: pd.DataFrame, out: Path) -> None:
                 if m.sum() > 10:
                     ax.hexbin(x[m], y[m], gridsize=38, cmap="Blues", norm=LogNorm(),
                               linewidths=0, mincnt=1)
-            ax.tick_params(labelsize=7.0, length=2)
+            ax.tick_params(labelsize=tick_size, length=2)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
             if i == k - 1:
-                ax.set_xlabel(lj, fontsize=9.5)
+                ax.set_xlabel(lj, fontsize=label_size)
             else:
                 ax.set_xticklabels([])
             if j == 0 and i != 0:
-                ax.set_ylabel(li, fontsize=9.5)
+                ax.set_ylabel(li, fontsize=label_size)
             else:
                 ax.set_yticklabels([])
+
+
+def corner(df: pd.DataFrame, out: Path) -> None:
+    data = {n: df[n].to_numpy(float) for n, _ in VARS}
+    fig, axes = plt.subplots(len(VARS), len(VARS), figsize=(11.0, 9.4))
+    draw_corner(fig, data, axes=axes)
     fig.suptitle("Empirical joint of the targets (clean sample)", fontsize=12.5, color=INK, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.965))
     fig.savefig(out, dpi=170, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {out}")
+    # The deck redraws this natively as vector; ship the columns so it does not
+    # need the 2 GB spectra file or the raw catalogs to do so.
+    npz = out.with_name("corner_data.npz")
+    np.savez_compressed(npz, **{n: data[n].astype(np.float32) for n, _ in VARS})
+    print(f"wrote {npz}")
 
 
 def pick_examples(df: pd.DataFrame, n: int = 4, pool=None) -> pd.DataFrame:
