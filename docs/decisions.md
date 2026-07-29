@@ -811,3 +811,50 @@ should dominate. They do not; the spectrum does.
 **Deck:** `docs/build_deck.sh` now regenerates every narrative figure, and
 `make_results_figure.py` reads HR straight from `hr_implied_target.csv` instead
 of the old hand-transcribed `--hr-r2/--hr-ig` flags.
+
+**Target set reworked: CIGALE for mass and SFR, catalogued M_BH, sSFR implied
+(2026-07-29).** `scripts/make_sfr_sidecar.py` is now
+`scripts/make_targets_sidecar.py` and builds all of it.
+
+*Stellar mass moves to CIGALE.* Our `logmstar` was FastSpecFit's, inherited from
+the paper rather than chosen. **FastSpecFit has no AGN component** -- it fits a
+stellar continuum plus emission lines and is built for galaxies -- so on a sample
+that is 87% QSO the accretion-disk continuum is attributed to stars, biasing the
+mass in a way the fit never models. CIGALE fits the AGN explicitly (that is where
+AGNFRAC comes from). The two masses agree at corr **+0.76 for GALAXY but only
++0.30 for QSO**, which is what that bias looks like. CIGALE also publishes
+`LOGM_ERR`, replacing the fabricated 0.2/0.3 dex spectype floor. Coverage 20,563
+(77.2%). The FastSpecFit head is kept in the code and dropped by default
+(`DROP_HEADS="log_flux_p4 logmstar"`), so the comparison stays available.
+
+*So mass and SFR now come from ONE fit*, which is what makes sSFR well defined.
+This was the user's question and it had no good answer before: SFR was chosen
+from CIGALE deliberately, mass was FastSpecFit's by inheritance.
+
+*sSFR is NOT trained.* It is an exact function of log SFR and log M*, so a head
+on it adds no label information -- only a different projection of the same data,
+and one whose posterior could contradict their difference. It will be implied
+from an (M*, SFR) joint by the same shear-marginalisation already validated for
+HR, which yields the error correlation rather than assuming it. Carried in the
+sidecar as `ref_log_ssfr` purely to validate that implied version later. Note
+sigma(sSFR) genuinely needs Cov(LOGM, LOGSFR), which CIGALE does not publish, and
+the sign is not knowable a priori -- overall normalisation correlates the two,
+the young/old split anti-correlates them.
+
+*Black-hole mass, catalogued.* The DR1 **qmassiron** VAC
+(`VAC_BHmass_338_v1.7.fits`, **109 MB**, 490,648 quasars at z<1.6, MgII) -- not
+the 70 GB FastSpecFit pull that was assumed necessary. There is no BH mass in
+`agnqso`, which is a 36-column classification summary. Two heads:
+**`log_mbh_pan25`** (primary, iron-corrected: FeII blends with MgII and inflates
+FWHM, and M_BH goes as FWHM^2) and **`log_mbh_vo09`** (the classic estimator).
+Coverage 9,813 / 9,806 (36.8%) after an err<1 dex gate, the lowest of any head.
+
+The other three calibrations ride as sidecar columns, not heads: VO09, SHEN11,
+LE20 and YU23 intercorrelate at **0.99+**, and LE20 vs VO09 is exactly **1.0000**
+-- a pure rescaling. Only PAN25 differs (r ~ 0.91), i.e. the iron correction is
+the only thing that changes the answer. Median spread across all five is **0.375
+dex** against a median published error of 0.330, so the choice of calibration
+matters about as much as the measurement does.
+
+*Head set:* 9 scalar + the P2xP3 joint = 10, with `log_flux_p4` and `logmstar`
+dropped by default. Sidecar `targets_sidecar.csv` is 39 columns / 12 MB.

@@ -1,11 +1,15 @@
-"""Multi-target read-only-CLS training: 9 heads, one frozen forward.
+"""Multi-target read-only-CLS training: one frozen forward, many heads.
 
-Heads: flux, Lx, logmstar, p1..p4 band fluxes and log SFR (runtime sidecar) as
-1-D flows, plus a JOINT 2-D flow over (P2, P3) whose samples give per-source
-hardness posteriors with correlated band errors (HR itself is never a direct
-target). SFR is a genuinely separate target from stellar mass: on the subset
-where an independent Halpha SFR can be derived, log M* explains only ~30% of
-log SFR variance. Architecture: per-target CLS
+Heads: X-ray flux, Lx and p1..p4 band fluxes; stellar mass, log SFR and
+black-hole mass (PAN25 and VO09) from the runtime sidecar -- each a 1-D flow --
+plus a JOINT 2-D flow over (P2, P3) whose samples give per-source hardness
+posteriors with correlated band errors (HR itself is never a direct target).
+
+sSFR is deliberately NOT a head. It is an exact function of log SFR and log M*,
+so it carries no label information they do not already hold, and an independent
+head could produce a posterior contradicting their difference. It is left to be
+implied from an (M*, SFR) joint by the same shear-marginalisation used for HR,
+which also yields the error correlation instead of assuming it. Architecture: per-target CLS
 vectors + SHARED per-block Q/V read adapters (data stream frozen, no_grad),
 one SHARED 768->512->256 MLP over the stacked CLS states, one small NSF flow
 per target. Joint loss: per-target NLL on standardized values, split-normal
@@ -43,6 +47,22 @@ MULTI_TARGETS: list[dict] = [
     # log SFR comes from the CIGALE VAC, a DIFFERENT SED fit than the one that
     # produced logmstar -- see scripts/make_sfr_sidecar.py for why that matters.
     {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": 1.0, "sidecar": True},
+    # CIGALE stellar mass. Supersedes the FastSpecFit `logmstar` above for this
+    # sample: FastSpecFit has NO AGN component, so on 87% QSO it attributes the
+    # accretion-disk continuum to stars. CIGALE fits the AGN explicitly. Keeping
+    # both in the same fit as log_sfr also makes sSFR well defined. Drop the
+    # older head with --drop-heads logmstar.
+    {"name": "logmstar_cigale", "sig": ("logmstar_cigale_sig_lo", "logmstar_cigale_sig_hi"),
+     "max_sigma": 1.0, "sidecar": True},
+    # Black-hole mass, DR1 qmassiron VAC. PAN25 is iron-corrected and primary;
+    # VO09 is the classic estimator, kept as a comparison target. SHEN11/LE20/
+    # YU23 ride in the sidecar as columns -- they correlate with VO09 at 0.99+
+    # (LE20 is exactly 1.0000, a pure rescaling), so training them would be
+    # training the same target several times.
+    {"name": "log_mbh_pan25", "sig": ("log_mbh_pan25_sig_lo", "log_mbh_pan25_sig_hi"),
+     "max_sigma": 1.0, "sidecar": True},
+    {"name": "log_mbh_vo09", "sig": ("log_mbh_vo09_sig_lo", "log_mbh_vo09_sig_hi"),
+     "max_sigma": 1.0, "sidecar": True},
 ]
 _ALL_TARGETS = list(MULTI_TARGETS)
 N_TARGETS = len(MULTI_TARGETS)          # scalar heads (P4 and log_sfr droppable)

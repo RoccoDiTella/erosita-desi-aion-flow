@@ -37,7 +37,7 @@ ADAPTER_WD="${ADAPTER_WD:-1e-1}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 BETA1="${BETA1:-0.95}"
 INJECT_SAMPLES="${INJECT_SAMPLES:-50}"
-DROP_HEADS="${DROP_HEADS:-log_flux_p4}"
+DROP_HEADS="${DROP_HEADS:-log_flux_p4 logmstar}"   # p4 never learns; logmstar superseded by logmstar_cigale
 
 # Fail before burning GPU-hours if the sidecar is missing or has no SFR column.
 python - <<PY
