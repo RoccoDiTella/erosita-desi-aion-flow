@@ -1,15 +1,18 @@
 #!/usr/bin/env python
-"""UpSet view of what each input modality is worth, in information gain.
+"""What each input modality is worth, in information gain, per target.
 
 Replaces the modality-Shapley pair of slides. A Shapley interaction index like
 "spectra x z = -0.679" is a second-order quantity nobody can read off a slide;
 the same fact is obvious here as a bar that fails to clear a dotted line.
 
-One figure per target, full slide width. Combination bars are filled with
-diagonal stripes in the colours of the modalities they contain, so membership
-is readable from the bar itself. Dotted references mark each modality alone, in
-its own colour; there is deliberately no line for all-four, since the rightmost
-bar is that value. Palette matches the paper's redshift figure.
+Each bar is divided into one horizontal band per input it contains, always in
+the same top-to-bottom order (spectra, redshift, WISE, images), so a given
+modality sits at the same relative height in every bar. Band boundaries are cut
+at 45 degrees on the page rather than flat, and each band carries its initial.
+Dotted references mark each modality alone, in its own colour; there is no line
+for all-four, since the rightmost bar is that value.
+
+Palette matches the paper's performance-by-redshift figure.
 
     python docs/make_modality_upset.py --metrics .../multi_test_metrics.csv
 """
@@ -27,12 +30,14 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Rectangle  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
+from matplotlib.patches import Patch, Polygon, Rectangle  # noqa: E402
 
 INK, MUTED, GRID = "#1a1a1a", "#6a6a6a", "#d5d5d5"
+# order is load-bearing: it fixes the vertical order of the bands
 MODALITIES = ["spectra", "z", "wise", "image"]
 NICE = {"spectra": "Spectra", "z": "Redshift", "wise": "WISE", "image": "Images"}
-# the paper's performance-by-redshift palette
+LETTER = {"spectra": "S", "z": "Z", "wise": "W", "image": "I"}
 COLOR = {"spectra": "#7B4FA3", "z": "#D62728", "wise": "#8C5A2B", "image": "#2E86C1"}
 HEADS = [("log_ml_flux_1", "log flux"), ("log_lx", r"log $L_X$"), ("log_sfr", "log SFR"),
          ("logmstar", r"log $M_*$")]
@@ -49,91 +54,78 @@ def key(combo: tuple[str, ...]) -> str:
     return "+".join(m for m in MODALITIES if m in combo)
 
 
-def striped_bar(ax, x, height, width, colors, stripe_in: float = 0.115,
-                slope: float = 1.7, ppi: int = 160) -> None:
-    """Fill a bar with thick diagonal stripes cycling through `colors`.
+def banded_bar(ax, x, height, width, members) -> None:
+    """Split a bar into equal horizontal bands, one per member, cut at 45 degrees.
 
-    matplotlib hatching cannot do multi-colour stripes, so paint an RGBA raster
-    of diagonal bands and clip it to the bar rectangle.
-
-    The raster is built in PAGE space (inches), not in a fixed square grid: bars
-    here are ~7x taller than they are wide, so a square pattern gets stretched
-    and the stripes come out nearly vertical. Sizing the grid to the bar's real
-    aspect makes `slope` mean what it says -- slope=1 is 45 degrees, higher tilts
-    further over. `stripe_in` is the stripe width in inches on the page.
+    Painted from the bottom member upward: each band fills everything ABOVE its
+    own lower boundary, so later (higher) members overwrite the ones below and
+    the result is clean bands without computing polygon intersections. Everything
+    is clipped to the bar rectangle, so the bar keeps square outer edges and only
+    the internal divisions are slanted.
     """
-    if not np.isfinite(height) or height <= 0:
+    if not np.isfinite(height) or height <= 0 or not members:
         return
-    dpi = ax.figure.dpi
-    p0 = ax.transData.transform((x - width / 2, 0.0))
-    p1 = ax.transData.transform((x + width / 2, height))
-    w_in, h_in = abs(p1[0] - p0[0]) / dpi, abs(p1[1] - p0[1]) / dpi
-    nx, ny = max(8, int(w_in * ppi)), max(8, int(h_in * ppi))
-    ii, jj = np.mgrid[0:ny, 0:nx]
-    sw = max(2, int(stripe_in * ppi))
-    band = ((jj + slope * ii).astype(int) // sw) % len(colors)
-    rgba = np.zeros((ny, nx, 4))
-    for k, c in enumerate(colors):
-        rgba[band == k] = matplotlib.colors.to_rgba(c)
-    rect = Rectangle((x - width / 2, 0), width, height, transform=ax.transData)
-    im = ax.imshow(rgba, extent=(x - width / 2, x + width / 2, 0, height),
-                   origin="lower", aspect="auto", zorder=3, interpolation="nearest")
-    im.set_clip_path(rect)
+    k = len(members)
+    x0, x1, xc = x - width / 2, x + width / 2, x
+    rect = Rectangle((x0, 0), width, height, transform=ax.transData)
+
+    # slope giving 45 degrees on the page, in data units
+    t = ax.transData
+    px_per_x = t.transform((1.0, 0.0))[0] - t.transform((0.0, 0.0))[0]
+    px_per_y = t.transform((0.0, 1.0))[1] - t.transform((0.0, 0.0))[1]
+    slope = abs(px_per_x / px_per_y) if px_per_y else 0.0
+
+    top, bottom = height * 2.0, -height
+    for j in range(k - 1, -1, -1):          # bottom member first
+        m = members[j]
+        b = height * (k - 1 - j) / k        # nominal lower boundary of this band
+        if j == k - 1:
+            # the lowest band's lower edge IS the bar's base, not a divider --
+            # slanting it would shave the bottom corners off the bar
+            lo = [[x0, bottom], [x1, bottom]]
+        else:
+            lo = [[x0, b + slope * (x0 - xc)], [x1, b + slope * (x1 - xc)]]
+        poly = Polygon(lo + [[x1, top], [x0, top]],
+                       closed=True, facecolor=COLOR[m], edgecolor="none", zorder=3)
+        ax.add_patch(poly)
+        poly.set_clip_path(rect)
+
+    # a letter per band, only where it fits
+    band_px = abs(px_per_y) * height / k
+    if band_px >= 15:
+        for j, m in enumerate(members):
+            yc = height * (k - 1 - j) / k + height / (2 * k)
+            ax.text(xc, yc, LETTER[m], ha="center", va="center", zorder=5,
+                    fontsize=min(13.0, 0.55 * band_px), color="white",
+                    fontweight="bold",
+                    path_effects=[pe.withStroke(linewidth=1.6, foreground="#00000055")])
 
 
 def panel(ax, values: dict[str, float], order, title: str) -> None:
     xs = np.arange(len(order))
     vals = np.array([values.get(key(c), np.nan) for c in order], float)
     hi = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
-    # limits FIRST: striped_bar reads transData to size its raster in page space
-    ax.set_xlim(-0.7, len(order) + 2.1)
-    ax.set_ylim(0, hi * 1.14)
+    # limits FIRST: banded_bar reads transData to get the 45-degree slope right
+    ax.set_xlim(-0.7, len(order) - 0.3)
+    ax.set_ylim(0, hi * 1.16)
     for x, combo, v in zip(xs, order, vals):
-        striped_bar(ax, x, v, 0.74, [COLOR[m] for m in MODALITIES if m in combo])
+        members = [m for m in MODALITIES if m in combo]     # fixed vertical order
+        banded_bar(ax, x, v, 0.78, members)
         if np.isfinite(v):
             ax.text(x, v + 0.018 * hi, f"{v:.2f}", ha="center", va="bottom",
-                    fontsize=9.5, color=INK)
-    # one dotted reference per modality, in its own colour. The lines sit at the
-    # true values; only the LABELS are nudged apart, since three modalities can
-    # land within a few hundredths of a nat and overprint each other.
-    solo = [(m, values.get(key((m,)), np.nan)) for m in MODALITIES]
-    solo = sorted([(m, v) for m, v in solo if np.isfinite(v)], key=lambda t: t[1])
-    min_sep = 0.055 * hi
-    label_y: list[float] = []
-    for _, v in solo:
-        y = v if not label_y else max(v, label_y[-1] + min_sep)
-        label_y.append(y)
-    for (m, v), ly in zip(solo, label_y):
-        ax.axhline(v, ls=":", lw=1.6, color=COLOR[m], alpha=0.95, zorder=2)
-        ax.text(len(order) - 0.30, ly, f"  {NICE[m]}", fontsize=10.5,
-                color=COLOR[m], va="center", ha="left", fontweight="bold")
-    ax.set_ylabel("information gain [nats]", fontsize=12)
-    ax.set_title(title, fontsize=16, color=INK, loc="left", pad=10)
+                    fontsize=10.5, color=INK)
+    for m in MODALITIES:
+        v = values.get(key((m,)), np.nan)
+        if np.isfinite(v):
+            ax.axhline(v, ls=":", lw=1.8, color=COLOR[m], alpha=0.95, zorder=2)
+    ax.set_ylabel("information gain [nats]", fontsize=13)
+    ax.set_title(title, fontsize=17, color=INK, loc="left", pad=12)
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
     ax.set_axisbelow(True)
     ax.set_xticks([])
-    ax.tick_params(labelsize=11)
+    ax.tick_params(labelsize=12)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-
-
-def matrix(ax, order) -> None:
-    for i, m in enumerate(MODALITIES):
-        y = len(MODALITIES) - 1 - i
-        ax.axhline(y, color="#f4f4f4", lw=13, zorder=0)
-        ax.text(-0.9, y, NICE[m], fontsize=11, color=COLOR[m], ha="right",
-                va="center", fontweight="bold")
-    for x, combo in enumerate(order):
-        ys = [len(MODALITIES) - 1 - MODALITIES.index(m) for m in combo]
-        if len(ys) > 1:
-            ax.plot([x, x], [min(ys), max(ys)], color="#b0b0b0", lw=1.5, zorder=2)
-        for i, m in enumerate(MODALITIES):
-            y = len(MODALITIES) - 1 - i
-            ax.scatter([x], [y], s=70, zorder=3,
-                       color=COLOR[m] if m in combo else "#dedede")
-    ax.set_xlim(-0.7, len(order) + 2.1)
-    ax.set_ylim(-0.6, len(MODALITIES) - 0.4)
-    ax.axis("off")
 
 
 def main() -> None:
@@ -154,13 +146,15 @@ def main() -> None:
     else:
         targets = [("flux", args.single_label, df)]
 
+    handles = [Patch(facecolor=COLOR[m], edgecolor="none",
+                     label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
     for head, lbl, d in targets:
         vals = dict(zip(d.input_group.astype(str), d.info_gain_nats.astype(float)))
-        fig = plt.figure(figsize=(13.2, 6.6))
-        gs = fig.add_gridspec(2, 1, height_ratios=[3.0, 1.0], hspace=0.06)
-        panel(fig.add_subplot(gs[0, 0]), vals, order,
-              f"{lbl}: information gain by input combination")
-        matrix(fig.add_subplot(gs[1, 0]), order)
+        fig, ax = plt.subplots(figsize=(13.2, 6.0))
+        panel(ax, vals, order, f"{lbl}: information gain by input combination")
+        fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
+                   fontsize=15, bbox_to_anchor=(0.5, -0.035), handlelength=1.9,
+                   handleheight=1.5, columnspacing=2.6)
         out = args.figdir / f"fig_upset_{head}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)
