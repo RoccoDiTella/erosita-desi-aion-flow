@@ -248,7 +248,7 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- DATA 2: what the inputs look like
-        fig, ax = new_slide("What the inputs look like",
+        fig, ax = new_slide("The data",
                             "four sources spanning the redshift range, same sources in both rows")
         image_panel(fig, FIGS / "fig_examples_spectra.png", (0.03, 0.34, 0.94, 0.48))
         image_panel(fig, FIGS / "fig_examples_images.png", (0.13, 0.02, 0.74, 0.30))
@@ -257,7 +257,7 @@ def main() -> None:
         # ---- DATA 3: the empirical joint, drawn NATIVELY so it stays sharp when
         # zoomed. This is the one figure people zoom into, and a pasted raster
         # stops being useful the moment they do.
-        fig, ax = new_slide("The targets are not independent",
+        fig, ax = new_slide("The data",
                             "empirical joint over the clean sample")
         npz = FIGS / "corner_data.npz"
         if npz.exists():
@@ -278,7 +278,7 @@ def main() -> None:
         pdf.savefig(fig); plt.close(fig)
 
         # ---- DATA 4: NWAY counterpart validation
-        fig, ax = new_slide("Are the counterparts right?", "validated against NWAY / Salvato+2025")
+        fig, ax = new_slide("The data", "counterparts validated against NWAY / Salvato+2025")
         nway = pd.DataFrame([
             {"outcome": "confirmed correct", "n": "26,632", "share": "87.5%"},
             {"outcome": "confirmed wrong", "n": "1,017", "share": "3.3%"},
@@ -370,9 +370,9 @@ def main() -> None:
             f = FIGS / f"fig_upset_{head}.png"
             if not f.exists():
                 continue
-            fig, ax = new_slide(f"What is each input worth?  {lbl}",
+            fig, ax = new_slide("Results",
                                 "information gain for every combination of the four inputs · "
-                                "a bar below a dotted line it contains is redundancy")
+                                "a bar below a line it contains is redundancy")
             image_panel(fig, f, (0.01, 0.02, 0.98, 0.80))
             pdf.savefig(fig); plt.close(fig)
 
