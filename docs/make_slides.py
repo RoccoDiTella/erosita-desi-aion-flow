@@ -356,12 +356,7 @@ def main() -> None:
         fig, ax = new_slide("Every target from one run",
                             "test set, all inputs · reference marks are a flow given only "
                             "emission-line fluxes")
-        image_panel(fig, FIGS / "fig_results_v3.png", (0.03, 0.14, 0.94, 0.66))
-        fig.text(0.045, 0.105,
-                 "The emission-line baseline is the honest comparison: it is what you get without a "
-                 "learned representation.\nIts log L$_X$ mark is flattered — the zero pattern of "
-                 "out-of-window lines leaks a coarse redshift, and L$_X$ is mostly distance.",
-                 fontsize=11.5, color=MUTED, va="top")
+        image_panel(fig, FIGS / "fig_results_v3.png", (0.03, 0.04, 0.94, 0.77))
         pdf.savefig(fig); plt.close(fig)
 
         # ---- Modality UpSet, one slide per target
