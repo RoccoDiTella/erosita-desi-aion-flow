@@ -39,6 +39,8 @@ MODALITIES = ["spectra", "z", "wise", "image"]
 NICE = {"spectra": "Spectra", "z": "Redshift", "wise": "WISE", "image": "Images"}
 LETTER = {"spectra": "S", "z": "Z", "wise": "W", "image": "I"}
 COLOR = {"spectra": "#7B4FA3", "z": "#D62728", "wise": "#8C5A2B", "image": "#2E86C1"}
+BASELINE_C = "#9a9a9a"          # emission-lines-only reference bar
+X_OFFSET = 1.9                  # gap between that bar and the combinations
 HEADS = [("log_ml_flux_1", "log flux"), ("log_lx", r"log $L_X$"), ("log_sfr", "log SFR"),
          ("logmstar", r"log $M_*$")]
 
@@ -101,23 +103,37 @@ def banded_bar(ax, x, height, width, members) -> None:
                     path_effects=[pe.withStroke(linewidth=1.6, foreground="#00000055")])
 
 
-def panel(ax, values: dict[str, float], order, title: str) -> None:
-    xs = np.arange(len(order))
+def value_label(ax, x, v, hi) -> None:
+    """Bold, on a white plate: the reference lines cross these numbers."""
+    ax.text(x, v + 0.020 * hi, f"{v:.2f}", ha="center", va="bottom", zorder=8,
+            fontsize=10.5, color=INK, fontweight="bold",
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.88,
+                      boxstyle="round,pad=0.16"))
+
+
+def panel(ax, values: dict[str, float], order, title: str,
+          baseline: float = np.nan) -> None:
+    xs = np.arange(len(order)) + X_OFFSET
     vals = np.array([values.get(key(c), np.nan) for c in order], float)
-    hi = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
+    hi = np.nanmax([np.nanmax(vals) if np.isfinite(vals).any() else 1.0,
+                    baseline if np.isfinite(baseline) else 0.0])
     # limits FIRST: banded_bar reads transData to get the 45-degree slope right
-    ax.set_xlim(-0.7, len(order) - 0.3)
+    ax.set_xlim(-0.85, len(order) + X_OFFSET - 0.35)
     ax.set_ylim(0, hi * 1.16)
+    if np.isfinite(baseline):
+        ax.bar([0.0], [baseline], width=0.78, color=BASELINE_C, zorder=3)
+        value_label(ax, 0.0, baseline, hi)
     for x, combo, v in zip(xs, order, vals):
         members = [m for m in MODALITIES if m in combo]     # fixed vertical order
         banded_bar(ax, x, v, 0.78, members)
         if np.isfinite(v):
-            ax.text(x, v + 0.018 * hi, f"{v:.2f}", ha="center", va="bottom",
-                    fontsize=10.5, color=INK)
+            value_label(ax, x, v, hi)
+    # solid and ON TOP of the bars, so each modality's solo level can be read
+    # straight across the combinations that contain it
     for m in MODALITIES:
         v = values.get(key((m,)), np.nan)
         if np.isfinite(v):
-            ax.axhline(v, ls=":", lw=1.8, color=COLOR[m], alpha=0.95, zorder=2)
+            ax.axhline(v, ls="-", lw=2.0, color=COLOR[m], alpha=0.95, zorder=6)
     ax.set_ylabel("information gain [nats]", fontsize=13)
     ax.set_title(title, fontsize=17, color=INK, loc="left", pad=12)
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
@@ -133,6 +149,8 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--metrics", type=Path, required=True)
     ap.add_argument("--figdir", type=Path, default=Path("docs/figures"))
+    ap.add_argument("--baseline", type=Path, default=None,
+                    help="baseline_lines_only_clean.csv; drawn as the leftmost grey bar")
     ap.add_argument("--single-label", default="log flux")
     args = ap.parse_args()
 
@@ -146,15 +164,23 @@ def main() -> None:
     else:
         targets = [("flux", args.single_label, df)]
 
-    handles = [Patch(facecolor=COLOR[m], edgecolor="none",
-                     label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
+    base = pd.read_csv(args.baseline) if args.baseline and args.baseline.exists() else None
+    handles = [Patch(facecolor=BASELINE_C, edgecolor="none", label="Emission lines only")]
+    handles += [Patch(facecolor=COLOR[m], edgecolor="none",
+                      label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
     for head, lbl, d in targets:
         vals = dict(zip(d.input_group.astype(str), d.info_gain_nats.astype(float)))
         fig, ax = plt.subplots(figsize=(13.2, 6.0))
-        panel(ax, vals, order, f"{lbl}: information gain by input combination")
-        fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
-                   fontsize=15, bbox_to_anchor=(0.5, -0.035), handlelength=1.9,
-                   handleheight=1.5, columnspacing=2.6)
+        bval = np.nan
+        if base is not None:
+            r = base[base["head"] == head]
+            if len(r):
+                bval = float(r.info_gain_nats.iloc[0])
+        panel(ax, vals, order, f"{lbl}: information gain by input combination",
+              baseline=bval)
+        fig.legend(handles=handles, loc="lower center", ncol=5, frameon=False,
+                   fontsize=14, bbox_to_anchor=(0.5, -0.035), handlelength=1.8,
+                   handleheight=1.4, columnspacing=1.9)
         out = args.figdir / f"fig_upset_{head}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)

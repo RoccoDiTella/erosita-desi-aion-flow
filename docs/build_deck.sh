@@ -53,7 +53,8 @@ fi
 
 $PY docs/make_results_figure.py --metrics "$EVAL/multi_test_metrics.csv" \
   --hr-csv "$EVAL/hr_implied_target.csv" ${LINES:+--baseline "$LINES"}
-$PY docs/make_modality_upset.py --metrics "$EVAL/multi_test_metrics.csv"
+$PY docs/make_modality_upset.py --metrics "$EVAL/multi_test_metrics.csv" \
+  ${LINES:+--baseline "$LINES"}
 
 $PY docs/make_slides.py --mt-metrics "$EVAL/multi_test_metrics.csv" \
   --counts-csv docs/figures/data_counts.csv
