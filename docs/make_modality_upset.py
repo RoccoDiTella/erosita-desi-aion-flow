@@ -39,8 +39,7 @@ MODALITIES = ["spectra", "z", "wise", "image"]
 NICE = {"spectra": "Spectra", "z": "Redshift", "wise": "WISE", "image": "Images"}
 LETTER = {"spectra": "S", "z": "Z", "wise": "W", "image": "I"}
 COLOR = {"spectra": "#7B4FA3", "z": "#D62728", "wise": "#8C5A2B", "image": "#2E86C1"}
-BASELINE_C = "#9a9a9a"          # emission-lines-only reference bar
-X_OFFSET = 1.9                  # gap between that bar and the combinations
+BASELINE_C = "#6a6a6a"          # emission-lines-only level, shown as the "EL" y tick
 HEADS = [("log_ml_flux_1", "log flux"), ("log_lx", r"log $L_X$"), ("log_sfr", "log SFR"),
          ("logmstar", r"log $M_*$")]
 
@@ -113,27 +112,22 @@ def value_label(ax, x, v, hi) -> None:
 
 def panel(ax, values: dict[str, float], order, title: str,
           baseline: float = np.nan) -> None:
-    xs = np.arange(len(order)) + X_OFFSET
+    xs = np.arange(len(order))
     vals = np.array([values.get(key(c), np.nan) for c in order], float)
-    hi = np.nanmax([np.nanmax(vals) if np.isfinite(vals).any() else 1.0,
-                    baseline if np.isfinite(baseline) else 0.0])
+    hi = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
     # limits FIRST: banded_bar reads transData to get the 45-degree slope right
-    ax.set_xlim(-0.85, len(order) + X_OFFSET - 0.35)
+    ax.set_xlim(-0.7, len(order) - 0.3)
     ax.set_ylim(0, hi * 1.16)
-    if np.isfinite(baseline):
-        ax.bar([0.0], [baseline], width=0.78, color=BASELINE_C, zorder=3)
-        value_label(ax, 0.0, baseline, hi)
     for x, combo, v in zip(xs, order, vals):
         members = [m for m in MODALITIES if m in combo]     # fixed vertical order
         banded_bar(ax, x, v, 0.78, members)
         if np.isfinite(v):
             value_label(ax, x, v, hi)
-    # solid and ON TOP of the bars, so each modality's solo level can be read
-    # straight across the combinations that contain it
+    # solid, but UNDER the bars
     for m in MODALITIES:
         v = values.get(key((m,)), np.nan)
         if np.isfinite(v):
-            ax.axhline(v, ls="-", lw=2.0, color=COLOR[m], alpha=0.95, zorder=6)
+            ax.axhline(v, ls="-", lw=2.0, color=COLOR[m], alpha=0.95, zorder=2)
     ax.set_ylabel("information gain [nats]", fontsize=13)
     ax.set_title(title, fontsize=17, color=INK, loc="left", pad=12)
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
@@ -142,6 +136,26 @@ def panel(ax, values: dict[str, float], order, title: str,
     ax.tick_params(labelsize=12)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
+    # the emission-lines-only baseline as an extra y tick rather than a bar --
+    # it is not an input combination, so it does not belong among them
+    if np.isfinite(baseline):
+        lo, up = ax.get_ylim()
+        ticks = [t for t in ax.get_yticks() if lo <= t <= up]
+        # keep the decimals matplotlib would have used; f"{t:g}" silently turns
+        # 0.0 and 1.0 into "0" and "1" and the axis stops looking uniform
+        step = (ticks[1] - ticks[0]) if len(ticks) > 1 else 1.0
+        dec = max(0, int(np.ceil(-np.log10(step)))) if step > 0 else 1
+        # drop a numeric tick that EL would print on top of
+        ticks = [t for t in ticks if abs(t - baseline) > 0.4 * step]
+        labels = [f"{t:.{dec}f}" for t in ticks]
+        ticks.append(baseline)
+        labels.append("EL")
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(labels)
+        for lab, t in zip(ax.get_yticklabels(), ticks):
+            if t == baseline:
+                lab.set_color(BASELINE_C)
+                lab.set_fontweight("bold")
 
 
 def main() -> None:
@@ -165,9 +179,8 @@ def main() -> None:
         targets = [("flux", args.single_label, df)]
 
     base = pd.read_csv(args.baseline) if args.baseline and args.baseline.exists() else None
-    handles = [Patch(facecolor=BASELINE_C, edgecolor="none", label="Emission lines only")]
-    handles += [Patch(facecolor=COLOR[m], edgecolor="none",
-                      label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
+    handles = [Patch(facecolor=COLOR[m], edgecolor="none",
+                     label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
     for head, lbl, d in targets:
         vals = dict(zip(d.input_group.astype(str), d.info_gain_nats.astype(float)))
         fig, ax = plt.subplots(figsize=(13.2, 6.0))
@@ -178,7 +191,7 @@ def main() -> None:
                 bval = float(r.info_gain_nats.iloc[0])
         panel(ax, vals, order, f"{lbl}: information gain by input combination",
               baseline=bval)
-        fig.legend(handles=handles, loc="lower center", ncol=5, frameon=False,
+        fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
                    fontsize=14, bbox_to_anchor=(0.5, -0.035), handlelength=1.8,
                    handleheight=1.4, columnspacing=1.9)
         out = args.figdir / f"fig_upset_{head}.png"
