@@ -38,13 +38,19 @@ All from the CIGALE VAC we already pulled (`IronPhysProp_v1.2.fits`, 7.3 GB).
 
 | target | definition | n | error | note |
 |---|---|---|---|---|
-| **catalogue sSFR** | `LOGSFR − LOGM` | 17,294 (68.6%) | yes, from both terms | one fit, so the two terms are internally consistent — exact algebra, no modelling choice |
+| **sSFR** | `LOGSFR − LOGM` | 17,294 (68.6%) | partial — see below | **No DESI VAC publishes sSFR as a column** (checked CIGALE 69 cols, FastSpecFit 817, stellar-mass-emline 420). Only PROVABGS has one, and it overlaps us by 114 sources. So this is derived — but by an exact definition with no calibration or free parameter, from two columns of the *same* fit, which puts it in a different class from M_BH or Eddington ratio |
 | `AGNLUM` | AGN bolometric luminosity (W) | 24,592 (97.6%) | **no** | highest coverage of anything on this page |
 | `AGNFRAC` | AGN share of total IR | 24,592 (97.6%) | **no** | directly quantifies the AGN contamination that compromises the SFR/M★ labels |
 | CIGALE `LOGM` | stellar mass, independent of FastSpecFit | ~24,600 | **yes**, LOGM_ERR | would replace the fabricated 0.2/0.3 dex floor on our current mass target |
 | `NUVR`, `UV`, `VJ`, `GR` | rest-frame colours | ~24,600 | yes | UVJ quiescent / star-forming classification |
 
-**sSFR caution.** Median catalogue log sSFR is **−8.15** yr⁻¹, whereas normal
+**sSFR error caution.** σ(sSFR) needs the *correlation* between `LOGM_ERR` and
+`LOGSFR_ERR`, and CIGALE publishes no posterior covariance. In SED fitting these
+are typically anti-correlated — attributing more light to young stars raises SFR
+and lowers M★ — so treating them as independent would understate the uncertainty,
+not overstate it.
+
+**sSFR value caution.** Median log sSFR is **−8.15** yr⁻¹, whereas normal
 star-forming galaxies sit at −9 to −10. Implausibly high, consistent with AGN
 light being counted as star formation. Relatedly, the star-forming main sequence
 fitted on our training sample has slope **0.076** (R² 0.001) against a literature
@@ -101,7 +107,7 @@ than a catalogue's.
 | dust A_V | Balmer decrement, as above | ~5,700 | |
 | BPT class | [NII]/Hα vs [OIII]/Hβ, Kauffmann+2003 / Kewley+2001 | 5,140 | 536 star-forming, 994 composite, 3,610 AGN |
 | Γ (photon index) | deterministic transform of HR under a power law | as HR | no new information beyond HR |
-| model-implied sSFR | difference of the log SFR and log M★ posteriors | all | valid only if their errors are conditionally independent — that is exactly what the copula diagnostic measures. Cross-check against the Tier-2 catalogue sSFR |
+| model-implied sSFR | difference of the log SFR and log M★ posteriors | all | valid only if their errors are conditionally independent — exactly what the copula diagnostic measures. Training a *direct* sSFR head as well settles it empirically: if the head is sharper than the difference, the errors were correlated |
 
 ---
 
@@ -129,7 +135,7 @@ than a catalogue's.
 
 ## Suggested order
 
-1. **Now, free:** catalogue sSFR, AGNFRAC, AGNLUM, CIGALE LOGM (for its real error).
+1. **Now, free:** sSFR (derived by definition), AGNFRAC, AGNLUM, CIGALE LOGM (for its real error).
 2. **Now, 109 MB:** log M_BH — catalogued, five calibrations, with errors.
 3. **Then:** Eddington ratio, once M_BH is in and the L3000 units are checked.
 4. **Only if VDISP is wanted for itself:** the 70 GB FastSpecFit pull. Its riders
