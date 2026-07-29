@@ -218,9 +218,9 @@ def main() -> None:
             {"joint availability": "M★ and SFR", "n": "17,294", "of sample": "69%"},
             {"joint availability": "M$_{BH}$ and SFR", "n": "6,533", "of sample": "26%"},
             {"joint availability": "M$_{BH}$, M★, SFR, P3", "n": "5,997", "of sample": "24%"},
-            {"joint availability": "at least one of them", "n": "24,893", "of sample": "99%"},
         ])
-        metric_table(ax, overlap, rect=(0.50, 0.70, 0.48, 0.26), fontsize=11.5,
+        # top edge and row height kept equal to the inputs table beside it
+        metric_table(ax, overlap, rect=(0.50, 0.752, 0.48, 0.208), fontsize=11.5,
                      left_align_first=True)
         tgt = pd.DataFrame([
             {"target": "log flux", "catalogue": "eROSITA eRASS1",
