@@ -203,31 +203,46 @@ def main() -> None:
             return f"{counts.get(key, default):,}"
 
         fig, ax = new_slide("The data", "one row per source after cleaning · n = 25,200")
-        prov = pd.DataFrame([
-            {"product": "X-ray flux, band rates", "source": "eROSITA eRASS1 main catalog"},
-            {"product": "optical spectrum, redshift", "source": "DESI DR1"},
-            {"product": "emission lines, log M★", "source": "DESI DR1 agngal VAC (FastSpecFit)"},
-            {"product": "log SFR", "source": "DESI DR1 CIGALE VAC (Siudek+2024)"},
-            {"product": "image cutout, griz", "source": "Legacy Survey DR10"},
-            {"product": "counterpart validation", "source": "NWAY / Salvato+2025"},
+        inputs = pd.DataFrame([
+            {"input": "optical spectrum", "from": "DESI DR1"},
+            {"input": "redshift", "from": "DESI DR1 (Redrock)"},
+            {"input": "image cutout, grz", "from": "Legacy Survey DR10"},
+            {"input": "WISE W1-W3", "from": "Legacy Survey DR10"},
         ])
-        metric_table(ax, prov, rect=(0.02, 0.44, 0.62, 0.44), fontsize=12.5,
+        metric_table(ax, inputs, rect=(0.02, 0.66, 0.46, 0.26), fontsize=12,
                      left_align_first=True)
-        # counts live only here, so nothing is stated twice on the slide
-        band = pd.DataFrame([
-            {"target": "log flux", "usable rows": n("log_ml_flux_1", 25200)},
-            {"target": "log L$_X$", "usable rows": n("log_lx", 25200)},
-            {"target": "log SFR", "usable rows": n("log_sfr", 17294)},
-            {"target": "P2 flux", "usable rows": n("log_flux_p2", 23803)},
-            {"target": "P3 flux", "usable rows": n("log_flux_p3", 23151)},
-        ])
-        metric_table(ax, band, rect=(0.68, 0.44, 0.30, 0.44), fontsize=12)
-        fig.text(0.045, 0.30,
+        fig.text(0.53, 0.815,
+                 "Counterparts validated against NWAY / Salvato+2025.\n"
                  "All VACs pulled from the public DESI S3 bucket (desidata);\n"
-                 "the documented data.desi.lbl.gov/public root 404s.\n\n"
-                 "SFR is the one target that is not near-complete: the CIGALE\n"
-                 "fit is rejected for 31% of sources by the published quality cuts.",
-                 fontsize=12.5, color=INK, va="top")
+                 "the documented data.desi.lbl.gov/public root 404s.",
+                 fontsize=12, color=MUTED, va="top")
+        tgt = pd.DataFrame([
+            {"target": "log flux", "catalogue": "eROSITA eRASS1",
+             "column / formula": "log₁₀ ML_FLUX_1", "n": n("log_ml_flux_1", 25200), "σ": "yes"},
+            {"target": "log L$_X$", "catalogue": "eRASS1 + DESI z",
+             "column / formula": "log₁₀(4π D$_L$(z)² · F)", "n": n("log_lx", 25200), "σ": "yes"},
+            {"target": "P2, P3 flux", "catalogue": "eROSITA eRASS1",
+             "column / formula": "log₁₀ ML_FLUX_P2, _P3",
+             "n": f"{n('log_flux_p2', 23803)} / {n('log_flux_p3', 23151)}", "σ": "yes"},
+            {"target": "HR32", "catalogue": "eROSITA eRASS1",
+             "column / formula": "from the joint (P2,P3) flow", "n": "2,169", "σ": "—"},
+            {"target": "log M★", "catalogue": "FastSpecFit (via agngal)",
+             "column / formula": "LOGMSTAR  (direct)", "n": "25,200", "σ": "no"},
+            {"target": "log SFR", "catalogue": "CIGALE (Siudek+2024)",
+             "column / formula": "LOGSFR  (direct)", "n": n("log_sfr", 17294), "σ": "yes"},
+            {"target": "log sSFR", "catalogue": "CIGALE (Siudek+2024)",
+             "column / formula": "LOGSFR − LOGM  (computed)", "n": "17,294", "σ": "partial"},
+            {"target": "log M$_{BH}$", "catalogue": "qmassiron BH VAC",
+             "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,356", "σ": "yes"},
+        ])
+        metric_table(ax, tgt, rect=(0.02, 0.13, 0.96, 0.50), fontsize=11,
+                     left_align_first=True)
+        fig.text(0.045, 0.105,
+                 "Every X-ray target is a log of a catalogue column; L$_X$ additionally needs the redshift. "
+                 "M★, SFR and M$_{BH}$ are catalogue columns as published.\n"
+                 "sSFR is the only computed target, and only by its definition SFR/M★ — no calibration, "
+                 "both terms from the same fit.",
+                 fontsize=11.5, color=MUTED, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- DATA 2: what the inputs look like
