@@ -226,22 +226,24 @@ def main() -> None:
              "n": f"{n('log_flux_p2', 23803)} / {n('log_flux_p3', 23151)}", "σ": "yes"},
             {"target": "HR32", "catalogue": "eROSITA eRASS1",
              "column / formula": "from the joint (P2,P3) flow", "n": "2,169", "σ": "—"},
-            {"target": "log M★", "catalogue": "FastSpecFit (via agngal)",
-             "column / formula": "LOGMSTAR  (direct)", "n": "25,200", "σ": "no"},
+            {"target": "log M★", "catalogue": "CIGALE (Siudek+2024)",
+             "column / formula": "LOGM  (direct)", "n": n("logmstar_cigale", 19444), "σ": "yes"},
             {"target": "log SFR", "catalogue": "CIGALE (Siudek+2024)",
              "column / formula": "LOGSFR  (direct)", "n": n("log_sfr", 17294), "σ": "yes"},
-            {"target": "log sSFR", "catalogue": "CIGALE (Siudek+2024)",
-             "column / formula": "LOGSFR − LOGM  (computed)", "n": "17,294", "σ": "partial"},
             {"target": "log M$_{BH}$", "catalogue": "qmassiron BH VAC",
-             "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,356", "σ": "yes"},
+             "column / formula": "LOGMASS_DAS_PAN25  (direct)", "n": n("log_mbh_pan25", 9373), "σ": "yes"},
+            {"target": "log M$_{BH}$ (VO09)", "catalogue": "qmassiron BH VAC",
+             "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,366", "σ": "yes"},
+            {"target": "log sSFR", "catalogue": "— not trained —",
+             "column / formula": "implied from the (M★,SFR) joint", "n": "17,294", "σ": "from the joint"},
         ])
-        metric_table(ax, tgt, rect=(0.02, 0.13, 0.96, 0.50), fontsize=11,
+        metric_table(ax, tgt, rect=(0.02, 0.11, 0.96, 0.54), fontsize=10.5,
                      left_align_first=True)
         fig.text(0.045, 0.105,
                  "Every X-ray target is a log of a catalogue column; L$_X$ additionally needs the redshift. "
                  "M★, SFR and M$_{BH}$ are catalogue columns as published.\n"
-                 "sSFR is the only computed target, and only by its definition SFR/M★ — no calibration, "
-                 "both terms from the same fit.",
+                 "M★ and SFR come from ONE fit, so their main sequence is intact (slope +0.745) and sSFR is "
+                 "well defined — it is implied from the joint, never trained.",
                  fontsize=11.5, color=MUTED, va="top")
         pdf.savefig(fig); plt.close(fig)
 

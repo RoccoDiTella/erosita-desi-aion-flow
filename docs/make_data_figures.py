@@ -29,12 +29,13 @@ from matplotlib.colors import LogNorm  # noqa: E402
 
 INK, MUTED, GRID = "#1a1a1a", "#6a6a6a", "#d8d8d8"
 VARS = [
-    ("log_ml_flux_1", r"log $F_X$"),
-    ("log_lx",        r"log $L_X$"),
-    ("log_sfr",       r"log SFR"),
-    ("z",             r"$z$"),
-    ("log_flux_p2",   r"log $F_{P2}$"),
-    ("log_flux_p3",   r"log $F_{P3}$"),
+    ("log_ml_flux_1",   r"log $F_X$"),
+    ("log_lx",          r"log $L_X$"),
+    ("logmstar_cigale", r"log $M_*$"),
+    ("log_sfr",         r"log SFR"),
+    ("log_mbh_pan25",   r"log $M_{BH}$"),
+    ("log_flux_p2",     r"log $F_{P2}$"),
+    ("z",               r"$z$"),
 ]
 
 
@@ -91,22 +92,23 @@ def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
             ax.tick_params(labelsize=tick_size, length=2)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
-            if i == k - 1:
-                ax.set_xlabel(lj, fontsize=label_size)
-            else:
+            # every panel is labelled on both axes, not just the outer edge, so
+            # each one can be read on its own without counting rows and columns
+            ax.set_xlabel(lj, fontsize=label_size, labelpad=1.5)
+            ax.set_ylabel(li if i != j else "count", fontsize=label_size, labelpad=1.5)
+            # tick NUMBERS stay on the outside only, or the grid is unreadable
+            if i != k - 1:
                 ax.set_xticklabels([])
-            if j == 0 and i != 0:
-                ax.set_ylabel(li, fontsize=label_size)
-            else:
+            if j != 0 or i == 0:
                 ax.set_yticklabels([])
 
 
 def corner(df: pd.DataFrame, out: Path) -> None:
     data = {n: df[n].to_numpy(float) for n, _ in VARS}
-    fig, axes = plt.subplots(len(VARS), len(VARS), figsize=(11.0, 9.4))
+    fig, axes = plt.subplots(len(VARS), len(VARS), figsize=(12.4, 10.6))
     draw_corner(fig, data, axes=axes)
     fig.suptitle("Empirical joint of the targets (clean sample)", fontsize=12.5, color=INK, y=0.985)
-    fig.tight_layout(rect=(0, 0, 1, 0.965))
+    fig.tight_layout(rect=(0, 0, 1, 0.965), h_pad=0.7, w_pad=0.7)
     fig.savefig(out, dpi=170, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {out}")

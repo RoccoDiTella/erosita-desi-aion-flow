@@ -50,12 +50,20 @@ are typically anti-correlated — attributing more light to young stars raises S
 and lowers M★ — so treating them as independent would understate the uncertainty,
 not overstate it.
 
-**sSFR value caution.** Median log sSFR is **−8.15** yr⁻¹, whereas normal
-star-forming galaxies sit at −9 to −10. Implausibly high, consistent with AGN
-light being counted as star formation. Relatedly, the star-forming main sequence
-fitted on our training sample has slope **0.076** (R² 0.001) against a literature
-0.7–1.0 — flat, because CIGALE's M★ and SFR are both AGN-compromised here. Read
-that as a warning about the labels, not a result about galaxies.
+**The main sequence is NOT flat — corrected 2026-07-29.** An earlier note here
+claimed slope 0.076 (R² 0.001) and blamed AGN contamination. That was a
+cross-catalogue artifact: it compared **FastSpecFit's** mass against **CIGALE's**
+SFR. With both from the same CIGALE fit the relation is entirely normal —
+**slope +0.745, R² 0.316, scatter 0.588 dex**, squarely in the literature 0.7–1.0
+range. This also reconciles the independent Hα measurement (R² 0.295 on 536
+star-forming sources), which had been disagreeing with the broken number all
+along. It is the clearest argument for taking mass and SFR from one fit.
+
+**sSFR value caution (this one stands).** Median log sSFR is **−8.15** yr⁻¹ where
+normal star-forming galaxies sit at −9 to −10 — implausibly high, consistent with
+AGN light being counted as star formation. That is about absolute values, not the
+relation. Measured sd of log sSFR is 0.604 dex, *narrower* than log SFR's 0.711,
+because the correlation suppresses it.
 
 ---
 

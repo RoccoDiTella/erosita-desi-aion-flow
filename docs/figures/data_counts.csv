@@ -1,7 +1,8 @@
 variable,n_usable
 log_ml_flux_1,25200
 log_lx,25200
+logmstar_cigale,19444
 log_sfr,17294
-z,25200
+log_mbh_pan25,9373
 log_flux_p2,23803
-log_flux_p3,23151
+z,25200

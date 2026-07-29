@@ -858,3 +858,30 @@ matters about as much as the measurement does.
 
 *Head set:* 9 scalar + the P2xP3 joint = 10, with `log_flux_p4` and `logmstar`
 dropped by default. Sidecar `targets_sidecar.csv` is 39 columns / 12 MB.
+
+**CORRECTION: the "flat main sequence" was a cross-catalogue artifact
+(2026-07-29).** The 2026-07-28 SFR entry above records the star-forming main
+sequence as nearly flat on this sample — `logSFR = 0.076*logM* + 1.233`, R² 0.001
+— and attributes it to AGN-compromised CIGALE fits. **That is wrong.** It
+compared **FastSpecFit's** `logmstar` against **CIGALE's** `LOGSFR`: two
+different SED fits. With both taken from the same CIGALE fit the relation is
+normal: **slope +0.745, corr +0.562, R² 0.316, scatter 0.588 dex** on 17,294
+sources, inside the literature 0.7–1.0 range.
+
+It also resolves a disagreement that should have been caught earlier: the
+independent Halpha-based measurement (R² 0.295 on 536 BPT star-forming sources)
+never matched the 0.007 cross-catalogue number, and it was the cross-catalogue
+number that was broken.
+
+Consequences:
+- **`eval/sfr_vs_mass_baseline.csv` from run 35828655 is inflated.** It reported
+  the SFR head at R² 0.815 against a mass-only baseline of 0.008, using
+  FastSpecFit mass. Against `logmstar_cigale` a mass-only predictor reaches
+  ~0.32, so the margin is ~0.50, not ~0.81. The verdict (the head is measuring
+  SFR, not mass) survives; the number does not. The check must be recomputed
+  against the CIGALE mass.
+- The earlier estimate of R²(sSFR) ~ 0.79 assumed zero covariance and is void.
+  Measured sd(log sSFR) = 0.604 dex, NARROWER than sd(log SFR) = 0.711, because
+  the correlation suppresses it.
+- This is the strongest argument for the CIGALE switch: mixing fits did not just
+  make sSFR ill-defined, it destroyed a real physical relation.
