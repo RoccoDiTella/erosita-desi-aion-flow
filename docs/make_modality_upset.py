@@ -49,18 +49,30 @@ def key(combo: tuple[str, ...]) -> str:
     return "+".join(m for m in MODALITIES if m in combo)
 
 
-def striped_bar(ax, x, height, width, colors, stripe_px: int = 9) -> None:
-    """Fill a bar with diagonal stripes cycling through `colors`.
+def striped_bar(ax, x, height, width, colors, stripe_in: float = 0.115,
+                slope: float = 1.7, ppi: int = 160) -> None:
+    """Fill a bar with thick diagonal stripes cycling through `colors`.
 
-    matplotlib hatching cannot do multi-colour stripes, so paint a small RGBA
-    raster of diagonal bands and clip it to the bar rectangle.
+    matplotlib hatching cannot do multi-colour stripes, so paint an RGBA raster
+    of diagonal bands and clip it to the bar rectangle.
+
+    The raster is built in PAGE space (inches), not in a fixed square grid: bars
+    here are ~7x taller than they are wide, so a square pattern gets stretched
+    and the stripes come out nearly vertical. Sizing the grid to the bar's real
+    aspect makes `slope` mean what it says -- slope=1 is 45 degrees, higher tilts
+    further over. `stripe_in` is the stripe width in inches on the page.
     """
-    if height <= 0 or not np.isfinite(height):
+    if not np.isfinite(height) or height <= 0:
         return
-    n = 256
-    ii, jj = np.mgrid[0:n, 0:n]
-    band = ((ii + jj) // stripe_px) % len(colors)
-    rgba = np.zeros((n, n, 4))
+    dpi = ax.figure.dpi
+    p0 = ax.transData.transform((x - width / 2, 0.0))
+    p1 = ax.transData.transform((x + width / 2, height))
+    w_in, h_in = abs(p1[0] - p0[0]) / dpi, abs(p1[1] - p0[1]) / dpi
+    nx, ny = max(8, int(w_in * ppi)), max(8, int(h_in * ppi))
+    ii, jj = np.mgrid[0:ny, 0:nx]
+    sw = max(2, int(stripe_in * ppi))
+    band = ((jj + slope * ii).astype(int) // sw) % len(colors)
+    rgba = np.zeros((ny, nx, 4))
     for k, c in enumerate(colors):
         rgba[band == k] = matplotlib.colors.to_rgba(c)
     rect = Rectangle((x - width / 2, 0), width, height, transform=ax.transData)
@@ -73,6 +85,9 @@ def panel(ax, values: dict[str, float], order, title: str) -> None:
     xs = np.arange(len(order))
     vals = np.array([values.get(key(c), np.nan) for c in order], float)
     hi = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
+    # limits FIRST: striped_bar reads transData to size its raster in page space
+    ax.set_xlim(-0.7, len(order) + 2.1)
+    ax.set_ylim(0, hi * 1.14)
     for x, combo, v in zip(xs, order, vals):
         striped_bar(ax, x, v, 0.74, [COLOR[m] for m in MODALITIES if m in combo])
         if np.isfinite(v):
@@ -96,8 +111,6 @@ def panel(ax, values: dict[str, float], order, title: str) -> None:
     ax.set_title(title, fontsize=16, color=INK, loc="left", pad=10)
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
     ax.set_axisbelow(True)
-    ax.set_xlim(-0.7, len(order) + 2.1)
-    ax.set_ylim(0, hi * 1.14)
     ax.set_xticks([])
     ax.tick_params(labelsize=11)
     for sp in ("top", "right"):
