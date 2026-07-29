@@ -28,20 +28,27 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
 
 INK, MUTED, GRID = "#1a1a1a", "#6a6a6a", "#d8d8d8"
-VARS = [
-    ("log_ml_flux_1",   r"log $F_X$"),
-    ("log_lx",          r"log $L_X$"),
-    ("logmstar_cigale", r"log $M_*$"),
-    ("log_sfr",         r"log SFR"),
-    ("log_mbh_pan25",   r"log $M_{BH}$"),
-    ("log_flux_p2",     r"log $F_{P2}$"),
-    ("z",               r"$z$"),
-]
+# Two variants of the same corner. A: mass, SFR and sSFR all from CIGALE, which
+# is what we train. B: the same three from sources INDEPENDENT of CIGALE --
+# FastSpecFit's stellar mass and an Halpha-derived SFR. B exists to show whether
+# the structure in A is physical or an artefact of one SED fit. Its SFR panels
+# are small: an Halpha SFR needs the line inside the DESI window plus a Balmer
+# decrement, which is only ~536 BPT star-forming sources.
+_COMMON = [("z", r"$z$"), ("log_ml_flux_1", r"log $F_X$"), ("log_lx", r"log $L_X$"),
+           ("log_flux_p3", r"log $F_{P3}$")]
+VARS_CIGALE = _COMMON + [("logmstar_cigale", r"log $M_*$"), ("log_sfr", r"log SFR"),
+                         ("log_ssfr_cig", r"log sSFR")]
+VARS_ALT = _COMMON + [("logmstar_fsf", r"log $M_*$"), ("log_sfr_ha", r"log SFR"),
+                      ("log_ssfr_alt", r"log sSFR")]
+VARS = VARS_CIGALE          # what the deck slide draws
 
 
 def load(args) -> pd.DataFrame:
+    LINES = ["halpha_flux", "halpha_flux_ivar", "hbeta_flux", "hbeta_flux_ivar",
+             "nii_6584_flux", "nii_6584_flux_ivar", "oiii_5007_flux", "oiii_5007_flux_ivar"]
     props = pd.read_csv(args.all_properties, low_memory=False,
-                        usecols=["targetid", "z", "ls_id", "spectype"]).drop_duplicates("targetid")
+                        usecols=["targetid", "z", "ls_id", "spectype", "logmstar"] + LINES
+                        ).drop_duplicates("targetid")
     with h5py.File(args.spectra_hdf5, "r") as h:
         hd = pd.DataFrame({"targetid": h["desi_targetid"][:].astype(np.int64),
                            "ml_flux_1": h["ml_flux_1"][:].astype(np.float64)})
@@ -56,6 +63,32 @@ def load(args) -> pd.DataFrame:
         import astropy.units as u
         dl = Planck18.luminosity_distance(np.clip(df.z.to_numpy(float), 1e-4, None)).to(u.cm).value
         df["log_lx"] = df.log_ml_flux_1 + np.log10(4 * np.pi * dl ** 2)
+
+        # --- variant A: everything from the one CIGALE fit ---
+        df["log_ssfr_cig"] = df.log_sfr - df.logmstar_cigale
+
+        # --- variant B: independent of CIGALE ---
+        df["logmstar_fsf"] = np.where(df.logmstar > 2, df.logmstar, np.nan)
+        z = df.z.to_numpy(float)
+
+        def snr(pre):
+            f = df[f"{pre}_flux"].to_numpy(float)
+            iv = df[f"{pre}_flux_ivar"].to_numpy(float)
+            return np.where(iv > 0, f * np.sqrt(np.clip(iv, 0, None)), np.nan)
+
+        ha, hb, n2, o3 = (snr(p) for p in ("halpha", "hbeta", "nii_6584", "oiii_5007"))
+        fha = df.halpha_flux.to_numpy(float) * 1e-17
+        ratio = fha / (df.hbeta_flux.to_numpy(float) * 1e-17)
+        # Calzetti+2000 Balmer-decrement extinction, floored at zero
+        a_ha = 5.86 * np.log10(np.clip(ratio / 2.86, 1.0, None))
+        x = np.log10(df.nii_6584_flux.to_numpy(float) / df.halpha_flux.to_numpy(float))
+        y = np.log10(df.oiii_5007_flux.to_numpy(float) / df.hbeta_flux.to_numpy(float))
+        kauff = y < 0.61 / np.clip(x - 0.05, -np.inf, -0.01) + 1.3   # pure star-forming
+        # Kennicutt & Evans 2012, Chabrier IMF
+        sfr_ha = np.log10(4 * np.pi * dl ** 2 * fha * 10 ** (0.4 * a_ha)) - 41.27
+        ok = (ha > 5) & (hb > 3) & (n2 > 3) & (o3 > 3) & (z < 0.492) & kauff
+        df["log_sfr_ha"] = np.where(ok, sfr_ha, np.nan)
+        df["log_ssfr_alt"] = df.log_sfr_ha - df.logmstar_fsf
     return df
 
 
@@ -103,20 +136,25 @@ def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
                 ax.set_yticklabels([])
 
 
-def corner(df: pd.DataFrame, out: Path) -> None:
-    data = {n: df[n].to_numpy(float) for n, _ in VARS}
-    fig, axes = plt.subplots(len(VARS), len(VARS), figsize=(12.4, 10.6))
+def corner(df: pd.DataFrame, out: Path, variables=None, title=None) -> None:
+    global VARS
+    variables = variables or VARS_CIGALE
+    prev, VARS = VARS, variables
+    data = {n: df[n].to_numpy(float) for n, _ in variables}
+    fig, axes = plt.subplots(len(variables), len(variables), figsize=(12.4, 10.6))
     draw_corner(fig, data, axes=axes)
-    fig.suptitle("Empirical joint of the targets (clean sample)", fontsize=12.5, color=INK, y=0.985)
+    fig.suptitle(title or "Empirical joint of the targets (clean sample)",
+                 fontsize=12.5, color=INK, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.965), h_pad=0.7, w_pad=0.7)
     fig.savefig(out, dpi=170, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {out}")
     # The deck redraws this natively as vector; ship the columns so it does not
     # need the 2 GB spectra file or the raw catalogs to do so.
-    npz = out.with_name("corner_data.npz")
-    np.savez_compressed(npz, **{n: data[n].astype(np.float32) for n, _ in VARS})
+    npz = out.with_name(out.stem.replace("fig_", "") + "_data.npz")
+    np.savez_compressed(npz, **{n: data[n].astype(np.float32) for n, _ in variables})
     print(f"wrote {npz}")
+    VARS = prev
 
 
 def pick_examples(df: pd.DataFrame, n: int = 4, pool=None) -> pd.DataFrame:
@@ -219,7 +257,11 @@ def main() -> None:
     args.figdir.mkdir(parents=True, exist_ok=True)
     df = load(args)
     print(f"[data] {len(df):,} clean-split rows")
-    corner(df, args.figdir / "fig_corner.png")
+    corner(df, args.figdir / "fig_corner.png", VARS_CIGALE,
+           "Empirical joint — M$_*$, SFR, sSFR from CIGALE (what we train)")
+    corner(df, args.figdir / "fig_corner_alt.png", VARS_ALT,
+           "Empirical joint — M$_*$ from FastSpecFit, SFR from H$\\alpha$ "
+           "(independent of CIGALE)")
     ex = spectra_figure(df, args, args.figdir / "fig_examples_spectra.png")
     images_figure(ex, args, args.figdir / "fig_examples_images.png")
 

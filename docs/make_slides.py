@@ -277,6 +277,30 @@ def main() -> None:
             image_panel(fig, FIGS / "fig_corner.png", (0.16, 0.02, 0.68, 0.80))
         pdf.savefig(fig); plt.close(fig)
 
+        # ---- DATA 3b: the same joint from sources independent of CIGALE, as a
+        # check on whether the structure above is physical or one fit's artefact
+        alt = FIGS / "corner_alt_data.npz"
+        if alt.exists():
+            fig, ax = new_slide("The data",
+                                "same joint, but M$_*$ from FastSpecFit and SFR from H$\\alpha$ — "
+                                "independent of CIGALE")
+            import numpy as _np2
+            from make_data_figures import VARS_ALT, draw_corner as _dc
+            import make_data_figures as _mdf
+            d2 = _np2.load(alt)
+            k2 = len(VARS_ALT)
+            gs2 = fig.add_gridspec(k2, k2, left=0.20, right=0.82, bottom=0.05, top=0.79,
+                                   wspace=0.13, hspace=0.13)
+            ax2 = _np2.empty((k2, k2), dtype=object)
+            for i in range(k2):
+                for j in range(k2):
+                    ax2[i, j] = fig.add_subplot(gs2[i, j])
+            _prev, _mdf.VARS = _mdf.VARS, VARS_ALT
+            _dc(fig, {n: d2[n].astype(float) for n, _ in VARS_ALT}, axes=ax2,
+                label_size=8.0, tick_size=5.6)
+            _mdf.VARS = _prev
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- DATA 4: NWAY counterpart validation
         fig, ax = new_slide("The data", "counterparts validated against NWAY / Salvato+2025")
         nway = pd.DataFrame([
