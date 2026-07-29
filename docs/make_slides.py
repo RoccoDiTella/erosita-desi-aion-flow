@@ -209,42 +209,42 @@ def main() -> None:
             {"input": "image cutout, grz", "from": "Legacy Survey DR10"},
             {"input": "WISE W1-W3", "from": "Legacy Survey DR10"},
         ])
-        metric_table(ax, inputs, rect=(0.02, 0.66, 0.46, 0.26), fontsize=12,
+        metric_table(ax, inputs, rect=(0.02, 0.70, 0.42, 0.26), fontsize=12,
                      left_align_first=True)
-        fig.text(0.53, 0.815,
-                 "Counterparts validated against NWAY / Salvato+2025.\n"
-                 "All VACs pulled from the public DESI S3 bucket (desidata);\n"
-                 "the documented data.desi.lbl.gov/public root 404s.",
-                 fontsize=12, color=MUTED, va="top")
+        # How much of the sample carries several targets at once. Heads are masked
+        # per source, so a source missing one target still trains the others --
+        # which is why "at least one" matters more than "all four".
+        overlap = pd.DataFrame([
+            {"joint availability": "M★ and SFR", "n": "17,294", "of sample": "69%"},
+            {"joint availability": "M$_{BH}$ and SFR", "n": "6,533", "of sample": "26%"},
+            {"joint availability": "M$_{BH}$, M★, SFR, P3", "n": "5,997", "of sample": "24%"},
+            {"joint availability": "at least one of them", "n": "24,893", "of sample": "99%"},
+        ])
+        metric_table(ax, overlap, rect=(0.50, 0.70, 0.48, 0.26), fontsize=11.5,
+                     left_align_first=True)
         tgt = pd.DataFrame([
             {"target": "log flux", "catalogue": "eROSITA eRASS1",
-             "column / formula": "log₁₀ ML_FLUX_1", "n": n("log_ml_flux_1", 25200), "σ": "yes"},
+             "column / formula": "log₁₀ ML_FLUX_1", "n": n("log_ml_flux_1", 25200), "per-object error": "yes"},
             {"target": "log L$_X$", "catalogue": "eRASS1 + DESI z",
-             "column / formula": "log₁₀(4π D$_L$(z)² · F)", "n": n("log_lx", 25200), "σ": "yes"},
+             "column / formula": "log₁₀(4π D$_L$(z)² · F)", "n": n("log_lx", 25200), "per-object error": "yes"},
             {"target": "P2, P3 flux", "catalogue": "eROSITA eRASS1",
              "column / formula": "log₁₀ ML_FLUX_P2, _P3",
-             "n": f"{n('log_flux_p2', 23803)} / {n('log_flux_p3', 23151)}", "σ": "yes"},
+             "n": f"{n('log_flux_p2', 23803)} / {n('log_flux_p3', 23151)}", "per-object error": "yes"},
             {"target": "HR32", "catalogue": "eROSITA eRASS1",
-             "column / formula": "from the joint (P2,P3) flow", "n": "2,169", "σ": "—"},
+             "column / formula": "from the joint (P2,P3) flow", "n": "2,169", "per-object error": "—"},
             {"target": "log M★", "catalogue": "CIGALE (Siudek+2024)",
-             "column / formula": "LOGM  (direct)", "n": n("logmstar_cigale", 19444), "σ": "yes"},
+             "column / formula": "LOGM  (direct)", "n": n("logmstar_cigale", 19444), "per-object error": "yes"},
             {"target": "log SFR", "catalogue": "CIGALE (Siudek+2024)",
-             "column / formula": "LOGSFR  (direct)", "n": n("log_sfr", 17294), "σ": "yes"},
+             "column / formula": "LOGSFR  (direct)", "n": n("log_sfr", 17294), "per-object error": "yes"},
             {"target": "log M$_{BH}$", "catalogue": "qmassiron BH VAC",
-             "column / formula": "LOGMASS_DAS_PAN25  (direct)", "n": n("log_mbh_pan25", 9373), "σ": "yes"},
+             "column / formula": "LOGMASS_DAS_PAN25  (direct)", "n": n("log_mbh_pan25", 9373), "per-object error": "yes"},
             {"target": "log M$_{BH}$ (VO09)", "catalogue": "qmassiron BH VAC",
-             "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,366", "σ": "yes"},
+             "column / formula": "LOGMASS_DAS_VO09  (direct)", "n": "9,366", "per-object error": "yes"},
             {"target": "log sSFR", "catalogue": "CIGALE (Siudek+2024)",
-             "column / formula": "implied from the (M★,SFR) joint", "n": "17,294", "σ": "from the joint"},
+             "column / formula": "implied from the (M★,SFR) joint", "n": "17,294", "per-object error": "from the joint"},
         ])
-        metric_table(ax, tgt, rect=(0.02, 0.11, 0.96, 0.54), fontsize=10.5,
+        metric_table(ax, tgt, rect=(0.02, 0.05, 0.96, 0.58), fontsize=10.5,
                      left_align_first=True)
-        fig.text(0.045, 0.105,
-                 "Every X-ray target is a log of a catalogue column; L$_X$ additionally needs the redshift. "
-                 "M★, SFR and M$_{BH}$ are catalogue columns as published.\n"
-                 "M★ and SFR come from ONE fit, so their main sequence is intact (slope +0.745) and sSFR is "
-                 "well defined — it is implied from the joint, never trained.",
-                 fontsize=11.5, color=MUTED, va="top")
         pdf.savefig(fig); plt.close(fig)
 
         # ---- DATA 2: what the inputs look like
