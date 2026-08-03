@@ -360,6 +360,23 @@ def main() -> None:
         image_panel(fig, FIGS / "fig_loss_by_target.png", (0.03, 0.04, 0.94, 0.78))
         pdf.savefig(fig); plt.close(fig)
 
+        # ---- TRAINING 3: the per-head stopping problem, and the plan
+        if (FIGS / "fig_overfit.png").exists():
+            fig, ax = new_slide(
+                "One body, eight clocks",
+                "heads peak between epoch 5 and 39, but the run keeps a single checkpoint")
+            image_panel(fig, FIGS / "fig_overfit.png", (0.025, 0.335, 0.95, 0.50))
+            bullets(ax, [
+                "A converged head keeps tuning the shared trunk to itself, which costs "
+                "every other head.",
+                "Per-head checkpoints would mean storing and re-running the body per head: "
+                "that is N models again, not one.",
+                "Plan: decay a plateaued head's loss weight so it stops dragging the trunk, "
+                "then freeze the body and refit each flow on cached embeddings, each with "
+                "its own stopping epoch.",
+            ], y=0.30, dy=0.075, fontsize=12.5)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- Per-target tables, every input combination (three headline targets)
         if args.mt_metrics and Path(args.mt_metrics).exists():
             mt = pd.read_csv(args.mt_metrics)

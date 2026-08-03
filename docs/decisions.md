@@ -885,3 +885,60 @@ Consequences:
   the correlation suppresses it.
 - This is the strongest argument for the CIGALE switch: mixing fits did not just
   make sSFR ill-defined, it destroyed a real physical relation.
+
+## 8. Objective: per-head overfitting control on a shared body (2026-08-03)
+
+**The objective, stated once.** Recover each head's own best stopping point
+WITHOUT giving up the property the whole project rests on: **one body, one
+checkpoint, one forward pass, all targets.** Any fix that ends in N bodies has
+quietly rebuilt the specialized baselines we claim to beat.
+
+**The evidence** (run v4, 40 epochs, `docs/figures/v4_epoch_history.json`, drawn
+in `fig_overfit.png`). Per-head best validation epochs span **5 to 39**: P1 peaks
+at 5 and then trains 35 further epochs; log SFR is still improving at 39. The
+single kept checkpoint is epoch 34. Scoring every head there instead of at its
+own optimum costs **0.1451 nats** total, worst for log M* (0.031) and the P2xP3
+joint (0.027). Train-probe minus validation confirms it is real overfitting and
+not scale: the gap widens with epoch for 7 of 8 heads (log M* 0.389 -> 0.486).
+
+*Read the loss curves as (val - own best).* The default per-panel view uses
+independent y-scales, so a head falling 1.6 nats looks smooth while one that
+barely moves looks violently noisy, with identical epoch-to-epoch scatter. That
+appearance is a plotting artifact, not a property of the heads.
+
+**Two failure modes, which need different fixes.**
+- **(A) A converged head keeps carving the shared trunk.** Its gradient goes on
+  tuning CLS tokens, read adapters and the shared MLP to its own idiosyncrasies
+  past the point where that helps it. This damages *every* head.
+- **(B) A converged head is dragged by the others.** Even a frozen flow degrades
+  because the body underneath it keeps moving.
+
+Loss down-weighting fixes (A) only. Per-head checkpoints would fix (B) but need
+the body stored and re-run per head, which is exactly the outcome ruled out
+above. Hence:
+
+**Decision: two phases, one body.**
+1. **Joint phase.** Train body + all heads. A head whose val NLL fails to improve
+   by more than `delta` for `patience` epochs has its loss weight decayed
+   (multiplied by `gamma`, floored at 0). This exists ONLY to stop it from
+   dragging the trunk, so it can be aggressive. Keep one body checkpoint chosen
+   by the global summed-val criterion, which is the right criterion for the one
+   thing that is genuinely shared.
+2. **Refit phase.** Freeze that body. Cache CLS embeddings for train and val
+   once. Refit each flow independently on the cached embeddings, each with its
+   own early stopping. Cheap: the flows are small and the expensive frozen-AION
+   forward happens once, not once per epoch per head.
+
+This yields exact per-head early stopping, fixes (B) as well (the body does not
+move in phase 2), leaves inference at one forward pass, and makes phase-1
+down-weighting safe to push to zero since every flow is refit afterwards anyway.
+It is also the same move the project already makes one level up (freeze AION,
+fit flows on its embeddings). Standard practice: frozen-backbone per-task head
+refit; plateau down-weighting is in the GradNorm / uncertainty-weighting family.
+
+**Success criterion:** recover most of the 0.1451 nats with a single body, and
+verify no head is worse than it was under the shared checkpoint.
+
+**Not decided yet:** `delta`, `patience`, `gamma`; whether a down-weighted head
+may be re-promoted if val improves again; and whether phase 2 should re-tune
+flow width or regularization per head, or only the stopping epoch.
