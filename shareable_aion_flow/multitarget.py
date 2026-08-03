@@ -644,6 +644,7 @@ def run_train_multi(args) -> None:
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
         "joint_only": joint_only, "warmup_steps": warmup_steps,
+        "diag_every": int(getattr(args, "diag_every", 1)),
         "grad_clip": float(getattr(args, "grad_clip", 5.0)),
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
         "adapter_lr": adapter_lr, "head_lr": head_lr,

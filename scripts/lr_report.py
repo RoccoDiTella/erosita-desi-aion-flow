@@ -63,13 +63,20 @@ def main() -> None:
     config = json.loads((args.run_dir / "config.json").read_text()) \
         if (args.run_dir / "config.json").exists() else {}
 
+    # `move` is |w_t - w_{t-k}| / |w_t| across k = diag_every optimizer steps,
+    # but the ~1e-3 rule of thumb is PER STEP. Comparing a 5-step movement with
+    # a per-step target makes every group look 5x too fast, which would have led
+    # to cutting every learning rate by five.
+    k = int(config.get("diag_every", 1) or 1)
+    print(f"move is measured across {k} step(s); dividing by {k} for a per-step ratio")
+
     groups: dict[str, list[float]] = {}
     for r in rows:
         if (r.get("_step") or 0) < args.skip_steps:
             continue
-        for k, v in r.items():
-            if k.startswith("move/") and isinstance(v, (int, float)) and np.isfinite(v):
-                groups.setdefault(k[len("move/"):], []).append(float(v))
+        for key, v in r.items():
+            if key.startswith("move/") and isinstance(v, (int, float)) and np.isfinite(v):
+                groups.setdefault(key[len("move/"):], []).append(float(v) / k)
 
     if not groups:
         raise SystemExit(f"no move/ entries after step {args.skip_steps}; "
