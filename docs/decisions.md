@@ -942,3 +942,82 @@ verify no head is worse than it was under the shared checkpoint.
 **Not decided yet:** `delta`, `patience`, `gamma`; whether a down-weighted head
 may be re-promoted if val improves again; and whether phase 2 should re-tune
 flow width or regularization per head, or only the stopping epoch.
+
+## 9. Phase 1 run plan: the joint head alone (2026-08-03)
+
+**Shape of the experiment.** Train ONE head, the 4-D joint over
+(logmstar_cigale, log_sfr, log_lx, log_flux_p3), and nothing else. Then freeze
+the body and fit every marginal plus the P2xP3 joint on the frozen
+representation. Phase 1 has a single loss, so there is no weighting problem to
+solve: the whole loss-weight / per-head-LR / plateau-detection question is
+answered by not having more than one head.
+
+**Data.** 17,294 of 25,200 clean rows (68.6%) carry M*, SFR and Lx. Of those,
+1,364 lack P3 and are marginalised by the 48-node quadrature. The remaining
+7,906 rows (31.4%) do not enter phase 1 at all, and they are not a random
+sample: they are the sources CIGALE failed to fit. **If the joint looks
+data-starved, this is the first suspect**, and the fix is to generalise the
+quadrature so a missing M* or SFR is integrated out per row exactly as P3 is
+(rows missing one dimension cost the same 48 nodes we already pay).
+
+**Trainable parts.** CLS token; per-block Q/V read adapters; shared MLP
+768->512->256; the 4-D NSF flow. All of AION stays frozen.
+
+### Setting the learning rates by measurement, not by guess
+`group_metrics` already logs `move/<group>` = |w_t - w_{t-k}| / |w_t|, the
+update-to-weight ratio, for cls_tokens, adapters_low/mid/high (split by encoder
+depth), shared_mlp and each flow. A healthy group sits near 1e-3 per step;
+groups an order of magnitude off are the ones that need their own LR. This is
+the evidence that produced the current split in the first place: zero-init
+adapters (|w| ~3) moved ~30x faster than standard-init flows (|w| ~40) on a
+shared LR, and left the flows near their initialisation for an entire run.
+
+Procedure: run ~300 steps, read `move/` per group, and set each group's LR to
+bring them into one band. Measure AFTER warmup, since `move` is meaningless
+while |w| is still ~0 for the zero-init adapters. The adapter depth split
+exists so that "do deep and shallow adapters want different LRs" is answered
+with data rather than assumed.
+
+Starting point (v4 values, known to train): LR 3e-4 (MLP + CLS),
+ADAPTER_LR 1e-4, ADAPTER_WD 1e-1, WEIGHT_DECAY 1e-4, batch 896. HEAD_LR is the
+knob expected to move first: those defaults were tuned for 1-D flows and the
+joint is a 4-D density.
+
+### Three things the loop is missing and needs before this run
+1. **LR warmup.** None exists. Linear over ~300 steps. Cheap insurance for
+   zero-init adapters plus a fresh flow.
+2. **Gradient clipping.** None exists. Global norm 1.0. The quadrature path
+   takes a logsumexp over 48 nodes, and NSF spline parameters can spike on a
+   single bad batch.
+3. **`--lr-schedule` defaults to `constant`.** Pass `cosine` explicitly. One
+   scheduler scales all groups together, so the relative LR ratios set above
+   are preserved.
+
+**Also pin the EMA to 1.** With a single head, `weight = 1/EMA` becomes a
+time-varying global scale on the only loss, which is silently a second
+learning-rate schedule on top of the cosine.
+
+### Overfitting
+v4's common-mode gap grew 0.016 -> 0.121 over 40 epochs, and phase 1 has FEWER
+rows (17,294), so the risk is higher, not lower. Controls in place: weight decay
+1e-4, adapter weight decay 1e-1, error injection acting as augmentation, early
+stopping on the single joint val NLL.
+
+The useful realisation: **phase 1 is judged on the BODY, not on the flow**,
+because the flow is refit in phase 2 regardless. So snapshot the body every ~4
+epochs and let phase 2 choose among snapshots by post-refit validation. That is
+the correct criterion and it is not the same epoch as min joint val NLL.
+
+### Go / no-go gates
+- **Before GPU:** unit tests green; a 2-batch forward/backward shows a non-zero
+  `gnorm/` for every trainable group (a zero means a detached path) and
+  `requires_grad=False` everywhere in AION.
+- **Smoke (gpu_test, 2 epochs, limited):** checkpoint writes, diagnostics
+  appear, val NLL finite, quadrature rows produce gradient.
+- **LR probe (~300 steps x 3 settings):** all `move/` groups within one order of
+  magnitude; no group at ~0 (frozen) or >1e-1 (diverging).
+- **Abort the full run if:** any val NLL is NaN, or the joint has not beaten its
+  KDE prior by epoch 3.
+- **Primary success metric:** joint val NLL versus the SUM of the phase-2
+  marginal NLLs on the same rows. The difference is the dependence the joint
+  captures, which is the entire reason the head exists.
