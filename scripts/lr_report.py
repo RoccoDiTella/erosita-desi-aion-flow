@@ -51,6 +51,9 @@ def main() -> None:
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--target", type=float, default=1e-3,
                     help="Update-to-weight ratio to aim for (default 1e-3).")
+    ap.add_argument("--diag-every", type=int, default=None,
+                    help="Override the run's diag_every. Runs from before that field was "
+                         "recorded need it, or move is judged against the wrong horizon.")
     ap.add_argument("--skip-steps", type=int, default=300,
                     help="Ignore steps before this: warmup, and |w|~0 for zero-init groups.")
     args = ap.parse_args()
@@ -67,7 +70,7 @@ def main() -> None:
     # but the ~1e-3 rule of thumb is PER STEP. Comparing a 5-step movement with
     # a per-step target makes every group look 5x too fast, which would have led
     # to cutting every learning rate by five.
-    k = int(config.get("diag_every", 1) or 1)
+    k = int(args.diag_every or config.get("diag_every", 1) or 1)
     print(f"move is measured across {k} step(s); dividing by {k} for a per-step ratio")
 
     groups: dict[str, list[float]] = {}
