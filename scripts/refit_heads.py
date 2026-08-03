@@ -29,6 +29,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shareable_aion_flow"))
@@ -106,6 +107,10 @@ def main() -> None:
     ap.add_argument("--extra-targets-csv", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--context-slot", choices=["joint", "own"], default="joint")
+    ap.add_argument("--refit-heads", nargs="*", default=None,
+                    help="Targets to fit. Defaults to the checkpoint's own heads. A frozen body "
+                         "can carry ANY target, so heads phase 1 dropped (flux, P2, ...) can be "
+                         "fit here without retraining anything: pass their names, or 'all'.")
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -120,8 +125,13 @@ def main() -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ckpt.get("config", {})
+
+    # The MODEL must be built with the checkpoint's head count: num_cls and the
+    # context width are baked into the trained weights.
     mt.configure_heads_from_config(config)
-    print(f"[refit] heads from checkpoint: {mt.HEAD_NAMES}")
+    ckpt_heads, ckpt_n_heads, joint_slot = list(mt.HEAD_NAMES), mt.N_HEADS, mt.N_TARGETS
+    ckpt_stds = {n: s for n, s in zip(mt.HEAD_NAMES, ckpt.get("standardizers", []))}
+    print(f"[refit] heads from checkpoint: {ckpt_heads}")
     print(f"[refit] joint dims: {mt.JOINT_PAIR}  marginalisable: {mt.JOINT_MARGINAL}")
 
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
@@ -135,8 +145,29 @@ def main() -> None:
     for p in list(encoder.parameters()) + list(head.parameters()):
         p.requires_grad_(False)
 
-    stds = [TargetStandardizer.from_state_dict(s) for s in ckpt["standardizers"]]
+    # The TARGET list is decoupled from the model: the body is frozen, so any
+    # target can be fit on its context, including ones phase 1 never trained.
+    if args.refit_heads == ["all"]:
+        mt.configure_heads(())
+    elif args.refit_heads:
+        keep = set(args.refit_heads)
+        mt.configure_heads(tuple(t["name"] for t in mt._ALL_TARGETS if t["name"] not in keep))
+    print(f"[refit] fitting targets: {[t['name'] for t in mt.MULTI_TARGETS]}")
+
     lookup = mt.MultiTargetLookup(args.staged_dir, args.extra_targets_csv)
+    import pandas as pd
+    assign = pd.read_csv(args.clean_split_csv)
+    train_y = lookup.values_for(assign.loc[assign.split == "train", "targetid"].to_numpy("int64"))
+    stds = []
+    for j, spec in enumerate(mt.MULTI_TARGETS):
+        # Reuse the checkpoint's standardizer where the head existed, so those
+        # NLLs stay comparable with phase 1; fit fresh for newly added targets.
+        if spec["name"] in ckpt_stds:
+            stds.append(TargetStandardizer.from_state_dict(ckpt_stds[spec["name"]]))
+        else:
+            v = train_y[:, j][np.isfinite(train_y[:, j])]
+            stds.append(TargetStandardizer.fit(v))
+            print(f"[refit] fitted a new standardizer for {spec['name']} ({len(v):,} train values)")
     train_loader, val_loader, _ = build_dataloaders(
         staged_dir=args.staged_dir, target_name="log_ml_flux_1",
         batch_size=args.eval_batch_size, eval_batch_size=args.eval_batch_size,
@@ -155,7 +186,7 @@ def main() -> None:
         # Under --joint-only ONLY the joint's CLS token ever saw a gradient, so
         # a per-head slot still holds its initialisation and carries no trained
         # signal. Reading the joint slot is the default for exactly that reason.
-        slot = mt.N_TARGETS if args.context_slot == "joint" else j
+        slot = joint_slot if args.context_slot == "joint" else min(j, ckpt_n_heads - 1)
         r = fit_one(spec["name"], ctx_tr[:, slot], y_tr[:, j], ctx_va[:, slot],
                     y_va[:, j], stds[j], args, device)
         if r is None:
