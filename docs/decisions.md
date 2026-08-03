@@ -1047,3 +1047,19 @@ Exposed as `--joint-quad-nodes` / `--joint-quad-span`, default unchanged at
 48/5.0 so no existing run silently changes. **Caveat: measured on an UNTRAINED
 flow**, which is smoother than a trained one and therefore easier to integrate.
 Re-check against a trained checkpoint before treating 24 as safe.
+
+### The cosine never annealed: scheduler horizon vs accumulate-buckets (2026-08-03)
+`steps_per_epoch` multiplied the batch count by the number of length buckets
+unconditionally. That is right only WITHOUT `--accumulate-buckets`; with it the
+buckets accumulate into one optimizer step per batch, so the real horizon is 4x
+smaller than the scheduler was told.
+
+Run 36980372 reported "316 steps/epoch x 12 = 3792" while actually taking 948.
+Its cosine therefore traversed 23% of its schedule and ended at **87% of peak
+LR** instead of near zero. Left running deliberately: it is a characterisation
+run, and a near-constant LR is cleaner for reading per-group update-to-weight
+ratios because the schedule is not confounding the measurement. Its final val
+NLL is not the headline number.
+
+Fixed to count the steps the scheduler actually takes. Any earlier run using
+cosine WITH accumulate-buckets annealed far less than intended.

@@ -581,7 +581,18 @@ def run_train_multi(args) -> None:
     ]
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(args.beta1, 0.999))
     trainable = [p for g in param_groups for p in g["params"]]
-    steps_per_epoch = max(1, len(train_loader)) * (len(LENGTH_BUCKETS) if args.bucketed else 1)
+    # Count the steps the SCHEDULER will actually take. With
+    # --accumulate-buckets the buckets are accumulated into ONE optimizer step
+    # per batch; without it each bucket (and each chunk of an oversized bucket)
+    # steps separately. Multiplying by the bucket count in the accumulate case
+    # overstates the horizon ~4x, so a cosine sized that way never anneals: it
+    # reaches only a quarter of its schedule and ends near peak LR.
+    if args.bucketed and getattr(args, "accumulate_buckets", False):
+        steps_per_epoch = max(1, len(train_loader))
+    elif args.bucketed:
+        steps_per_epoch = max(1, len(train_loader)) * len(LENGTH_BUCKETS)
+    else:
+        steps_per_epoch = max(1, len(train_loader))
     total_steps = max(1, steps_per_epoch * args.epochs)
     warmup_steps = max(0, int(getattr(args, "warmup_steps", 0)))
     # Print the step budget. This run has FEW optimizer steps: ~20,160 train
