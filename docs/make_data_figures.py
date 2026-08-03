@@ -92,6 +92,24 @@ def load(args) -> pd.DataFrame:
     return df
 
 
+def _gridsize(n: int) -> int:
+    """Hexbin resolution that follows the sample size.
+
+    A FIXED grid is what made the two corner variants look like different kinds
+    of plot. At gridsize 38 there are ~1,400 cells: 17,000 sources fill them and
+    render as a smooth cloud, while 500 sources leave almost every occupied cell
+    holding exactly one count, which under LogNorm is the palest shade in the
+    ramp, so the panel reads as a sparse scatter. Targeting a few counts per
+    occupied cell keeps the visual language the same at any n.
+    """
+    return int(np.clip(round(np.sqrt(n) / 1.6), 10, 38))
+
+
+def _nbins(n: int) -> int:
+    """Histogram bins by the sqrt rule, for the same reason as _gridsize."""
+    return int(np.clip(round(np.sqrt(n)), 10, 50))
+
+
 def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
                 tick_size: float = 7.0) -> None:
     """Draw the corner panels onto an existing figure.
@@ -111,7 +129,8 @@ def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
                 continue
             if i == j:
                 v = data[ni][np.isfinite(data[ni])]
-                ax.hist(v, bins=50, color="#0072B2", alpha=0.85, edgecolor="none")
+                ax.hist(v, bins=_nbins(len(v)), color="#0072B2", alpha=0.85,
+                        edgecolor="none")
                 ax.set_yticks([])
                 ax.margins(y=0.22)          # headroom so the count never sits on the peak
                 ax.text(0.95, 0.88, f"n={len(v):,}", transform=ax.transAxes, ha="right",
@@ -119,9 +138,15 @@ def draw_corner(fig, data: dict, axes=None, label_size: float = 9.5,
             else:
                 x, y = data[nj], data[ni]
                 m = np.isfinite(x) & np.isfinite(y)
-                if m.sum() > 10:
-                    ax.hexbin(x[m], y[m], gridsize=38, cmap="Blues", norm=LogNorm(),
-                              linewidths=0, mincnt=1)
+                n = int(m.sum())
+                if n > 10:
+                    ax.hexbin(x[m], y[m], gridsize=_gridsize(n), cmap="Blues",
+                              norm=LogNorm(), linewidths=0, mincnt=1)
+                # the PAIR count, which is not the marginal count on the diagonal:
+                # a panel pairing a 500-source column with a 25,000-source one
+                # shows 500, and without this the reader cannot tell.
+                ax.text(0.96, 0.05, f"n={n:,}", transform=ax.transAxes, ha="right",
+                        fontsize=6.4, color=MUTED)
             ax.tick_params(labelsize=tick_size, length=2)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
@@ -258,10 +283,14 @@ def main() -> None:
     df = load(args)
     print(f"[data] {len(df):,} clean-split rows")
     corner(df, args.figdir / "fig_corner.png", VARS_CIGALE,
-           "Empirical joint — M$_*$, SFR, sSFR from CIGALE (what we train)")
+           "Empirical joint: M$_*$, SFR, sSFR from CIGALE (what we train)")
+    # The restriction belongs in the title: the Halpha SFR needs four lines
+    # detected, z < 0.49 to keep Halpha in range, and a BPT star-forming cut that
+    # excludes AGN by construction. On an 87% QSO sample that leaves ~500
+    # sources, so this is a different subsample, not the same one re-measured.
     corner(df, args.figdir / "fig_corner_alt.png", VARS_ALT,
-           "Empirical joint — M$_*$ from FastSpecFit, SFR from H$\\alpha$ "
-           "(independent of CIGALE)")
+           "Variant B: M$_*$ from FastSpecFit, SFR from H$\\alpha$ "
+           "(BPT star-forming, $z<0.49$, n=502)")
     ex = spectra_figure(df, args, args.figdir / "fig_examples_spectra.png")
     images_figure(ex, args, args.figdir / "fig_examples_images.png")
 
