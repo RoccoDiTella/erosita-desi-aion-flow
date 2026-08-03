@@ -553,6 +553,17 @@ def run_train_multi(args) -> None:
     # update/weight terms than the standard-initialised MLP and flows.
     head_lr = args.head_lr if getattr(args, "head_lr", None) is not None else args.lr
     joint_only = bool(getattr(args, "joint_only", False))
+    # Quadrature resolution is a memory knob: rows missing the marginalisable
+    # dimension cost nodes x inject_samples flow evaluations, so 48 nodes with
+    # 50 draws is 2400x a single row. See --joint-quad-nodes for the measured
+    # convergence.
+    global JOINT_QUAD_NODES, JOINT_QUAD_SPAN
+    if getattr(args, "joint_quad_nodes", None):
+        JOINT_QUAD_NODES = int(args.joint_quad_nodes)
+    if getattr(args, "joint_quad_span", None):
+        JOINT_QUAD_SPAN = float(args.joint_quad_span)
+    print(f"[multi] joint quadrature: {JOINT_QUAD_NODES} nodes, span +/-{JOINT_QUAD_SPAN}",
+          flush=True)
     # joint_only: only the joint flow is optimized. The marginal flows still
     # exist (the joint indexes the same target matrix) but get no loss term.
     flow_params = list(flows.joint.parameters()) if joint_only else list(flows.parameters())

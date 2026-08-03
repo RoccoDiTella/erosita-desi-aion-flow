@@ -1023,6 +1023,15 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--train-probe-size", type=int, default=2520,
                     help="Fixed training-split subset scored with the VAL protocol each epoch "
                     "(0 disables). Makes train and val directly comparable.")
+    mt.add_argument("--joint-quad-nodes", type=int, default=None,
+                    help="Quadrature nodes for marginalising a missing joint dimension "
+                         "(default 48). Measured convergence against a 384-node reference: "
+                         "16 -> 2.6e-3 nats, 24 -> 6.8e-4, 32 -> 7.8e-5, 48 -> 1.1e-4, i.e. 32 is "
+                         "already at the reference's own floor. Lower it to cut memory: those "
+                         "rows cost nodes x inject_samples evaluations. Caveat: measured on an "
+                         "untrained flow, which is smoother than a trained one.")
+    mt.add_argument("--joint-quad-span", type=float, default=None,
+                    help="Half-width of the quadrature grid in standardized units (default 5.0).")
     mt.add_argument("--joint-only", action="store_true",
                     help="Phase 1: train ONLY the joint flow. The marginal targets are still "
                          "loaded and standardized (the joint indexes the same matrix) but their "

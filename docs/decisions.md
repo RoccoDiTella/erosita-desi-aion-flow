@@ -1024,3 +1024,26 @@ the correct criterion and it is not the same epoch as min joint val NLL.
 - **Primary success metric:** joint val NLL versus the SUM of the phase-2
   marginal NLLs on the same rows. The difference is the dependence the joint
   captures, which is the entire reason the head exists.
+
+### Quadrature resolution is a memory knob (measured 2026-08-03)
+Rows missing the marginalisable dimension cost `nodes x inject_samples` flow
+evaluations, so 48 nodes with 50 draws is **2400x** a single row. That product,
+not the batch size alone, is what put the first phase-1 smoke into CUDA OOM on a
+19.6 GB shared gpu_test slice.
+
+Convergence measured against a 384-node reference (span 6), all rows forced onto
+the quadrature path:
+
+| nodes | 8 | 12 | 16 | 24 | 32 | 48 | 96 |
+|---|---|---|---|---|---|---|---|
+| err (nats) | 6.0e-2 | 9.6e-3 | 2.6e-3 | 6.8e-4 | 7.8e-5 | 1.1e-4 | 9.5e-5 |
+
+**32 nodes is already at the reference's own floor**: 32, 48, 64 and 96 all agree
+to ~1e-4, which is 50x below the smallest difference we act on and 500x below
+the per-epoch validation noise. 24 nodes costs 6.8e-4, still negligible. So 48
+buys nothing and can be halved when memory is tight.
+
+Exposed as `--joint-quad-nodes` / `--joint-quad-span`, default unchanged at
+48/5.0 so no existing run silently changes. **Caveat: measured on an UNTRAINED
+flow**, which is smoother than a trained one and therefore easier to integrate.
+Re-check against a trained checkpoint before treating 24 as safe.
