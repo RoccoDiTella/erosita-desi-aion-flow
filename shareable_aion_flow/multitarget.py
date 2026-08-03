@@ -393,7 +393,10 @@ def param_diagnostic_groups(encoder, head, flows) -> dict[str, list[torch.Tensor
     groups["shared_mlp"] = list(head.parameters())
     for j, f in enumerate(flows.flows):
         groups[f"flow_{HEAD_NAMES[j]}"] = list(f.parameters())
-    groups["flow_p2xp3_joint"] = list(flows.joint.parameters())
+    # Named for the head it actually is. The label was "flow_p2xp3_joint" from
+    # when the only joint was the 2-D P2xP3 one; the joint is now whatever
+    # JOINT_PAIR says, so a stale name would mislabel the LR evidence.
+    groups[f"flow_{HEAD_NAMES[-1]}"] = list(flows.joint.parameters())
     return groups
 
 
