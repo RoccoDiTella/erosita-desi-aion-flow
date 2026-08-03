@@ -6,7 +6,9 @@ Project: predict eROSITA X-ray properties + host stellar mass from DESI optical/
 
 **What happened.** FASRC became unreachable (ssh hung with no password prompt; the ControlMaster socket failed to open for the first time ever). I told the user we had "probably" tripped a FASRC IP blocklist with ~28 failed auth attempts, and that it was "most likely my fault." **All of that was wrong.** The 28 came from `grep -c 'Permission denied'` over the session transcript, which counted (a) three weeks of history, not one day, (b) my own prose quoting the error string, and (c) the output of the very `grep` commands searching for it. Real failed auth attempts that day: **zero**. Last working session was 4 days earlier; my first attempt that day already failed, *before* anything I did.
 
-**Cost.** The user was told they might have gotten their lab flagged for abuse on a shared research cluster. That is an alarming, reputation-touching accusation, and it was manufactured by a miscounted grep.
+**Actual cause, confirmed same day: FASRC scheduled maintenance + firewall cutover, 2026-08-03 9am-3pm ET**, announced by email. First failure was 09:58 ET, 58 min into the window; a firewall swap is precisely why packets died silently at Harvard's edge (traceroute stopped at hop 6, 10.242.1.215). Entirely external and mundane — exactly what the evidence already said (RC portal answering, both login IPs dark, socket failing to open for the first time ever).
+
+**Cost.** The user was told they might have gotten their lab flagged for abuse on a shared research cluster. That is an alarming, reputation-touching accusation, and it was manufactured by a miscounted grep. **Check for the boring explanation — announced maintenance, an outage, an expired socket — before reaching for one where we are at fault.**
 
 **The rule.** Before attributing any outage, block, or breakage to our own actions:
 1. **Get per-event timestamps first.** Parse the transcript as JSON; bucket by day; separate `tool_result` (real output) from `assistant/text` (my prose) and `tool_use` (the command itself). String-matching a session log double- and triple-counts.
