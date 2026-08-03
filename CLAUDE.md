@@ -2,6 +2,20 @@
 
 Project: predict eROSITA X-ray properties + host stellar mass from DESI optical/WISE/imaging via a normalizing-flow head on frozen AION embeddings. Extends the PAI26 paper with a **cleaned crossmatch** and **uncertainty-aware, per-target** training.
 
+## ⛔ LESSON (2026-08-03): NEVER ASSERT WE CAUSED AN INCIDENT WITHOUT TIMESTAMPED EVIDENCE
+
+**What happened.** FASRC became unreachable (ssh hung with no password prompt; the ControlMaster socket failed to open for the first time ever). I told the user we had "probably" tripped a FASRC IP blocklist with ~28 failed auth attempts, and that it was "most likely my fault." **All of that was wrong.** The 28 came from `grep -c 'Permission denied'` over the session transcript, which counted (a) three weeks of history, not one day, (b) my own prose quoting the error string, and (c) the output of the very `grep` commands searching for it. Real failed auth attempts that day: **zero**. Last working session was 4 days earlier; my first attempt that day already failed, *before* anything I did.
+
+**Cost.** The user was told they might have gotten their lab flagged for abuse on a shared research cluster. That is an alarming, reputation-touching accusation, and it was manufactured by a miscounted grep.
+
+**The rule.** Before attributing any outage, block, or breakage to our own actions:
+1. **Get per-event timestamps first.** Parse the transcript as JSON; bucket by day; separate `tool_result` (real output) from `assistant/text` (my prose) and `tool_use` (the command itself). String-matching a session log double- and triple-counts.
+2. **Check ordering.** If our first action in the window already failed, we did not cause the failure. Establish "was it broken before we touched it?" before anything else.
+3. **State uncertainty proportional to evidence.** Self-blame is not humility when it is unfounded — it is a false claim that happens to point at us, and it costs the user real worry and possibly a needless support ticket.
+4. **Never verify a hypothesis with the same flawed instrument that generated it.**
+
+**SSH diagnosis (the technical half).** ssh prompts for a password only *after* TCP connect + key exchange succeed, so a hang at `debug1: Connecting to <host> port 22` **never reached auth** — it is a network symptom, never a credentials one. Silent timeout = packets DROPped; instant "refused" = host up, port closed. Discriminator: `curl -4 https://portal.rc.fas.harvard.edu` (302 when RC is healthy); RC portal fine + both login IPs silent = login-node outage or an upstream filter. Test raw TCP **by IP** — bash `/dev/tcp/<host>/<port>` gave false "blocked" results for hosts `curl` reached fine. `ssh -f` hides the eventual timeout; drop `-f -N`, add `-v`. A missing `~/.ssh/cm-fasrc` is normal after `ControlPersist` expiry. Do not loop `BatchMode=yes` at a 2FA host — it cannot succeed; one failure is the budget, then stop and ask the user to reopen the socket.
+
 ## LIVING DECISIONS LOG — keep it updated (required)
 `docs/decisions.md` records every load-bearing decision with exact, data-verified formulas: crossmatch/NWAY cleaning (what was cut and why), target definitions (esp. HR32 band rates + arctanh transform), error construction and use (split-normal, convolution likelihood, spectype floors), architecture choices, and the **run registry with per-run performance**. Any change to matching, targets, errors, or architecture updates this file in the same commit; **any completed run gets its results row filled in.**
 
