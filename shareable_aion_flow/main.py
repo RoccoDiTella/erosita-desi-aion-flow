@@ -992,6 +992,14 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--lr-schedule", choices=["constant", "cosine"], default="constant")
     mt.add_argument("--weight-decay", type=float, default=1e-4, help="Head + flows.")
     mt.add_argument("--adapter-wd", type=float, default=1e-2, help="Full-rank read adapters (capacity control).")
+    mt.add_argument("--head-lr", type=float, default=None,
+                    help="LR for the per-target flows (default: --lr). The BODY -- CLS "
+                         "tokens, read adapters, shared MLP -- keeps --lr, so the heads "
+                         "can be tuned without disturbing the shared representation.")
+    mt.add_argument("--head-loss-weight", action="append", default=None, metavar="HEAD=W",
+                    help="Multiply a head's loss weight, on top of the EMA balance. "
+                         "Repeatable, e.g. --head-loss-weight joint=2 "
+                         "--head-loss-weight log_flux_p3=0.5")
     mt.add_argument("--adapter-lr", type=float, default=None,
                     help="Separate LR for the read adapters (default: --lr). They are zero-init, so "
                     "a shared LR moves them ~30x faster in update/weight terms than the flows.")

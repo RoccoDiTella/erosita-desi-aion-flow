@@ -169,17 +169,18 @@ def test_configure_heads_drops_and_restores() -> None:
         mt.configure_heads(("log_flux_p4",))
         assert mt.N_TARGETS == n_all - 1 and mt.N_HEADS == n_all
         assert "log_flux_p4" not in mt.HEAD_NAMES
-        # the joint head must still point at the right two bands after reindexing
-        j2, j3 = mt.JOINT_IDX
-        assert mt.MULTI_TARGETS[j2]["name"] == "log_flux_p2"
-        assert mt.MULTI_TARGETS[j3]["name"] == "log_flux_p3"
-        # dropping a band the joint head needs is refused
+        # the joint head still points at its own dimensions after reindexing
+        names = [mt.MULTI_TARGETS[j]["name"] for j in mt.JOINT_IDX]
+        assert names == [n for n in mt.JOINT_PAIR if n in
+                         {t["name"] for t in mt.MULTI_TARGETS}]
+        # dropping a REQUIRED joint dimension is refused; a marginalisable one is not
         try:
-            mt.configure_heads(("log_flux_p2",))
+            mt.configure_heads(("log_sfr",))
         except ValueError:
             pass
         else:
-            raise AssertionError("dropping a joint-pair band must raise")
+            raise AssertionError("dropping a required joint dimension must raise")
+        mt.configure_heads(("log_flux_p3",))     # marginalisable -> allowed
     finally:
         mt.configure_heads(())
         assert mt.N_TARGETS == n_all and mt.N_HEADS == n_all + 1
@@ -217,7 +218,9 @@ def test_configure_heads_from_config_reloads_older_checkpoints() -> None:
         assert mt.N_TARGETS == n_all - 1
         flows = mt.MultiTargetFlows(context_dim=8)
         assert len(flows.flows) == n_all - 1        # matches the old state_dict
-        # the joint pair still resolves after the reindex
+        # a pre-joint checkpoint restores the 2-D P2xP3 joint it was trained with
+        assert mt.JOINT_PAIR == ("log_flux_p2", "log_flux_p3")
+        assert mt.HEAD_NAMES[-1] == "p2xp3_joint"
         j2, j3 = mt.JOINT_IDX
         assert mt.MULTI_TARGETS[j2]["name"] == "log_flux_p2"
         assert mt.MULTI_TARGETS[j3]["name"] == "log_flux_p3"
@@ -250,3 +253,54 @@ def test_model_pieces_follow_dropped_head_count() -> None:
     flows = mt.MultiTargetFlows(context_dim=8)
     assert len(flows.flows) == mt.N_TARGETS == n_all
     assert len(mt.EMALossWeights().ema) == mt.N_HEADS == n_all + 1
+
+
+def test_joint_marginalises_a_missing_dimension_instead_of_imputing() -> None:
+    """A row missing a marginalisable joint dimension still trains, via quadrature.
+
+    The alternative -- imputing that dimension from the prior -- would pull the
+    conditional toward the unconditional. This checks the quadrature path runs,
+    contributes gradient, and gives a numerically stable marginal.
+    """
+    import multitarget as mt
+
+    torch.manual_seed(0)
+    try:
+        mt.configure_heads(("log_flux_p4", "logmstar", "log_mbh_pan25", "log_mbh_vo09",
+                            "log_flux_p1", "log_flux_p2", "log_ml_flux_1"))
+        n_t, n_h = mt.N_TARGETS, mt.N_HEADS
+        marg = [j for j in mt.JOINT_IDX
+                if mt.MULTI_TARGETS[j]["name"] in mt.JOINT_MARGINAL]
+        assert len(marg) == 1, "test assumes exactly one marginalisable dimension"
+        jm = marg[0]
+
+        B = 12
+        flows = mt.MultiTargetFlows(context_dim=256)
+        targets = torch.randn(B, n_t)
+        targets[B // 2:, jm] = float("nan")        # half the rows lack it
+        contexts = torch.randn(B, n_h, 256, requires_grad=True)
+        stds = [TargetStandardizer(0.0, 1.0) for _ in range(n_t)]
+        total, raw = mt.multi_target_nll(
+            contexts=contexts, flows=flows, targets=targets,
+            sig_lo=torch.zeros(B, n_t), sig_hi=torch.zeros(B, n_t),
+            standardizers=stds, weights=np.ones(n_h), inject=False,
+        )
+        assert raw[-1] is not None and np.isfinite(raw[-1])
+        total.backward()
+        assert contexts.grad is not None
+        assert contexts.grad[:, n_t].abs().sum() > 0      # joint context got gradient
+
+        # the quadrature grid is fine enough: refining it barely moves the answer
+        coarse = mt.JOINT_QUAD_NODES
+        try:
+            mt.JOINT_QUAD_NODES = 4 * coarse
+            _, raw_fine = mt.multi_target_nll(
+                contexts=contexts.detach(), flows=flows, targets=targets,
+                sig_lo=torch.zeros(B, n_t), sig_hi=torch.zeros(B, n_t),
+                standardizers=stds, weights=np.ones(n_h), inject=False,
+            )
+        finally:
+            mt.JOINT_QUAD_NODES = coarse
+        assert abs(raw_fine[-1] - raw[-1]) < 0.05
+    finally:
+        mt.configure_heads(())

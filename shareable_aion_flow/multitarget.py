@@ -65,11 +65,34 @@ MULTI_TARGETS: list[dict] = [
      "max_sigma": 1.0, "sidecar": True},
 ]
 _ALL_TARGETS = list(MULTI_TARGETS)
-N_TARGETS = len(MULTI_TARGETS)          # scalar heads (P4 and log_sfr droppable)
-JOINT_PAIR = ("log_flux_p2", "log_flux_p3")  # joint 2-D flow for HR
-JOINT_IDX = tuple(next(j for j, t in enumerate(MULTI_TARGETS) if t["name"] == n) for n in JOINT_PAIR)
+N_TARGETS = len(MULTI_TARGETS)          # scalar heads
+
+# The joint head. Dimensions are modelled together; `JOINT_MARGINAL` names the
+# ones that may be MISSING and are then integrated out by quadrature rather than
+# imputed -- imputing from the prior would pull the conditional toward the
+# unconditional and bias the target. Every other joint dimension is required:
+# a source lacking one is skipped entirely for this head.
+#
+# log flux is deliberately NOT here alongside log Lx. Lx = flux + log(4 pi D_L(z)^2)
+# EXACTLY (verified to 7e-15) and z is a model input, so conditional on the
+# inputs the two are in one-to-one correspondence: their joint density would be
+# supported on a line, and the flow could drive the NLL to -infinity by
+# collapsing that direction.
+JOINT_PAIR = ("logmstar_cigale", "log_sfr", "log_lx", "log_flux_p3")
+JOINT_MARGINAL = ("log_flux_p3",)
+_DEFAULT_JOINT_PAIR, _DEFAULT_JOINT_MARGINAL = JOINT_PAIR, JOINT_MARGINAL
+JOINT_QUAD_NODES = 48       # standardized-space nodes for the marginalisation
+JOINT_QUAD_SPAN = 5.0       # +/- sigma covered by the grid
+
+
+def _joint_idx():
+    names = {t["name"]: j for j, t in enumerate(MULTI_TARGETS)}
+    return tuple(names[n] for n in JOINT_PAIR if n in names)
+
+
+JOINT_IDX = _joint_idx()
 N_HEADS = N_TARGETS + 1
-HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
+HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
 
 
 def configure_heads(drop: tuple[str, ...] = ()) -> None:
@@ -81,13 +104,14 @@ def configure_heads(drop: tuple[str, ...] = ()) -> None:
     global MULTI_TARGETS, N_TARGETS, JOINT_IDX, N_HEADS, HEAD_NAMES
     MULTI_TARGETS = [t for t in _ALL_TARGETS if t["name"] not in set(drop)]
     N_TARGETS = len(MULTI_TARGETS)
-    missing = [n for n in JOINT_PAIR if n not in {t["name"] for t in MULTI_TARGETS}]
+    kept = {t["name"] for t in MULTI_TARGETS}
+    required = [n for n in JOINT_PAIR if n not in JOINT_MARGINAL]
+    missing = [n for n in required if n not in kept]
     if missing:
-        raise ValueError(f"cannot drop {missing}: the joint head needs both bands")
-    JOINT_IDX = tuple(next(j for j, t in enumerate(MULTI_TARGETS) if t["name"] == n)
-                      for n in JOINT_PAIR)
+        raise ValueError(f"cannot drop {missing}: the joint head requires them")
+    JOINT_IDX = _joint_idx()
     N_HEADS = N_TARGETS + 1
-    HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["p2xp3_joint"]
+    HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
 
 
 def configure_heads_from_config(config: dict | None) -> None:
@@ -100,14 +124,27 @@ def configure_heads_from_config(config: dict | None) -> None:
     drop set from the stored `heads` list keeps every earlier checkpoint
     loadable without hand-passing --drop-heads.
     """
+    global JOINT_PAIR, JOINT_MARGINAL
     config = config or {}
-    stored = config.get("heads")
+    stored = config.get("heads") or []
+    # Restore the joint the checkpoint was TRAINED with. Runs before the
+    # (M*, SFR, Lx, P3) joint used a 2-D P2xP3 head; loading one of those under
+    # the current definition would demand targets it never had.
+    if "p2xp3_joint" in stored:
+        JOINT_PAIR = ("log_flux_p2", "log_flux_p3")
+        JOINT_MARGINAL = ()
+    else:
+        JOINT_PAIR = _DEFAULT_JOINT_PAIR
+        JOINT_MARGINAL = _DEFAULT_JOINT_MARGINAL
     if stored:
-        keep = {h for h in stored if h != "p2xp3_joint"}
+        joint_names = {"p2xp3_joint", "joint"}
+        keep = {h for h in stored if h not in joint_names}
         drop = tuple(t["name"] for t in _ALL_TARGETS if t["name"] not in keep)
     else:                                    # pre-`heads` checkpoints
         drop = tuple(config.get("drop_heads", ()) or ())
     configure_heads(drop)
+    if "p2xp3_joint" in stored:
+        HEAD_NAMES[-1] = "p2xp3_joint"
 
 
 def load_multi_target_matrix(
@@ -182,7 +219,7 @@ class SharedCLSHead(nn.Module):
 
 
 class MultiTargetFlows(nn.Module):
-    """7 scalar 1-D flows + one joint 2-D flow over (P2, P3) for hardness."""
+    """One 1-D flow per scalar target, plus one N-D joint over JOINT_PAIR."""
 
     def __init__(self, context_dim: int = 256, n_targets: int | None = None) -> None:
         super().__init__()
@@ -190,7 +227,8 @@ class MultiTargetFlows(nn.Module):
         # count after import, and a default argument would capture the old one
         n_targets = N_TARGETS if n_targets is None else n_targets
         self.flows = nn.ModuleList(ConditionalNSFFlow(context_dim=context_dim) for _ in range(n_targets))
-        self.joint = ConditionalNSFFlow(context_dim=context_dim, features=2)
+        self.joint = ConditionalNSFFlow(context_dim=context_dim,
+                                       features=max(2, len(JOINT_IDX)))
 
 
 class EMALossWeights:
@@ -272,16 +310,56 @@ def multi_target_nll(
         # count, so the head's effective weight in the batch is its coverage.
         total = total + float(weights[j]) * float(mask.float().mean()) * nll
 
-    # Joint (P2, P3) head: only sources with BOTH bands available; per-band
-    # injection is independent (band counts are Poisson-independent).
-    j2, j3 = JOINT_IDX
-    mask = torch.isfinite(targets[:, j2]) & torch.isfinite(targets[:, j3])
-    if bool(mask.any()):
-        pair = torch.stack([_std_inject(j2, mask), _std_inject(j3, mask)], dim=-1)
-        nll = -flows.joint.log_prob_draws(pair, contexts[mask, N_TARGETS]).mean()
+    # ---- joint head -------------------------------------------------------
+    # Sources must have every REQUIRED joint dimension. A source missing a
+    # MARGINALISABLE one is still used: that dimension is integrated out by
+    # quadrature, which is the exact marginal likelihood. Imputing it from the
+    # prior instead would pull the conditional toward the unconditional.
+    names = [t["name"] for t in MULTI_TARGETS]
+    req_idx = [j for j in JOINT_IDX if names[j] not in JOINT_MARGINAL]
+    marg_idx = [j for j in JOINT_IDX if names[j] in JOINT_MARGINAL]
+    have_req = torch.ones(B, dtype=torch.bool, device=targets.device)
+    for j in req_idx:
+        have_req = have_req & torch.isfinite(targets[:, j])
+
+    joint_terms, joint_counts = [], []
+    if bool(have_req.any()) and len(JOINT_IDX) >= 2:
+        ctx_j = contexts[:, N_TARGETS]
+        have_all = have_req.clone()
+        for j in marg_idx:
+            have_all = have_all & torch.isfinite(targets[:, j])
+        # (a) fully observed rows: ordinary joint likelihood
+        if bool(have_all.any()):
+            vec = torch.stack([_std_inject(j, have_all) for j in JOINT_IDX], dim=-1)
+            lp = flows.joint.log_prob_draws(vec, ctx_j[have_all])
+            joint_terms.append(-lp.mean()); joint_counts.append(int(have_all.sum()))
+        # (b) rows missing a marginalisable dimension: integrate it out
+        part = have_req & ~have_all
+        if bool(part.any()) and len(marg_idx) == 1:
+            jm = marg_idx[0]
+            nodes = torch.linspace(-JOINT_QUAD_SPAN, JOINT_QUAD_SPAN, JOINT_QUAD_NODES,
+                                   device=targets.device, dtype=targets.dtype)
+            du = float(nodes[1] - nodes[0])
+            obs = {j: _std_inject(j, part) for j in req_idx}      # each [k, m]
+            k, m = next(iter(obs.values())).shape
+            K = nodes.numel()
+            cols = []
+            for j in JOINT_IDX:
+                if j == jm:
+                    cols.append(nodes.view(1, K, 1).expand(k, K, m))
+                else:
+                    cols.append(obs[j].unsqueeze(1).expand(k, K, m))
+            vec = torch.stack(cols, dim=-1).reshape(k * K, m, len(JOINT_IDX))
+            lp = flows.joint.log_prob_draws(vec, ctx_j[part]).view(k, K, m)
+            lp = torch.logsumexp(lp, dim=1) + float(np.log(du))   # [k, m]
+            joint_terms.append(-lp.mean()); joint_counts.append(int(part.sum()))
+
+    if joint_terms:
+        tot_n = float(sum(joint_counts))
+        nll = sum(t * (c / tot_n) for t, c in zip(joint_terms, joint_counts))
         raw.append(float(nll.item()))
         terms.append(nll)
-        total = total + float(weights[N_TARGETS]) * float(mask.float().mean()) * nll
+        total = total + float(weights[N_TARGETS]) * (tot_n / B) * nll
     else:
         raw.append(None)
         terms.append(None)
@@ -459,8 +537,17 @@ def run_train_multi(args) -> None:
     # MLP and flows (|w| ~3 vs ~40), which left the flows within a few percent
     # of their initialization for a whole run.
     adapter_lr = args.adapter_lr if args.adapter_lr is not None else args.lr
+    # BODY = the shared trunk every head reads through (CLS tokens, read
+    # adapters, shared MLP). HEAD = the per-target flows. Splitting them lets
+    # the flows be tuned without disturbing the representation, which is the
+    # part all heads share. The adapters keep their own LR on top: they are
+    # zero-initialised, so on a shared LR they move ~30x faster in
+    # update/weight terms than the standard-initialised MLP and flows.
+    head_lr = args.head_lr if getattr(args, "head_lr", None) is not None else args.lr
     param_groups = [
-        {"params": list(head.parameters()) + list(flows.parameters()), "lr": args.lr,
+        {"params": list(head.parameters()), "lr": args.lr,
+         "weight_decay": args.weight_decay},
+        {"params": list(flows.parameters()), "lr": head_lr,
          "weight_decay": args.weight_decay},
         {"params": [encoder.cls_token], "lr": args.lr, "weight_decay": 0.0},
         {"params": list(encoder.cls_read_adapters.parameters()), "lr": adapter_lr,
@@ -473,6 +560,21 @@ def run_train_multi(args) -> None:
     if args.lr_schedule == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=steps_per_epoch * args.epochs)
+    # Per-head loss weight, multiplied on top of the detached-EMA balance. The
+    # EMA equalises SCALE across heads; this is the manual lever for saying a
+    # head matters more or less than that, e.g. holding back a head that
+    # converges early so it stops dragging the shared trunk.
+    head_weight = np.ones(N_HEADS)
+    for spec in (args.head_loss_weight or []):
+        name, _, val = spec.partition("=")
+        if name not in HEAD_NAMES:
+            raise SystemExit(f"--head-loss-weight: unknown head {name!r}; "
+                             f"choose from {HEAD_NAMES}")
+        head_weight[HEAD_NAMES.index(name)] = float(val)
+    if not np.allclose(head_weight, 1.0):
+        print("[multi] head loss weights: " + ", ".join(
+            f"{n}={w:g}" for n, w in zip(HEAD_NAMES, head_weight) if w != 1.0), flush=True)
+
     sampler = ComboSampler.default()
     generator = torch.Generator(); generator.manual_seed(args.seed)
     ema = EMALossWeights()
@@ -481,7 +583,9 @@ def run_train_multi(args) -> None:
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
-        "adapter_lr": adapter_lr, "beta1": args.beta1,
+        "adapter_lr": adapter_lr, "head_lr": head_lr,
+        "head_loss_weight": {n: float(w) for n, w in zip(HEAD_NAMES, head_weight)},
+        "beta1": args.beta1,
         "inject": not args.no_inject, "inject_samples": int(args.inject_samples),
         "grad_checkpoint": args.grad_checkpoint,
         "bucketed": bool(args.bucketed),
@@ -517,7 +621,7 @@ def run_train_multi(args) -> None:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         encoder.eval(); head.train(); flows.train()
-        weights = ema.update_and_weights([None] * N_HEADS)
+        weights = ema.update_and_weights([None] * N_HEADS) * head_weight
         n_seen = 0
         ep_sum = {n: 0.0 for n in HEAD_NAMES}; ep_cnt = {n: 0 for n in HEAD_NAMES}
         bk_sum: dict[tuple[str, str], float] = {}; bk_cnt: dict[tuple[str, str], int] = {}
@@ -587,7 +691,7 @@ def run_train_multi(args) -> None:
                     optimizer.step()
                     if scheduler is not None:
                         scheduler.step()
-                    weights = ema.update_and_weights(raw)
+                    weights = ema.update_and_weights(raw) * head_weight
                     global_step += 1
                 last_raw, last_loss = raw, float(loss.item())
             if accumulate:
@@ -595,7 +699,7 @@ def run_train_multi(args) -> None:
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
-                weights = ema.update_and_weights(last_raw)
+                weights = ema.update_and_weights(last_raw) * head_weight
                 global_step += 1
             if tracker.enabled and want_diag:
                 payload = {"train/weighted_loss": last_loss,

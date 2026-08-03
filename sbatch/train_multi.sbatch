@@ -37,7 +37,13 @@ ADAPTER_WD="${ADAPTER_WD:-1e-1}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 BETA1="${BETA1:-0.95}"
 INJECT_SAMPLES="${INJECT_SAMPLES:-50}"
-DROP_HEADS="${DROP_HEADS:-log_flux_p4 logmstar}"   # p4 never learns; logmstar superseded by logmstar_cigale
+# Current scope: the joint over (M*, SFR, Lx, P3) plus a marginal head for each,
+# and the flux marginal (the paper's headline target, 100% coverage, free).
+# Everything else is parked. NOTE: dropping P2 removes the old P2xP3 joint, so
+# this run produces no HR32.
+DROP_HEADS="${DROP_HEADS:-logmstar log_flux_p1 log_flux_p2 log_flux_p4 log_mbh_pan25 log_mbh_vo09}"
+HEAD_LR="${HEAD_LR:-}"                 # flows; empty -> same as LR
+HEAD_LOSS_WEIGHTS="${HEAD_LOSS_WEIGHTS:-}"   # e.g. "joint=2 log_flux_p3=0.5"
 
 # Fail before burning GPU-hours if the sidecar is missing or has no SFR column.
 python - <<PY
@@ -62,6 +68,8 @@ python -m shareable_aion_flow.main train-multi \
   --adapter-lr "$ADAPTER_LR" --adapter-wd "$ADAPTER_WD" \
   --weight-decay "$WEIGHT_DECAY" --beta1 "$BETA1" \
   --inject-samples "$INJECT_SAMPLES" \
+  ${HEAD_LR:+--head-lr $HEAD_LR} \
+  $(for w in $HEAD_LOSS_WEIGHTS; do printf -- "--head-loss-weight %s " "$w"; done) \
   --num-workers 8 \
   --run-id "${RUN_TAG}-${SLURM_JOB_ID}" \
   --output-dir "$AIONFLOW_ROOT/outputs" \
