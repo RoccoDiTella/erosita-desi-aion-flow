@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -374,3 +375,29 @@ def test_warmup_then_cosine_is_one_factor_preserving_group_ratios() -> None:
     assert factor(total_steps - 1) < 0.01            # and anneals to ~0
     mid = [factor(s) for s in range(warmup, total_steps)]
     assert all(a >= b - 1e-12 for a, b in zip(mid, mid[1:])), "cosine must be monotone"
+
+
+def test_both_tracker_paths_mirror_to_history_jsonl(tmp_path) -> None:
+    """The wandb path must mirror too, not just the disabled path.
+
+    Caught by a smoke: the mirror was wired into NullRun only, because the
+    WandbRun construction is an ASSIGNMENT rather than a return, and a test that
+    exercised only NullRun passed happily while the real runs wrote nothing.
+    """
+    import tracking
+
+    class FakeWandb:
+        def __init__(self): self.logged = []
+        def log(self, metrics, step=None): self.logged.append((metrics, step))
+
+    fake = FakeWandb()
+    for run, label in ((tracking.NullRun(tracking.JsonlMirror(tmp_path / "a")), "null"),
+                       (tracking.WandbRun(fake, object(),
+                                          tracking.JsonlMirror(tmp_path / "b")), "wandb")):
+        run.log({"move/adapters_low": 1.5e-3}, step=42)
+    for sub in ("a", "b"):
+        path = tmp_path / sub / "history.jsonl"
+        assert path.exists(), f"{sub} path wrote no history.jsonl"
+        row = json.loads(path.read_text().splitlines()[0])
+        assert row["_step"] == 42 and row["move/adapters_low"] == 1.5e-3
+    assert fake.logged, "wandb must still receive the payload"

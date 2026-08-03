@@ -150,6 +150,6 @@ def init_tracking(
             print(f"[wandb] init failed ({exc}); continuing without tracking", flush=True)
             return NullRun(JsonlMirror(run_dir))
 
-    tracked = WandbRun(wandb, run)
+    tracked = WandbRun(wandb, run, JsonlMirror(run_dir))
     print(f"[wandb] tracking run -> {tracked.url}", flush=True)
     return tracked

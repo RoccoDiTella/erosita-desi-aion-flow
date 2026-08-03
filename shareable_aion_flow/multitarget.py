@@ -753,7 +753,10 @@ def run_train_multi(args) -> None:
                 if not joint_only:
                     weights = ema.update_and_weights(last_raw) * head_weight
                 global_step += 1
-            if tracker.enabled and want_diag:
+            # NOT gated on tracker.enabled: tracker.log mirrors to
+            # history.jsonl either way, so a run without wandb still records
+            # the per-group movement the LR decision depends on.
+            if want_diag:
                 payload = {"train/weighted_loss": last_loss,
                            "train/grad_norm": float(grad_norm),
                            "train/lr": float(optimizer.param_groups[0]["lr"]), "epoch": epoch}
