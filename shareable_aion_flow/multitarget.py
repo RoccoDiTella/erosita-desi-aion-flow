@@ -19,6 +19,7 @@ detached-EMA loss normalization so harder targets do not dominate gradients.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import h5py
@@ -260,6 +261,7 @@ def multi_target_nll(
     contexts: torch.Tensor,            # [B, K, 256]
     flows: MultiTargetFlows,
     targets: torch.Tensor,             # [B, K] (NaN = unavailable)
+    joint_only: bool = False,
     sig_lo: torch.Tensor,              # [B, K]
     sig_hi: torch.Tensor,
     standardizers: list[TargetStandardizer],
@@ -298,8 +300,14 @@ def multi_target_nll(
 
     B = targets.shape[0]
     for j, flow in enumerate(flows.flows):
+        # joint_only (phase 1): the marginal flows are not trained at all. Their
+        # targets are still loaded and standardized, because the JOINT indexes
+        # into the same target matrix -- dropping the heads would break
+        # JOINT_IDX. Skipping the term (rather than zero-weighting it) leaves
+        # their grads None, so AdamW skips them entirely and weight decay does
+        # not quietly shrink flows that phase 2 is about to refit.
         mask = torch.isfinite(targets[:, j])
-        if not bool(mask.any()):
+        if joint_only or not bool(mask.any()):
             raw.append(None)
             terms.append(None)
             continue
@@ -544,10 +552,14 @@ def run_train_multi(args) -> None:
     # zero-initialised, so on a shared LR they move ~30x faster in
     # update/weight terms than the standard-initialised MLP and flows.
     head_lr = args.head_lr if getattr(args, "head_lr", None) is not None else args.lr
+    joint_only = bool(getattr(args, "joint_only", False))
+    # joint_only: only the joint flow is optimized. The marginal flows still
+    # exist (the joint indexes the same target matrix) but get no loss term.
+    flow_params = list(flows.joint.parameters()) if joint_only else list(flows.parameters())
     param_groups = [
         {"params": list(head.parameters()), "lr": args.lr,
          "weight_decay": args.weight_decay},
-        {"params": list(flows.parameters()), "lr": head_lr,
+        {"params": flow_params, "lr": head_lr,
          "weight_decay": args.weight_decay},
         {"params": [encoder.cls_token], "lr": args.lr, "weight_decay": 0.0},
         {"params": list(encoder.cls_read_adapters.parameters()), "lr": adapter_lr,
@@ -556,10 +568,25 @@ def run_train_multi(args) -> None:
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(args.beta1, 0.999))
     trainable = [p for g in param_groups for p in g["params"]]
     steps_per_epoch = max(1, len(train_loader)) * (len(LENGTH_BUCKETS) if args.bucketed else 1)
+    total_steps = max(1, steps_per_epoch * args.epochs)
+    warmup_steps = max(0, int(getattr(args, "warmup_steps", 0)))
     scheduler = None
-    if args.lr_schedule == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=steps_per_epoch * args.epochs)
+    if args.lr_schedule == "cosine" or warmup_steps > 0:
+        # One LambdaLR for warmup AND cosine. LambdaLR scales each group's OWN
+        # initial LR, so the per-part ratios set above (adapters vs flows vs
+        # trunk) are preserved exactly -- which CosineAnnealingLR also does, but
+        # composing the two schedulers would not.
+        cosine = args.lr_schedule == "cosine"
+
+        def lr_factor(step: int) -> float:
+            if warmup_steps and step < warmup_steps:
+                return float(step + 1) / float(warmup_steps)
+            if not cosine:
+                return 1.0
+            done = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            return float(0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, done)))))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     # Per-head loss weight, multiplied on top of the detached-EMA balance. The
     # EMA equalises SCALE across heads; this is the manual lever for saying a
     # head matters more or less than that, e.g. holding back a head that
@@ -582,6 +609,8 @@ def run_train_multi(args) -> None:
     config = {
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
+        "joint_only": joint_only, "warmup_steps": warmup_steps,
+        "grad_clip": float(getattr(args, "grad_clip", 5.0)),
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
         "adapter_lr": adapter_lr, "head_lr": head_lr,
         "head_loss_weight": {n: float(w) for n, w in zip(HEAD_NAMES, head_weight)},
@@ -613,6 +642,11 @@ def run_train_multi(args) -> None:
             "ema": ema.state_dict(), "val_multi_nll_sum": val_sum,
         }, path)
 
+    grad_clip = float(getattr(args, "grad_clip", 5.0))
+    snapshot_every = int(getattr(args, "snapshot_every", 0))
+    snap_dir = run_dir / "snapshots"
+    if snapshot_every > 0:
+        snap_dir.mkdir(parents=True, exist_ok=True)
     diag_groups = param_diagnostic_groups(encoder, head, flows)
     prev_snapshot = None
     best = float("inf"); best_epoch = 0; global_step = 0
@@ -621,7 +655,11 @@ def run_train_multi(args) -> None:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         encoder.eval(); head.train(); flows.train()
-        weights = ema.update_and_weights([None] * N_HEADS) * head_weight
+        # With ONE head the EMA normaliser (weight = 1/EMA) becomes a
+        # time-varying global scale on the only loss, i.e. a second learning
+        # rate schedule fighting the cosine. Pin it.
+        weights = (np.ones(N_HEADS) if joint_only
+                   else ema.update_and_weights([None] * N_HEADS)) * head_weight
         n_seen = 0
         ep_sum = {n: 0.0 for n in HEAD_NAMES}; ep_cnt = {n: 0 for n in HEAD_NAMES}
         bk_sum: dict[tuple[str, str], float] = {}; bk_cnt: dict[tuple[str, str], int] = {}
@@ -672,6 +710,7 @@ def run_train_multi(args) -> None:
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=weights, inject=not args.no_inject,
                     inject_samples=args.inject_samples, return_terms=True,
+                    joint_only=joint_only,
                 )
                 if want_diag and si == 0:
                     diag_extra.update(head_influence(terms, contexts))
@@ -687,19 +726,21 @@ def run_train_multi(args) -> None:
                         bk_cnt[(bname, name)] = bk_cnt.get((bname, name), 0) + nb
                 n_seen += nb
                 if not accumulate:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
                     optimizer.step()
                     if scheduler is not None:
                         scheduler.step()
-                    weights = ema.update_and_weights(raw) * head_weight
+                    if not joint_only:
+                        weights = ema.update_and_weights(raw) * head_weight
                     global_step += 1
                 last_raw, last_loss = raw, float(loss.item())
             if accumulate:
-                grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 5.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
-                weights = ema.update_and_weights(last_raw) * head_weight
+                if not joint_only:
+                    weights = ema.update_and_weights(last_raw) * head_weight
                 global_step += 1
             if tracker.enabled and want_diag:
                 payload = {"train/weighted_loss": last_loss,
@@ -794,6 +835,11 @@ def run_train_multi(args) -> None:
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
         save(run_dir / "last.pt", epoch, val_pair_mean)
+        # Periodic snapshots: phase 2 picks the BODY by post-refit validation,
+        # which is not the same epoch as min joint val NLL. AION is frozen and
+        # excluded, so these are small.
+        if snapshot_every > 0 and epoch % snapshot_every == 0:
+            save(snap_dir / f"epoch_{epoch:03d}.pt", epoch, val_pair_mean)
         if val_pair_mean < best:
             best = val_pair_mean
             best_epoch = epoch

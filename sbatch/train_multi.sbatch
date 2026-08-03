@@ -44,6 +44,14 @@ INJECT_SAMPLES="${INJECT_SAMPLES:-50}"
 DROP_HEADS="${DROP_HEADS:-logmstar log_flux_p1 log_flux_p2 log_flux_p4 log_mbh_pan25 log_mbh_vo09}"
 HEAD_LR="${HEAD_LR:-}"                 # flows; empty -> same as LR
 HEAD_LOSS_WEIGHTS="${HEAD_LOSS_WEIGHTS:-}"   # e.g. "joint=2 log_flux_p3=0.5"
+# Phase 1 knobs. JOINT_ONLY=1 trains the joint flow alone: no loss weighting to
+# balance, because there is only one loss. LR_SCHEDULE was hardcoded to
+# constant here; it is a variable now.
+JOINT_ONLY="${JOINT_ONLY:-}"
+LR_SCHEDULE="${LR_SCHEDULE:-constant}"
+WARMUP_STEPS="${WARMUP_STEPS:-0}"
+GRAD_CLIP="${GRAD_CLIP:-5.0}"
+SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-0}"
 
 # Fail before burning GPU-hours if the sidecar is missing or has no SFR column.
 python - <<PY
@@ -64,7 +72,10 @@ python -m shareable_aion_flow.main train-multi \
   ${DROP_HEADS:+--drop-heads $DROP_HEADS} \
   --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
   --bucketed --accumulate-buckets --grad-checkpoint \
-  --lr "$LR" --lr-schedule constant \
+  --lr "$LR" --lr-schedule "$LR_SCHEDULE" \
+  --warmup-steps "$WARMUP_STEPS" --grad-clip "$GRAD_CLIP" \
+  --snapshot-every "$SNAPSHOT_EVERY" \
+  ${JOINT_ONLY:+--joint-only} \
   --adapter-lr "$ADAPTER_LR" --adapter-wd "$ADAPTER_WD" \
   --weight-decay "$WEIGHT_DECAY" --beta1 "$BETA1" \
   --inject-samples "$INJECT_SAMPLES" \

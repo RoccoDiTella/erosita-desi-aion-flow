@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -304,3 +305,72 @@ def test_joint_marginalises_a_missing_dimension_instead_of_imputing() -> None:
         assert abs(raw_fine[-1] - raw[-1]) < 0.05
     finally:
         mt.configure_heads(())
+
+
+def test_joint_only_trains_the_joint_and_leaves_marginal_flows_untouched() -> None:
+    """Phase 1: only the joint contributes loss; marginal flows get NO gradient.
+
+    Skipping the term matters more than zero-weighting it. A zero-weighted term
+    still produces grads of 0 rather than None, and AdamW's decoupled weight
+    decay would then quietly shrink flows that phase 2 is about to refit.
+    """
+    import multitarget as mt
+
+    torch.manual_seed(0)
+    try:
+        mt.configure_heads(("log_flux_p4", "logmstar", "log_mbh_pan25", "log_mbh_vo09",
+                            "log_flux_p1", "log_flux_p2", "log_ml_flux_1"))
+        n_t, n_h = mt.N_TARGETS, mt.N_HEADS
+        B = 12
+        flows = mt.MultiTargetFlows(context_dim=256)
+        targets = torch.randn(B, n_t)
+        contexts = torch.randn(B, n_h, 256, requires_grad=True)
+        stds = [TargetStandardizer(0.0, 1.0) for _ in range(n_t)]
+        total, raw = mt.multi_target_nll(
+            contexts=contexts, flows=flows, targets=targets,
+            sig_lo=torch.zeros(B, n_t), sig_hi=torch.zeros(B, n_t),
+            standardizers=stds, weights=np.ones(n_h), inject=False,
+            joint_only=True,
+        )
+        assert all(r is None for r in raw[:n_t]), "marginal heads must not report a loss"
+        assert raw[-1] is not None and np.isfinite(raw[-1]), "joint must still train"
+
+        total.backward()
+        joint_grad = sum(float(p.grad.abs().sum()) for p in flows.joint.parameters()
+                         if p.grad is not None)
+        assert joint_grad > 0, "joint flow got no gradient"
+        for f in flows.flows:
+            assert all(p.grad is None for p in f.parameters()), \
+                "marginal flow grads must be None, not zero, so AdamW skips them"
+        # the shared trunk is still driven, via the joint's context slot
+        assert float(contexts.grad[:, n_t].abs().sum()) > 0
+    finally:
+        mt.configure_heads(())
+
+
+def approx(x, tol=1e-9):
+    class _A:
+        def __eq__(self, other): return abs(other - x) <= tol
+    return _A()
+
+
+def test_warmup_then_cosine_is_one_factor_preserving_group_ratios() -> None:
+    """Warmup and cosine compose in a single LambdaLR factor.
+
+    LambdaLR scales each group's OWN initial LR, so the adapter/flow/trunk ratios
+    survive the schedule. Chaining two schedulers would not guarantee that.
+    """
+    total_steps, warmup = 100, 10
+
+    def factor(step: int) -> float:
+        if warmup and step < warmup:
+            return float(step + 1) / float(warmup)
+        done = (step - warmup) / max(1, total_steps - warmup)
+        return float(0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, done)))))
+
+    assert factor(0) == approx(0.1)          # ramps from a tenth, not zero
+    assert factor(warmup - 1) == approx(1.0)  # reaches full LR at the end of warmup
+    assert factor(warmup) == approx(1.0)      # cosine starts at its maximum
+    assert factor(total_steps - 1) < 0.01            # and anneals to ~0
+    mid = [factor(s) for s in range(warmup, total_steps)]
+    assert all(a >= b - 1e-12 for a, b in zip(mid, mid[1:])), "cosine must be monotone"

@@ -1023,6 +1023,24 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--train-probe-size", type=int, default=2520,
                     help="Fixed training-split subset scored with the VAL protocol each epoch "
                     "(0 disables). Makes train and val directly comparable.")
+    mt.add_argument("--joint-only", action="store_true",
+                    help="Phase 1: train ONLY the joint flow. The marginal targets are still "
+                         "loaded and standardized (the joint indexes the same matrix) but their "
+                         "flows get no loss term, so AdamW skips them entirely. With one head the "
+                         "EMA loss normaliser is pinned to 1, since on a single loss it is just a "
+                         "second learning-rate schedule.")
+    mt.add_argument("--warmup-steps", type=int, default=0,
+                    help="Linear LR warmup over this many optimizer steps, composed with "
+                         "--lr-schedule in ONE LambdaLR so per-group LR ratios are preserved. "
+                         "Zero-init adapters and a fresh flow both benefit.")
+    mt.add_argument("--grad-clip", type=float, default=5.0,
+                    help="Global gradient-norm clip (was hardcoded at 5.0). The quadrature path "
+                         "takes a logsumexp over 48 nodes and NSF spline parameters can spike on "
+                         "a single bad batch.")
+    mt.add_argument("--snapshot-every", type=int, default=0,
+                    help="Save a body snapshot every N epochs (0 disables). Phase 2 selects the "
+                         "body by POST-REFIT validation, which is not the epoch of min joint val "
+                         "NLL. AION is frozen and excluded, so these are small.")
     mt.add_argument("--diag-every", type=int, default=50,
                     help="Steps between diagnostic logs (head influence, group norms/movement).")
     mt.add_argument("--bucket-chunk", type=int, default=224,

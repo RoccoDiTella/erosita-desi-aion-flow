@@ -983,15 +983,18 @@ ADAPTER_LR 1e-4, ADAPTER_WD 1e-1, WEIGHT_DECAY 1e-4, batch 896. HEAD_LR is the
 knob expected to move first: those defaults were tuned for 1-D flows and the
 joint is a 4-D density.
 
-### Three things the loop is missing and needs before this run
-1. **LR warmup.** None exists. Linear over ~300 steps. Cheap insurance for
-   zero-init adapters plus a fresh flow.
-2. **Gradient clipping.** None exists. Global norm 1.0. The quadrature path
-   takes a logsumexp over 48 nodes, and NSF spline parameters can spike on a
-   single bad batch.
-3. **`--lr-schedule` defaults to `constant`.** Pass `cosine` explicitly. One
-   scheduler scales all groups together, so the relative LR ratios set above
-   are preserved.
+### Three loop changes for this run (corrected 2026-08-03)
+1. **LR warmup.** Missing from `train-multi`. (It exists only in the
+   single-target path in main.py, and there it is an epoch-level adapter freeze,
+   not a step-level ramp.) Added as `--warmup-steps`, composed with the cosine
+   in ONE `LambdaLR`: LambdaLR scales each group's own initial LR, so the
+   adapter/flow/trunk ratios survive the schedule, which chaining two schedulers
+   would not guarantee.
+2. **Gradient clipping ALREADY EXISTED**, hardcoded at 5.0. An earlier note here
+   claimed it was absent; that was wrong. Now `--grad-clip`, default 5.0 to
+   preserve behaviour, worth tightening if the quadrature logsumexp spikes.
+3. **`--lr-schedule` is hardcoded to `constant` in the sbatch** (not merely
+   defaulted). Now driven by `$LR_SCHEDULE`, cosine for this run.
 
 **Also pin the EMA to 1.** With a single head, `weight = 1/EMA` becomes a
 time-varying global scale on the only loss, which is silently a second
