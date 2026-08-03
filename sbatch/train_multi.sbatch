@@ -52,6 +52,9 @@ LR_SCHEDULE="${LR_SCHEDULE:-constant}"
 WARMUP_STEPS="${WARMUP_STEPS:-0}"
 GRAD_CLIP="${GRAD_CLIP:-5.0}"
 SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-0}"
+DIAG_EVERY="${DIAG_EVERY:-50}"
+JOINT_QUAD_NODES="${JOINT_QUAD_NODES:-}"
+JOINT_QUAD_SPAN="${JOINT_QUAD_SPAN:-}"
 
 # Fail before burning GPU-hours if the sidecar is missing or has no SFR column.
 python - <<PY
@@ -74,7 +77,9 @@ python -m shareable_aion_flow.main train-multi \
   --bucketed --accumulate-buckets --grad-checkpoint \
   --lr "$LR" --lr-schedule "$LR_SCHEDULE" \
   --warmup-steps "$WARMUP_STEPS" --grad-clip "$GRAD_CLIP" \
-  --snapshot-every "$SNAPSHOT_EVERY" \
+  --snapshot-every "$SNAPSHOT_EVERY" --diag-every "$DIAG_EVERY" \
+  ${JOINT_QUAD_NODES:+--joint-quad-nodes $JOINT_QUAD_NODES} \
+  ${JOINT_QUAD_SPAN:+--joint-quad-span $JOINT_QUAD_SPAN} \
   ${JOINT_ONLY:+--joint-only} \
   --adapter-lr "$ADAPTER_LR" --adapter-wd "$ADAPTER_WD" \
   --weight-decay "$WEIGHT_DECAY" --beta1 "$BETA1" \

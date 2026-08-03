@@ -584,6 +584,15 @@ def run_train_multi(args) -> None:
     steps_per_epoch = max(1, len(train_loader)) * (len(LENGTH_BUCKETS) if args.bucketed else 1)
     total_steps = max(1, steps_per_epoch * args.epochs)
     warmup_steps = max(0, int(getattr(args, "warmup_steps", 0)))
+    # Print the step budget. This run has FEW optimizer steps: ~20,160 train
+    # rows over the batch size, so a large batch leaves only tens of steps per
+    # epoch and a warmup sized in "typical" hundreds would swallow the run.
+    print(f"[multi] {steps_per_epoch} steps/epoch x {args.epochs} epochs "
+          f"= {total_steps} optimizer steps; warmup {warmup_steps} "
+          f"({100.0 * warmup_steps / max(1, total_steps):.0f}%)", flush=True)
+    if warmup_steps > 0.3 * total_steps:
+        print(f"[multi] WARNING: warmup is {100.0 * warmup_steps / max(1, total_steps):.0f}% "
+              f"of the whole run. Size it against steps/epoch, not a habit.", flush=True)
     scheduler = None
     if args.lr_schedule == "cosine" or warmup_steps > 0:
         # One LambdaLR for warmup AND cosine. LambdaLR scales each group's OWN
