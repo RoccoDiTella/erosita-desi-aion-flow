@@ -94,17 +94,27 @@ def main() -> None:
     # would drag a median-based reference up until the healthy groups looked
     # frozen. The target is an absolute band and does not care how many
     # sub-groups a part happens to have.
-    collapsed = {("adapters" if g.startswith("adapters") else g): m for g, m in med.items()}
-    print(f"\nmedian across parts (adapters collapsed): {np.median(list(collapsed.values())):.2e}")
-    hi = [g for g in med if med[g] > 10 * args.target]
-    lo = [g for g in med if med[g] < 0.1 * args.target]
+    # A group at EXACTLY zero is not mis-tuned, it is switched off: under
+    # --joint-only the marginal flows get no loss term by design. Calling them
+    # "frozen, raise the LR" inverts the intent, and dividing by zero movement
+    # turns the imbalance ratio into astronomy.
+    off = sorted(g for g in med if med[g] == 0.0)
+    live = {g: m for g, m in med.items() if m > 0.0}
+    if off:
+        print(f"\nnot trained (no loss term, as configured): {', '.join(off)}")
+    if not live:
+        raise SystemExit("every group is frozen; nothing to tune")
+    collapsed = {("adapters" if g.startswith("adapters") else g): m for g, m in live.items()}
+    print(f"median across live parts (adapters collapsed): {np.median(list(collapsed.values())):.2e}")
+    hi = [g for g in live if live[g] > 10 * args.target]
+    lo = [g for g in live if live[g] < 0.1 * args.target]
     if hi:
         print(f"  MOVING FAST (>10x target), lower their LR: {', '.join(sorted(hi))}")
     if lo:
         print(f"  NEARLY FROZEN (<0.1x target), raise their LR: {', '.join(sorted(lo))}")
     if not hi and not lo:
         print("  every group within a decade of target: no per-group LR change indicated")
-    spread = max(med.values()) / max(min(med.values()), 1e-12)
+    spread = max(live.values()) / max(min(live.values()), 1e-12)
     print(f"  fastest/slowest ratio: {spread:.0f}x"
           + ("  <- groups are badly out of balance" if spread > 30 else ""))
 
