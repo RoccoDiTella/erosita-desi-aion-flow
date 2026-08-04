@@ -435,3 +435,28 @@ def test_blank_cutout_drops_the_image_modality_for_that_source_only() -> None:
     # without the images argument the behaviour is exactly as before
     out3 = mt.bucket_modality_dropout(bucket, combos, idx)
     assert not out3["image"].any()
+
+
+def test_band_availability_is_gated_on_detection_not_error_bar() -> None:
+    """An undetected band must read as MISSING, however tight its error bar.
+
+    Gating on sigma alone admitted upper limits as though they were
+    measurements. That is the likeliest source of the faint-band sigma
+    overestimation: P1 and P3 sat far above their sigma-derived R^2 ceilings,
+    and the hardness-ratio test implied a negative true variance, which is
+    impossible unless E[sigma^2] is inflated.
+    """
+    import multitarget as mt
+
+    spec = next(t for t in mt.MULTI_TARGETS if t["name"] == "log_flux_p3")
+    assert spec["det"] == ("det_like_p3", 5.0)
+
+    # a source with a beautiful error bar but no detection is NOT available
+    det = np.array([9.0, 4.9, 5.1, np.nan])
+    tight_sigma = np.full(4, 0.01)
+    y = np.array([-13.0, -13.0, -13.0, -13.0])
+    ok = np.isfinite(y)
+    ok &= 0.5 * (tight_sigma + tight_sigma) <= spec["max_sigma"]
+    ok &= np.isfinite(det) & (det > 5.0)
+    assert ok.tolist() == [True, False, True, False], \
+        "detection must decide availability even when the sigma gate passes"

@@ -36,34 +36,34 @@ except ImportError:
 
 # name, sigma columns (None = no error model), availability sigma gate
 MULTI_TARGETS: list[dict] = [
-    {"name": "log_ml_flux_1", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "sidecar": False},
-    {"name": "log_lx", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "sidecar": False},
-    {"name": "logmstar", "sig": None, "max_sigma": None, "sidecar": False},
-    {"name": "log_flux_p1", "sig": ("log_flux_p1_sig_lo", "log_flux_p1_sig_hi"), "max_sigma": 1.0, "sidecar": True},
-    {"name": "log_flux_p2", "sig": ("log_flux_p2_sig_lo", "log_flux_p2_sig_hi"), "max_sigma": 1.0, "sidecar": True},
-    {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": 1.0, "sidecar": True},
-    {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": 1.0, "sidecar": True},
+    {"name": "log_ml_flux_1", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": None, "sidecar": False},
+    {"name": "log_lx", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": None, "sidecar": False},
+    {"name": "logmstar", "sig": None, "max_sigma": None, "det": None, "sidecar": False},
+    {"name": "log_flux_p1", "sig": ("log_flux_p1_sig_lo", "log_flux_p1_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p1", 5.0), "sidecar": True},
+    {"name": "log_flux_p2", "sig": ("log_flux_p2_sig_lo", "log_flux_p2_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p2", 5.0), "sidecar": True},
+    {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p3", 5.0), "sidecar": True},
+    {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p4", 5.0), "sidecar": True},
     # APPENDED, never inserted: the flows are indexed positionally, so adding a
     # head anywhere but the end silently renumbers every existing checkpoint.
     # log SFR comes from the CIGALE VAC, a DIFFERENT SED fit than the one that
     # produced logmstar -- see scripts/make_sfr_sidecar.py for why that matters.
-    {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": 1.0, "sidecar": True},
+    {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": 1.0, "det": None, "sidecar": True},
     # CIGALE stellar mass. Supersedes the FastSpecFit `logmstar` above for this
     # sample: FastSpecFit has NO AGN component, so on 87% QSO it attributes the
     # accretion-disk continuum to stars. CIGALE fits the AGN explicitly. Keeping
     # both in the same fit as log_sfr also makes sSFR well defined. Drop the
     # older head with --drop-heads logmstar.
     {"name": "logmstar_cigale", "sig": ("logmstar_cigale_sig_lo", "logmstar_cigale_sig_hi"),
-     "max_sigma": 1.0, "sidecar": True},
+     "max_sigma": 1.0, "det": None, "sidecar": True},
     # Black-hole mass, DR1 qmassiron VAC. PAN25 is iron-corrected and primary;
     # VO09 is the classic estimator, kept as a comparison target. SHEN11/LE20/
     # YU23 ride in the sidecar as columns -- they correlate with VO09 at 0.99+
     # (LE20 is exactly 1.0000, a pure rescaling), so training them would be
     # training the same target several times.
     {"name": "log_mbh_pan25", "sig": ("log_mbh_pan25_sig_lo", "log_mbh_pan25_sig_hi"),
-     "max_sigma": 1.0, "sidecar": True},
+     "max_sigma": 1.0, "det": None, "sidecar": True},
     {"name": "log_mbh_vo09", "sig": ("log_mbh_vo09_sig_lo", "log_mbh_vo09_sig_hi"),
-     "max_sigma": 1.0, "sidecar": True},
+     "max_sigma": 1.0, "det": None, "sidecar": True},
 ]
 _ALL_TARGETS = list(MULTI_TARGETS)
 N_TARGETS = len(MULTI_TARGETS)          # scalar heads
@@ -197,6 +197,20 @@ def load_multi_target_matrix(
             mean_sig = 0.5 * (slo[:, j] + shi[:, j])
             bad = ~np.isfinite(mean_sig) | (mean_sig > spec["max_sigma"])
             y[bad, j] = np.nan
+        # Availability on DETECTION, not on the error bar. A band can pass a
+        # sigma cut while being an upper limit, which hands the flow a
+        # non-measurement dressed as a measurement -- the likeliest reason the
+        # faint-band sigmas look overestimated (P1 and P3 sit far above their
+        # sigma-derived R^2 ceilings, and the HR test implies a NEGATIVE true
+        # variance). Undetected bands are left NaN, i.e. genuinely missing.
+        if spec.get("det"):
+            det_col, thresh = spec["det"]
+            dl = col(det_col)
+            if dl is None:
+                raise ValueError(
+                    f"{spec['name']} gates on {det_col}, which the sidecar does not "
+                    "provide. Rebuild it with scripts/make_dr2_targets.py.")
+            y[~(np.isfinite(dl) & (dl > thresh)), j] = np.nan
     return y, slo, shi
 
 
