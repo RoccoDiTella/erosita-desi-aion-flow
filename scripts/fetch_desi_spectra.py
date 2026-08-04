@@ -40,11 +40,36 @@ def coadd_url(survey: str, program: str, pix: int) -> str:
     return BASE.format(survey=survey, program=program, group=pix // 100, pix=pix)
 
 
-def fetch_group(survey: str, program: str, pix: int, want: np.ndarray):
+class MissingFile(Exception):
+    """The coadd genuinely does not exist: never worth retrying."""
+
+
+def fetch_group(survey: str, program: str, pix: int, want: np.ndarray,
+                attempts: int = 4):
     """Read only the rows of one coadd that belong to `want`.
+
+    Retries transient failures with backoff. A public archive returns 503 when
+    we push too hard, and treating that as permanent would silently drop
+    sources; a genuinely absent file raises MissingFile so the caller can mark
+    it done instead of retrying it on every resume.
 
     Returns (targetids, flux[n, NBIN], ivar[n, NBIN]) or None.
     """
+    import time as _time
+    last = None
+    for a in range(attempts):
+        try:
+            return _fetch_once(survey, program, pix, want)
+        except FileNotFoundError as e:
+            raise MissingFile(str(e)) from e
+        except Exception as e:                      # 503, timeout, truncated read
+            last = e
+            if a < attempts - 1:
+                _time.sleep(2 ** a * 3)             # 3, 6, 12 s
+    raise last
+
+
+def _fetch_once(survey: str, program: str, pix: int, want: np.ndarray):
     from astropy.io import fits
 
     url = coadd_url(survey, program, int(pix))
@@ -83,8 +108,9 @@ def main() -> None:
     ap.add_argument("--targets", type=Path, required=True,
                     help="CSV with targetid, survey, program, healpix")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--workers", type=int, default=12,
-                    help="Concurrent coadd files. Keep modest: this is a public server.")
+    ap.add_argument("--workers", type=int, default=6,
+                    help="Concurrent coadd files. Keep modest: the archive returns 503 "
+                         "when pushed, and 8-way already triggered it.")
     ap.add_argument("--limit-groups", type=int, default=0, help="0 = all (use for a trial run)")
     args = ap.parse_args()
 
@@ -124,16 +150,20 @@ def main() -> None:
                 d.resize(d.shape[0] + n, axis=0)
                 d[-n:] = arr
 
-        ok = fail = 0
+        ok = fail = missing = 0
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {ex.submit(fetch_group, s, p, h, w): (s, p, h) for s, p, h, w in todo}
             for i, fut in enumerate(as_completed(futs), 1):
                 key = futs[fut]
                 try:
                     res = fut.result()
-                except Exception as e:                     # keep going; log and retry later
+                except MissingFile:
+                    missing += 1
+                    done.add(key)                  # absent for good; do not retry on resume
+                    continue
+                except Exception as e:             # transient: leave UNdone so resume retries
                     fail += 1
-                    print(f"  [fail] {key}: {type(e).__name__}: {e}", flush=True)
+                    print(f"  [retry-later] {key}: {type(e).__name__}: {str(e)[:90]}", flush=True)
                     continue
                 if res is not None:
                     with _lock:
@@ -142,10 +172,12 @@ def main() -> None:
                 done.add(key)
                 if i % 25 == 0:
                     done_path.write_text(json.dumps([list(k) for k in done]))
-                    print(f"  {i:,}/{len(todo):,} files | {ok:,} spectra | {fail} failed",
-                          flush=True)
+                    print(f"  {i:,}/{len(todo):,} files | {ok:,} spectra | "
+                          f"{fail} to retry | {missing} absent", flush=True)
         done_path.write_text(json.dumps([list(k) for k in done]))
-    print(f"done: {ok:,} spectra written to {args.out} ({fail} files failed)")
+    print(f"done: {ok:,} spectra -> {args.out}")
+    print(f"  {missing} coadds absent (marked done), {fail} transient failures "
+          f"(left undone; just rerun the same command to retry them)")
 
 
 if __name__ == "__main__":
