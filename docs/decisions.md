@@ -1063,3 +1063,76 @@ NLL is not the headline number.
 
 Fixed to count the steps the scheduler actually takes. Any earlier run using
 cosine WITH accumulate-buckets annealed far less than intended.
+
+## 10. Phase-1 + phase-2 results (run 36980372, refit 37012762)
+
+**Phase 1** (joint alone, 12 epochs, batch 256, 32 quadrature nodes): joint val
+NLL **2.256**, versus a 4-D independent-standard-normal baseline of 5.676, so
+**3.42 nats** better. Still improving at epoch 12, with only **12%** of
+late-phase fitting leaking into the generalization gap (eta = 0.120, against
+0.88-1.06 for v4's heads late in training). This configuration wants MORE epochs,
+not fewer. Note the cosine never annealed here (scheduler-horizon bug), so 2.256
+was reached at effectively constant LR.
+
+**Learning rates, measured** (settled window, per-step update-to-weight ratio):
+trunk and joint flow are healthy at lr 3e-4 (shared_mlp 0.43x target, cls_tokens
+0.33x, flow_joint 0.73x). The adapters are the sole outlier at **7-8x target and
+~25x the trunk**, despite already running at a 3x lower LR. Recommendation:
+`adapter_lr` 1e-4 -> **3e-5**, everything else unchanged. The adapter depth split
+answers its own question: 8.4 / 7.3 / 6.8e-3 shallow-to-deep is a 1.24x gradient,
+so per-depth rates are not worth having.
+
+**Phase 2 (refit on frozen bodies).** Two results matter.
+
+*The body specialises to exactly what the joint trains on.* Across bodies from
+epoch 2 to 10, the joint's own targets improve sharply while everything else is
+flat:
+
+| head | ep2 | ep10 | change | in joint? |
+|---|---|---|---|---|
+| log_sfr | 0.549 | 0.341 | **-0.208** | yes |
+| logmstar_cigale | 0.678 | 0.512 | **-0.166** | yes |
+| logmstar (FSF) | 0.272 | 0.219 | -0.053 | correlated |
+| log_lx | 0.175 | 0.147 | -0.028 | yes |
+| log_ml_flux_1 | 0.940 | 0.933 | -0.007 | no |
+| log_flux_p1/p2/p4 | ~1.13-1.32 | ~1.13-1.32 | ~0.00 | no |
+| log_mbh_pan25/vo09 | 1.296/1.209 | 1.293/1.190 | ~-0.01 | no |
+
+So joint-only training buys the joint's targets a great deal and the others
+essentially nothing. It does NOT actively harm them, which an earlier two-point
+reading of this table wrongly suggested.
+
+*The joint earns its place.* Refit under the SAME protocol as the marginals it is
+compared against:
+
+| body | joint | sum of marginals | dependence |
+|---|---|---|---|
+| ep2 | 1.715 | 2.566 | +0.850 |
+| ep4 | 1.608 | 2.374 | +0.767 |
+| ep6 | 1.478 | 2.279 | +0.801 |
+| ep8 | 1.422 | 2.226 | +0.805 |
+| ep10 | 1.380 | 2.163 | +0.783 |
+
+**Dependence is +0.80 nats, flat to +/-0.04 across every body**, while the joint
+itself improves monotonically. There is real, irreducible structure among
+(M*, SFR, Lx, P3) that independent heads cannot represent, and better
+representation does not absorb it.
+
+**Per-head stopping epochs on the best body span 6 to 27** (P1 and P4 at 6, FSF
+mass at 27): a 4.5x spread, which is the direct justification for refitting each
+head separately rather than sharing one checkpoint.
+
+**Best body by post-refit validation: epoch 10**, and the summed-over-heads total
+falls monotonically (9.907, 9.694, 9.597, 9.553, 9.411), agreeing with phase 1
+that the run was too short.
+
+**A comparison that was nearly wrong.** Before the joint was refit, the phase-1
+joint (3.105 at epoch 2) was compared against fully refit marginals (2.566) and
+appeared to LOSE by 0.55 nats. That gap measured fitting effort, not dependence.
+Refitting the joint under the same protocol turns -0.55 into +0.85, a 1.4-nat
+swing, and reverses the conclusion from "drop the joint head" to "keep it".
+
+**The refit joint on a 2-epoch body (1.715) beats phase 1's joint on a 12-epoch
+body (2.256).** The body was adequate almost immediately; the joint FLOW was
+badly underfit. The refit used lr 1e-3 against phase 1's head_lr 3e-4, so the
+next phase-1 run should raise `head_lr`.
