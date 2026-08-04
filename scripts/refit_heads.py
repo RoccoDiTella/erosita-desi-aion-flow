@@ -99,6 +99,84 @@ def fit_one(name, ctx_tr, y_tr, ctx_va, y_va, std, args, device):
             "state": flow.state_dict()}
 
 
+def fit_joint(ctx_tr, y_tr, ctx_va, y_va, stds, args, device):
+    """Refit the JOINT on the frozen body, so the comparison is like for like.
+
+    Without this the joint is judged on the flow phase 1 happened to leave it
+    with, while every marginal it is compared against got a full dedicated fit
+    with its own early stopping. That comparison is rigged against the joint and
+    would understate the dependence it captures.
+
+    Rows missing the marginalisable dimension are integrated out by the same
+    quadrature the trainer uses; rows missing a REQUIRED dimension are skipped.
+    """
+    names = [t["name"] for t in mt.MULTI_TARGETS]
+    idx = [names.index(n) for n in mt.JOINT_PAIR if n in names]
+    req = [j for j in idx if names[j] not in mt.JOINT_MARGINAL]
+    marg = [j for j in idx if names[j] in mt.JOINT_MARGINAL]
+    if len(idx) < 2 or len(marg) > 1:
+        return None
+
+    def prep(ctx, y):
+        keep = torch.ones(y.shape[0], dtype=torch.bool)
+        for j in req:
+            keep &= torch.isfinite(y[:, j])
+        z = torch.stack([stds[j].transform_tensor(y[keep, j]) for j in idx], dim=-1)
+        have = torch.ones(int(keep.sum()), dtype=torch.bool)
+        for j in marg:
+            have &= torch.isfinite(y[keep, j])
+        return ctx[keep].to(device), z.to(device), have.to(device)
+
+    xt, zt, ht = prep(ctx_tr, y_tr)
+    xv, zv, hv = prep(ctx_va, y_va)
+    K, span = mt.JOINT_QUAD_NODES, mt.JOINT_QUAD_SPAN
+    jm = idx.index(marg[0]) if marg else None
+    nodes = torch.linspace(-span, span, K, device=device)
+    du = float(nodes[1] - nodes[0])
+
+    def nll(flow, x, z, have):
+        out = x.new_zeros(())
+        n = 0
+        if bool(have.any()):
+            lp = flow.log_prob_draws(z[have].unsqueeze(0), x[have])
+            out = out + -lp.sum(); n += int(have.sum())
+        part = ~have
+        if jm is not None and bool(part.any()):
+            # log_prob_draws takes [draws, batch, features] against [batch, ctx],
+            # so the K quadrature nodes ARE the draw axis: no reshaping needed.
+            zz = z[part]; m = zz.shape[0]
+            grid = zz.unsqueeze(0).repeat(K, 1, 1)      # [K, m, F]
+            grid[:, :, jm] = nodes.view(K, 1)
+            lp = flow.log_prob_draws(grid, x[part])     # [K, m]
+            lp = torch.logsumexp(lp, dim=0) + float(np.log(du))
+            out = out + -lp.sum(); n += m
+        return out / max(n, 1)
+
+    flow = ConditionalNSFFlow(context_dim=xt.shape[1], features=max(2, len(idx))).to(device)
+    opt = torch.optim.AdamW(flow.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    best, best_ep, curve = float("inf"), 0, []
+    gen = torch.Generator().manual_seed(args.seed)
+    for epoch in range(1, args.epochs + 1):
+        flow.train()
+        perm = torch.randperm(xt.shape[0], generator=gen)
+        for lo in range(0, xt.shape[0], args.batch_size):
+            i = perm[lo:lo + args.batch_size]
+            loss = nll(flow, xt[i], zt[i], ht[i])
+            opt.zero_grad(set_to_none=True); loss.backward()
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), 5.0); opt.step()
+        flow.eval()
+        with torch.no_grad():
+            v = float(nll(flow, xv, zv, hv))
+        curve.append(v)
+        if v < best - 1e-5:
+            best, best_ep = v, epoch
+        elif epoch - best_ep >= args.patience:
+            break
+    return {"name": "joint_refit", "val_nll": best, "best_epoch": best_ep,
+            "epochs_run": len(curve), "n_train": int(xt.shape[0]),
+            "n_val": int(xv.shape[0]), "curve": curve}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=Path, required=True)
@@ -198,6 +276,13 @@ def main() -> None:
               f"at epoch {r['best_epoch']:>3d}/{r['epochs_run']:<3d} "
               f"(n_train {r['n_train']:,})")
 
+    jr = fit_joint(ctx_tr[:, joint_slot], y_tr, ctx_va[:, joint_slot], y_va, stds, args, device)
+    if jr is not None:
+        results.append(jr)
+        print(f"[refit] {'joint (refit)':20s} val NLL {jr['val_nll']:.4f} "
+              f"at epoch {jr['best_epoch']:>3d}/{jr['epochs_run']:<3d} "
+              f"(n_train {jr['n_train']:,})")
+
     torch.save(states, args.out / "refit_flows.pt")
     (args.out / "refit_report.json").write_text(json.dumps(results, indent=2))
 
@@ -208,8 +293,10 @@ def main() -> None:
         s = sum(r["val_nll"] for r in joint_dims)
         print(f"\n[refit] sum of refit marginals over joint dims "
               f"({', '.join(r['name'] for r in joint_dims)}): {s:.4f} nats")
-        print("        compare against the joint's own val NLL: the difference is "
-              "the dependence the joint captured.")
+        if jr is not None:
+            print(f"[refit] joint refit on the same frozen body:         {jr['val_nll']:.4f} nats")
+            print(f"[refit] DEPENDENCE CAPTURED: {s - jr['val_nll']:+.4f} nats "
+                  "(positive means the joint beats independent marginals)")
     print(f"[refit] wrote {args.out}/refit_report.json")
 
 
