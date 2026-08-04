@@ -99,7 +99,8 @@ def fit_one(name, ctx_tr, y_tr, ctx_va, y_va, std, args, device):
             "state": flow.state_dict()}
 
 
-def fit_joint(ctx_tr, y_tr, ctx_va, y_va, stds, args, device):
+def fit_joint(ctx_tr, y_tr, ctx_va, y_va, stds, args, device,
+              dims=None, marginal=None, label="joint_refit"):
     """Refit the JOINT on the frozen body, so the comparison is like for like.
 
     Without this the joint is judged on the flow phase 1 happened to leave it
@@ -111,9 +112,13 @@ def fit_joint(ctx_tr, y_tr, ctx_va, y_va, stds, args, device):
     quadrature the trainer uses; rows missing a REQUIRED dimension are skipped.
     """
     names = [t["name"] for t in mt.MULTI_TARGETS]
-    idx = [names.index(n) for n in mt.JOINT_PAIR if n in names]
-    req = [j for j in idx if names[j] not in mt.JOINT_MARGINAL]
-    marg = [j for j in idx if names[j] in mt.JOINT_MARGINAL]
+    dims = list(mt.JOINT_PAIR) if dims is None else list(dims)
+    marginal = set(mt.JOINT_MARGINAL if marginal is None else marginal)
+    if not all(n in names for n in dims):
+        return None                       # a dimension is not in this head set
+    idx = [names.index(n) for n in dims]
+    req = [j for j in idx if names[j] not in marginal]
+    marg = [j for j in idx if names[j] in marginal]
     if len(idx) < 2 or len(marg) > 1:
         return None
 
@@ -172,7 +177,7 @@ def fit_joint(ctx_tr, y_tr, ctx_va, y_va, stds, args, device):
             best, best_ep = v, epoch
         elif epoch - best_ep >= args.patience:
             break
-    return {"name": "joint_refit", "val_nll": best, "best_epoch": best_ep,
+    return {"name": label, "val_nll": best, "best_epoch": best_ep,
             "epochs_run": len(curve), "n_train": int(xt.shape[0]),
             "n_val": int(xv.shape[0]), "curve": curve}
 
@@ -282,6 +287,22 @@ def main() -> None:
         print(f"[refit] {'joint (refit)':20s} val NLL {jr['val_nll']:.4f} "
               f"at epoch {jr['best_epoch']:>3d}/{jr['epochs_run']:<3d} "
               f"(n_train {jr['n_train']:,})")
+
+    # The P2xP3 head. Phase 1 trains the 4-D joint alone, so this one is fit
+    # here on the frozen body -- it is the only route to a hardness ratio, which
+    # is marginalised from the (P2, P3) density along a shear. Both bands are
+    # REQUIRED: an HR from an undetected band is not a measurement.
+    p2p3 = fit_joint(ctx_tr[:, joint_slot], y_tr, ctx_va[:, joint_slot], y_va, stds,
+                     args, device, dims=("log_flux_p2", "log_flux_p3"),
+                     marginal=(), label="p2xp3_refit")
+    if p2p3 is not None:
+        results.append(p2p3)
+        print(f"[refit] {'P2xP3 (refit)':20s} val NLL {p2p3['val_nll']:.4f} "
+              f"at epoch {p2p3['best_epoch']:>3d}/{p2p3['epochs_run']:<3d} "
+              f"(n_train {p2p3['n_train']:,})")
+    else:
+        print("[refit] P2xP3 skipped: P2 or P3 not in this head set "
+              "(pass --refit-heads all)")
 
     torch.save(states, args.out / "refit_flows.pt")
     (args.out / "refit_report.json").write_text(json.dumps(results, indent=2))
