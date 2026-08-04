@@ -401,3 +401,37 @@ def test_both_tracker_paths_mirror_to_history_jsonl(tmp_path) -> None:
         row = json.loads(path.read_text().splitlines()[0])
         assert row["_step"] == 42 and row["move/adapters_low"] == 1.5e-3
     assert fake.logged, "wandb must still receive the payload"
+
+
+def test_blank_cutout_drops_the_image_modality_for_that_source_only() -> None:
+    """A source staged without a cutout must still train the image-free combos.
+
+    Staging used to discard every source lacking a Legacy Survey cutout, which
+    silently threw away ~60% of the sample after one partial unzip and would
+    discard the entire DR2 expansion, since cutouts take ~6 days to fetch. Such
+    sources now carry an all-zero image and have the image modality dropped
+    per-source -- not per-batch, so a neighbour WITH a cutout is unaffected.
+    """
+    import multitarget as mt
+
+    bucket = {"union": ("spectra", "z", "wise", "image")}
+    combos = [("spectra", "z", "wise", "image")] * 4      # all four ask for images
+    idx = np.arange(4)
+    images = torch.rand(4, 4, 8, 8)
+    images[1] = 0.0                                        # source 1 has no cutout
+    images[3] = 0.0                                        # source 3 has no cutout
+
+    out = mt.bucket_modality_dropout(bucket, combos, idx, images=images)
+    assert out["image"].tolist() == [False, True, False, True], \
+        "only the blank-image sources may have the image modality dropped"
+    for other in ("spectra", "z", "wise"):
+        assert not out[other].any(), f"{other} must be untouched by a blank image"
+
+    # and when the combo already excludes images, nothing changes
+    combos_noimg = [("spectra", "z")] * 4
+    out2 = mt.bucket_modality_dropout(bucket, combos_noimg, idx, images=images)
+    assert out2["image"].all(), "image is dropped for every source when not in the combo"
+
+    # without the images argument the behaviour is exactly as before
+    out3 = mt.bucket_modality_dropout(bucket, combos, idx)
+    assert not out3["image"].any()

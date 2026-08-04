@@ -720,7 +720,8 @@ def run_train_multi(args) -> None:
                         rows = torch.from_numpy(part).to(device)
                         sub = tuple(t[rows] for t in batch)
                         drop = {k: v.to(device) for k, v in
-                                bucket_modality_dropout(bucket, combos_ps, part).items()}
+                                bucket_modality_dropout(bucket, combos_ps, part,
+                                                        images=sub[5]).items()}
                         steps.append((bucket["union"], sub, drop, rows))
                         bucket_names.append(bucket["name"])
             else:
@@ -931,10 +932,22 @@ def bucket_assignments(
 
 
 def bucket_modality_dropout(
-    bucket: dict, combos: list[tuple[str, ...]], idx: np.ndarray
+    bucket: dict, combos: list[tuple[str, ...]], idx: np.ndarray,
+    images: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Per-source modality-dropout masks WITHIN a bucket (True = drop)."""
-    return {
+    """Per-source modality-dropout masks WITHIN a bucket (True = drop).
+
+    Sources staged without a Legacy Survey cutout carry an all-zero image, and
+    the image modality is dropped for them regardless of the sampled combo. That
+    is what lets a source with spectra but no cutout still train the seven
+    combinations that do not use images, instead of being discarded at staging.
+    A real cutout is never identically zero across every band and pixel.
+    """
+    out = {
         group: torch.tensor([group not in combos[i] for i in idx], dtype=torch.bool)
         for group in bucket["union"]
     }
+    if images is not None and "image" in out:
+        blank = ~images.flatten(1).abs().any(dim=1).cpu()
+        out["image"] = out["image"] | blank
+    return out

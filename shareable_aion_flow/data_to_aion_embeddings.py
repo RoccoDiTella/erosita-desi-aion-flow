@@ -155,6 +155,12 @@ def _copy_dataset(
     dest.create_dataset(canonical_name, data=data, compression="gzip", compression_opts=4)
 
 
+# Sentinel for a source with no cutout. An all-zero frame is unmistakable: a
+# real Legacy Survey cutout is never identically zero in every band and pixel.
+_ZERO_IMAGE = np.zeros((len(LEGACY_SURVEY_IMAGE_BANDS), LEGACY_SURVEY_IMAGE_SIZE,
+                        LEGACY_SURVEY_IMAGE_SIZE), dtype=np.float32)
+
+
 def _parse_fits_image(path: Path) -> np.ndarray:
     with fits.open(path, memmap=False) as hdul:
         image = np.asarray(hdul[0].data, dtype=np.float32)
@@ -215,6 +221,7 @@ def build_clean_manifest(
 
 def prepare_staged_data(
     *,
+    require_cutout: bool = False,
     source_hdf5: Path = SOURCE_HDF5,
     split_manifest_csv: Path = SPLIT_MANIFEST,
     fits_pool_dir: Path = FITS_POOL_DIR,
@@ -259,7 +266,18 @@ def prepare_staged_data(
     manifest["fits_path"] = manifest["targetid"].map(lambda targetid: fits_pool_dir / f"{int(targetid)}.fits")
     has_fits = manifest["fits_path"].map(Path.exists)
     missing_fits_count = int((~has_fits).sum())
-    manifest = manifest.loc[has_fits].copy()
+    if require_cutout:
+        manifest = manifest.loc[has_fits].copy()
+    elif missing_fits_count:
+        # Cutouts are OPTIONAL. Dropping image-less sources silently discarded
+        # every object the cutout service had not delivered -- it once turned
+        # ~22k rows into 9,592 after a partial unzip. The encoder already
+        # supports per-source modality dropout, so such a source can still train
+        # the seven modality combinations that do not use images. Their image is
+        # written as zeros and detected downstream by an all-zero test.
+        print(f"[stage] {missing_fits_count:,} of {len(manifest):,} sources have no cutout; "
+              f"keeping them with a zero image (image modality dropped per-source)",
+              flush=True)
     with h5py.File(source_hdf5, "r") as source:
         manifest_rows = manifest["source_row"].to_numpy(dtype=np.int64)
         read_order = np.argsort(manifest_rows)
@@ -386,7 +404,9 @@ def prepare_staged_data(
                 **compression_kwargs,
             )
             for index, targetid in enumerate(tqdm(targetids, desc=f"stage-{split}-images", unit="img")):
-                image_ds[index] = _parse_fits_image(fits_pool_dir / f"{int(targetid)}.fits")
+                fp = fits_pool_dir / f"{int(targetid)}.fits"
+                image_ds[index] = (_parse_fits_image(fp) if fp.exists()
+                                   else _ZERO_IMAGE)
 
             dest.attrs["image_bands"] = np.asarray(LEGACY_SURVEY_IMAGE_BANDS, dtype="S")
             dest.attrs["image_size"] = LEGACY_SURVEY_IMAGE_SIZE
