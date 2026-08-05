@@ -63,6 +63,14 @@ $PY docs/make_modality_upset.py --metrics "$EVAL/multi_test_metrics.csv" \
 RUNDIR=${AIONFLOW_RUNDIR:-results/dr2_37257713}
 if [ -f "$RUNDIR/history.jsonl" ]; then
   $PY docs/make_two_stage_figures.py --run-dir "$RUNDIR"
+  if [ -f "$RUNDIR/poststruct_allmod.npz" ]; then
+    $PY docs/make_redshift_performance.py --npz "$RUNDIR/poststruct_allmod.npz" \
+      --sidecar "$SD/dr2/targets_sidecar_dr2.csv" --out docs/figures/fig_perf_vs_z.png
+  fi
+  if [ -f "$RUNDIR/poststruct_noWISE.npz" ]; then
+    $PY scripts/posterior_corr_hist.py --npz "$RUNDIR/poststruct_noWISE.npz" \
+      --pair log_lx log_ssfr --group GALAXY --out docs/figures/fig_hist_lx_ssfr.png
+  fi
 else
   echo "skip two-stage figures: no $RUNDIR/history.jsonl" >&2
 fi

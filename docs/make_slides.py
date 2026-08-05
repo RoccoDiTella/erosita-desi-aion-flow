@@ -428,6 +428,45 @@ def main() -> None:
                          left_align_first=True)
             pdf.savefig(fig); plt.close(fig)
 
+        # ---- REDSHIFT: where the headline R2 comes from
+        if (FIGS / "fig_perf_vs_z.png").exists():
+            fig, ax = new_slide(
+                "Performance across redshift",
+                "rolling window of 400 sources, so every point carries the same "
+                "statistical weight")
+            image_panel(fig, FIGS / "fig_perf_vs_z.png", (0.20, 0.30, 0.60, 0.52))
+            bullets(ax, [
+                "log Lx scores 0.89 globally but only 0.27 to 0.63 inside a "
+                "redshift window. Lx is flux times distance squared, so once z is "
+                "given most of the population variance is already spent. The "
+                "within-window number is the honest one.",
+                "log M* and log SFR hold up at 0.65 to 0.85, close to their global "
+                "values, so those heads are not living off the distance.",
+                "Lx is worst at low z, RMSE 0.44 dex against 0.19 at z of 1, which "
+                "is exactly where the sSFR tradeoff appears.",
+            ], y=0.255, dy=0.075, fontsize=12.5)
+            pdf.savefig(fig); plt.close(fig)
+
+        # ---- COLLIDER: the per-source correlation distribution
+        if (FIGS / "fig_hist_lx_ssfr.png").exists():
+            fig, ax = new_slide(
+                "Does AGN activity trade against star formation?",
+                "per-source posterior correlation of log Lx with log sSFR, galaxies "
+                "only, conditioned on spectra, redshift and image (no WISE)")
+            image_panel(fig, FIGS / "fig_hist_lx_ssfr.png", (0.03, 0.34, 0.94, 0.46))
+            bullets(ax, [
+                "Mean is -0.0089 +/- 0.0037 and the median is +0.0013: for most "
+                "galaxies there is no tradeoff at all.",
+                "The distribution is not symmetric. Below -0.1 sits 10.7% of "
+                "sources against 4.5% above +0.1, so a minority do show one.",
+                "That minority is a redshift population, not a photoionization "
+                "class. Below z of 0.16 the mean is -0.100 and 42% fall under "
+                "-0.1; above it the effect is absent.",
+                "Caveat: no null test yet, so we cannot say what this estimator "
+                "returns for a genuinely independent pair.",
+            ], y=0.295, dy=0.072, fontsize=12)
+            pdf.savefig(fig); plt.close(fig)
+
         # ---- Per-target tables, every input combination (three headline targets)
         if args.mt_metrics and Path(args.mt_metrics).exists():
             mt = pd.read_csv(args.mt_metrics)
