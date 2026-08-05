@@ -436,15 +436,18 @@ def main() -> None:
                 "statistical weight")
             image_panel(fig, FIGS / "fig_perf_vs_z.png", (0.20, 0.30, 0.60, 0.52))
             bullets(ax, [
-                "log Lx scores 0.89 globally but only 0.27 to 0.63 inside a "
-                "redshift window. Lx is flux times distance squared, so once z is "
-                "given most of the population variance is already spent. The "
-                "within-window number is the honest one.",
-                "log M* and log SFR hold up at 0.65 to 0.85, close to their global "
-                "values, so those heads are not living off the distance.",
-                "Lx is worst at low z, RMSE 0.44 dex against 0.19 at z of 1, which "
-                "is exactly where the sSFR tradeoff appears.",
-            ], y=0.255, dy=0.075, fontsize=12.5)
+                "Information gain against a Gaussian prior, so a sharper posterior "
+                "is rewarded and not only a better point estimate.",
+                "log Lx gains most at the two ends, 2.7 nats below z of 0.1 and "
+                "1.7 at the top, and least in the middle. The prior is widest "
+                "where the sample is sparse, so part of that is the prior and not "
+                "the model.",
+                "RMSE tells the complementary story: Lx is WORST at low z, 0.44 dex "
+                "against 0.19 near z of 1, which is exactly where the sSFR "
+                "tradeoff appears. High IG and high error together mean a wide "
+                "posterior that is honestly wide.",
+                "log M* and log SFR sit flat near 0.8 nats across the whole range.",
+            ], y=0.265, dy=0.068, fontsize=11.5)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- COLLIDER: the per-source correlation distribution

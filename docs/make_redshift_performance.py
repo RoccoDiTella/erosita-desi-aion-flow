@@ -3,14 +3,25 @@
 
 Two panels, because one of them is misleading on its own:
 
-  R^2 WITHIN the window   how much of the spread AT THIS REDSHIFT we explain
+  INFORMATION GAIN        nats gained over the prior, so a sharper posterior is
+                          rewarded and not only a better point estimate
   RMSE (dex)              the absolute error, which no normalisation can flatter
 
-The distinction matters most for log Lx. Its global R^2 of about 0.92 is
-largely redshift: Lx is derived from flux times distance squared, so once z is
-given, most of the population variance is already determined. Inside a narrow
-z window that free ride is gone and the model has to predict the residual
-scatter, so the within-window R^2 is far lower and is the honest number.
+IG here is the GAUSSIAN form, computed from the posterior mean and width
+against a Gaussian prior fitted on the same targets:
+
+    IG = log(sd_prior / sd_post)
+         - 0.5 * [ ((y-mu_post)/sd_post)^2 - ((y-mu_prior)/sd_prior)^2 ]
+
+That is exact if both densities are Gaussian and approximate otherwise. The
+flow's own log-density would be better, but phase 1 trained ONLY the joint
+head, so the marginal flows in this checkpoint were never fitted and their
+log-probs are meaningless. Use the refit heads if an exact per-target IG is
+needed.
+
+Read IG per window, not globally. log Lx is flux times distance squared, so
+conditioning on z already spends most of its population variance; a global
+score flatters that head in a way a within-window score does not.
 
 Windows are rolling in log z with a fixed source count, so every point carries
 the same statistical weight, and the band is a bootstrap over sources.
@@ -49,30 +60,29 @@ def style(ax) -> None:
     ax.tick_params(colors=MUTED, labelsize=9)
 
 
-def rolling(z, truth, pred, width, n_boot, rng):
-    """Rolling window in sorted z with a fixed count; returns z, R2, RMSE, bands."""
-    ok = np.isfinite(z) & np.isfinite(truth) & np.isfinite(pred)
-    z, truth, pred = z[ok], truth[ok], pred[ok]
+def rolling(z, truth, pred, sd, width, n_boot, rng):
+    """Rolling window in sorted z with a fixed count; returns z, IG, RMSE, bands."""
+    ok = np.isfinite(z) & np.isfinite(truth) & np.isfinite(pred) & np.isfinite(sd) & (sd > 0)
+    z, truth, pred, sd = z[ok], truth[ok], pred[ok], sd[ok]
+    # prior: a Gaussian on the target's own marginal over these sources
+    mu0, sd0 = float(np.mean(truth)), float(np.std(truth))
+    ig_all = (np.log(sd0 / sd)
+              - 0.5 * (((truth - pred) / sd) ** 2 - ((truth - mu0) / sd0) ** 2))
     order = np.argsort(z)
-    z, truth, pred = z[order], truth[order], pred[order]
+    z, truth, pred, ig_all = z[order], truth[order], pred[order], ig_all[order]
     n = len(z)
     if n < width * 2:
         return None
     out = []
     for s in range(0, n - width, max(1, width // 4)):
         sl = slice(s, s + width)
-        t, p = truth[sl], pred[sl]
-        res = t - p
-        denom = np.sum((t - t.mean()) ** 2)
-        r2 = 1.0 - np.sum(res ** 2) / denom if denom > 0 else np.nan
-        rmse = float(np.sqrt(np.mean(res ** 2)))
+        t, p, g = truth[sl], pred[sl], ig_all[sl]
+        rmse = float(np.sqrt(np.mean((t - p) ** 2)))
+        ig = float(np.mean(g))
         idx = rng.integers(0, width, size=(n_boot, width))
-        tb, pb = t[idx], p[idx]
-        rb = tb - pb
-        db = ((tb - tb.mean(1, keepdims=True)) ** 2).sum(1)
-        r2b = np.where(db > 0, 1.0 - (rb ** 2).sum(1) / np.maximum(db, 1e-30), np.nan)
-        out.append((float(np.median(z[sl])), r2, rmse,
-                    float(np.nanpercentile(r2b, 16)), float(np.nanpercentile(r2b, 84))))
+        igb = g[idx].mean(1)
+        out.append((float(np.median(z[sl])), ig, rmse,
+                    float(np.nanpercentile(igb, 16)), float(np.nanpercentile(igb, 84))))
     return np.array(out)
 
 
@@ -95,34 +105,31 @@ def main() -> None:
     keep = np.ones(len(tid), bool)
     if args.group:
         keep = d["group"].astype(str) == args.group
-    sd = (pd.read_csv(args.sidecar, usecols=["targetid", "z"])
-          .drop_duplicates("targetid").set_index("targetid"))
-    z = sd.reindex(tid).z.to_numpy(float)[keep]
-    truth, mean = d["truth"][keep], d["mean"][keep]
+    zsrc = (pd.read_csv(args.sidecar, usecols=["targetid", "z"])
+            .drop_duplicates("targetid").set_index("targetid"))
+    z = zsrc.reindex(tid).z.to_numpy(float)[keep]
+    truth, mean, sd = d["truth"][keep], d["mean"][keep], d["sd"][keep]
     rng = np.random.default_rng(0)
 
     fig, axes = plt.subplots(2, 1, figsize=(9.6, 7.4), sharex=True)
-    print(f"{'target':>18s} {'n':>6s} {'global R2':>10s}  within-window R2 range")
+    print(f"{'target':>18s} {'wins':>6s} {'mean IG':>10s}  window IG range")
     for c, name in zip(COLORS, args.targets):
         k = dims.index(name)
         res = rolling(z, truth[:, k].astype(float), mean[:, k].astype(float),
-                      args.width, args.n_boot, rng)
+                      sd[:, k].astype(float), args.width, args.n_boot, rng)
         if res is None:
             print(f"{name:>18s}  too few sources for a window")
             continue
-        zz, r2, rmse, lo, hi = res.T
-        ok = np.isfinite(truth[:, k]) & np.isfinite(z)
-        t, p = truth[ok, k].astype(float), mean[ok, k].astype(float)
-        g = 1 - np.sum((t - p) ** 2) / np.sum((t - t.mean()) ** 2)
-        print(f"{name:>18s} {int(ok.sum()):>6,} {g:>10.3f}  "
-              f"{np.nanmin(r2):+.2f} to {np.nanmax(r2):+.2f}")
+        zz, ig, rmse, lo, hi = res.T
+        print(f"{name:>18s} {len(zz):>6,} {np.mean(ig):>10.3f}  "
+              f"{np.nanmin(ig):+.2f} to {np.nanmax(ig):+.2f}")
         lab = PRETTY.get(name, name)
-        axes[0].plot(zz, r2, color=c, lw=2.0, label=f"{lab}  (global {g:.2f})")
+        axes[0].plot(zz, ig, color=c, lw=2.0, label=f"{lab}  (mean {np.mean(ig):.2f})")
         axes[0].fill_between(zz, lo, hi, color=c, alpha=0.15, lw=0)
         axes[1].plot(zz, rmse, color=c, lw=2.0, label=lab)
 
     axes[0].axhline(0, color=MUTED, lw=1.0, ls=":")
-    axes[0].set_ylabel(r"$R^2$ within the window", color=MUTED)
+    axes[0].set_ylabel("information gain (nats)", color=MUTED)
     axes[0].set_title("Performance across redshift, rolling window of "
                       f"{args.width} sources"
                       + (f", {args.group} only" if args.group else ""),
