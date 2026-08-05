@@ -17,6 +17,8 @@
 #     fig_examples_images.png, data_counts.csv
 #   fig_loss_total.png, fig_loss_by_target.png  docs/make_loss_curves.py
 #   fig_results_v3.png                          docs/make_results_figure.py
+#   fig_two_stage_heads.png,                    docs/make_two_stage_figures.py
+#     fig_two_stage_select.png, two_stage_heads.csv
 #   fig_modality_upset.png                      docs/make_modality_upset.py
 #   fig_architecture_poster.png,                NOT GENERATED - kept in git
 #     johannes_buchner_comment.png (gitignored),
@@ -55,6 +57,15 @@ $PY docs/make_results_figure.py --metrics "$EVAL/multi_test_metrics.csv" \
   --hr-csv "$EVAL/hr_implied_target.csv" ${LINES:+--baseline "$LINES"}
 $PY docs/make_modality_upset.py --metrics "$EVAL/multi_test_metrics.csv" \
   ${LINES:+--baseline "$LINES"}
+
+# Two-stage record: per-head loss, and how the body was chosen. Needs a run dir
+# holding history.jsonl plus refit_epoch*.json (one per swept snapshot).
+RUNDIR=${AIONFLOW_RUNDIR:-results/dr2_37257713}
+if [ -f "$RUNDIR/history.jsonl" ]; then
+  $PY docs/make_two_stage_figures.py --run-dir "$RUNDIR"
+else
+  echo "skip two-stage figures: no $RUNDIR/history.jsonl" >&2
+fi
 
 $PY docs/make_slides.py --mt-metrics "$EVAL/multi_test_metrics.csv" \
   --counts-csv docs/figures/data_counts.csv

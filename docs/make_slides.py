@@ -316,7 +316,7 @@ def main() -> None:
                  "        |z − z$_{sp}$| < 0.01\n\n"
                  "That threshold sits in the valley of a strongly bimodal Δz\n"
                  "distribution (88.7% below 1e-4, ~3% above 0.1).\n\n"
-                 "Caveat: z agreement is an identity proxy — two distinct\n"
+                 "Caveat: z agreement is an identity proxy, two distinct\n"
                  "objects at the same redshift would pass as correct.",
                  fontsize=12.5, color=INK, va="top")
         fig.text(0.045, 0.30,
@@ -375,6 +375,57 @@ def main() -> None:
                 "then freeze the body and refit each flow on cached embeddings, each with "
                 "its own stopping epoch.",
             ], y=0.30, dy=0.075, fontsize=12.5)
+            pdf.savefig(fig); plt.close(fig)
+
+        # ---- TWO-STAGE 1: what phase 1 actually trains
+        if (FIGS / "fig_two_stage_heads.png").exists():
+            fig, ax = new_slide(
+                "Two stages, because one clock cannot serve every head",
+                "phase 1 trains the joint head alone, then the body is frozen and every "
+                "head is refit on cached contexts with its own stopping epoch")
+            image_panel(fig, FIGS / "fig_two_stage_heads.png", (0.025, 0.30, 0.95, 0.52))
+            bullets(ax, [
+                "Left: during phase 1 the marginal flows get no gradient at all. Their "
+                "validation loss still drifts, because the body underneath them keeps "
+                "moving, but they are passengers, not learners.",
+                "Right: refitting on the frozen body is where the marginals are actually "
+                "learned. log Lx falls from 1.71 to 0.16 nats, log SFR from 1.43 to 0.32.",
+                "Phase 2 is cheap by construction: the frozen AION forward runs once per "
+                "split, so per-head early stopping costs almost nothing and no head can "
+                "drag another.",
+            ], y=0.255, dy=0.075, fontsize=12.5)
+            pdf.savefig(fig); plt.close(fig)
+
+        # ---- TWO-STAGE 2: choosing the body, and what the joint buys
+        if (FIGS / "fig_two_stage_select.png").exists():
+            fig, ax = new_slide(
+                "The body is chosen after refitting, not before",
+                "phase 1 validation is the wrong criterion: what matters is how well the "
+                "heads do once they are refit on a given body")
+            image_panel(fig, FIGS / "fig_two_stage_select.png", (0.025, 0.32, 0.95, 0.50))
+            bullets(ax, [
+                "Seven snapshots were swept. The post-refit joint minimum sits at epoch 28, "
+                "and the summed marginals agree, so the choice is not a coin flip.",
+                "Dependence is the summed marginal NLL minus the joint NLL: how many nats "
+                "the joint buys over assuming the four targets are independent.",
+                "It holds near 0.8 nats at every snapshot. That stability, not its size, "
+                "is what makes the joint head worth keeping.",
+            ], y=0.275, dy=0.075, fontsize=12.5)
+            pdf.savefig(fig); plt.close(fig)
+
+        # ---- TWO-STAGE 3: the per-head ledger
+        if (FIGS / "two_stage_heads.csv").exists():
+            hd = pd.read_csv(FIGS / "two_stage_heads.csv")
+            hd = hd.rename(columns={"head": "Head", "val_nll": "val NLL",
+                                    "best_epoch": "stop", "n_train": "n train",
+                                    "n_val": "n val"})
+            fig, ax = new_slide(
+                "Every head, refit on the same frozen body",
+                "each row stopped on its own validation minimum, which is the point of "
+                "phase 2")
+            metric_table(ax, hd[["Head", "val NLL", "stop", "n train", "n val"]],
+                         rect=(0.10, 0.03, 0.80, 0.84), fontsize=11,
+                         left_align_first=True)
             pdf.savefig(fig); plt.close(fig)
 
         # ---- Per-target tables, every input combination (three headline targets)
