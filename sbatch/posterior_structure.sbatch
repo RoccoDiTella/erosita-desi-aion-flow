@@ -28,6 +28,9 @@ CLEAN_SPLIT_CSV="${CLEAN_SPLIT_CSV:-$AIONFLOW_DATA/clean_split_dr2.csv}"
 EXTRA_TARGETS_CSV="${EXTRA_TARGETS_CSV:-$AIONFLOW_DATA/targets_sidecar_dr2.csv}"
 STAGED_DIR="${STAGED_DIR:-$AIONFLOW_STAGED}"
 SAMPLES="${SAMPLES:-512}"
+# Linear combinations of the joint dims (sSFR = SFR - M*). Only a joint
+# posterior can produce these: a difference needs the covariance.
+DERIVED="${DERIVED:-}"
 : "${CKPT:?set CKPT to the body whose posterior you want to inspect}"
 OUT="${OUT:-$(dirname "$CKPT")/posterior_structure.json}"
 
@@ -37,4 +40,5 @@ python scripts/posterior_structure.py \
   --clean-split-csv "$CLEAN_SPLIT_CSV" \
   --extra-targets-csv "$EXTRA_TARGETS_CSV" \
   --samples "$SAMPLES" \
+  ${DERIVED:+--derived $DERIVED} \
   --out "$OUT"

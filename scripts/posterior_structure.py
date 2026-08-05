@@ -57,6 +57,33 @@ from normalizing_flow import TargetStandardizer                       # noqa: E4
 ALL_COMBO = ("spectra", "z", "wise", "image")
 
 
+def parse_derived(spec: str, dims: list[str]) -> tuple[str, np.ndarray]:
+    """'log_ssfr=log_sfr-logmstar_cigale' -> ('log_ssfr', weight vector over dims).
+
+    Derived quantities are the reason a JOINT head is not optional. sSFR is a
+    DIFFERENCE of two dimensions, so its posterior width depends on their
+    covariance: independent marginals would have to assume zero correlation and
+    would get both the width and every correlation involving it wrong.
+    """
+    name, _, rhs = spec.partition("=")
+    name, rhs = name.strip(), rhs.strip()
+    if not name or not rhs:
+        raise ValueError(f"--derived wants NAME=EXPR, got {spec!r}")
+    w = np.zeros(len(dims))
+    tok, sign = "", 1.0
+    for ch in rhs.replace(" ", "") + "+":
+        if ch in "+-":
+            if tok:
+                coef, _, var = tok.rpartition("*")
+                if var not in dims:
+                    raise ValueError(f"{var!r} is not a joint dim; have {dims}")
+                w[dims.index(var)] += sign * (float(coef) if coef else 1.0)
+            tok, sign = "", 1.0 if ch == "+" else -1.0
+        else:
+            tok += ch
+    return name, w
+
+
 def pair_corr(a: np.ndarray, b: np.ndarray) -> tuple[float, int]:
     """Pearson r on pairwise-complete rows, plus the count used."""
     ok = np.isfinite(a) & np.isfinite(b)
@@ -105,6 +132,10 @@ def main() -> None:
                     help="posterior draws per source; the per-source correlation "
                          "estimate is noisy below a few hundred")
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--derived", nargs="*", default=[],
+                    help="extra columns as linear combinations of the joint dims, "
+                         "e.g. log_ssfr=log_sfr-logmstar_cigale. Propagated through "
+                         "the DRAWS, so the posterior covariance is carried exactly.")
     ap.add_argument("--eval-batch-size", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default=None)
@@ -117,6 +148,14 @@ def main() -> None:
     jidx = list(mt.JOINT_IDX)              # flow-column order, authoritative
     dims = [names[j] for j in jidx]
     print(f"[post] joint dims (flow order): {dims}")
+    derived = [parse_derived(s, dims) for s in args.derived]
+    base_dims = list(dims)
+    dims = dims + [n for n, _ in derived]
+    W = (torch.tensor(np.stack([w for _, w in derived]), dtype=torch.float32)
+         if derived else None)
+    for n, w in derived:
+        print(f"[post] derived {n} = " + " ".join(
+            f"{c:+g}*{d}" for c, d in zip(w, base_dims) if c))
 
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
                                num_cls=mt.N_HEADS).to(device)
@@ -148,9 +187,17 @@ def main() -> None:
             # back to physical units so correlations are of the real quantities
             phys = torch.stack([s[:, :, k] * stds[j].std + stds[j].mean
                                 for k, j in enumerate(jidx)], dim=-1)
+            yt = y[:, jidx]
+            if W is not None:
+                # propagate through the DRAWS, not through summary statistics:
+                # this is what carries the posterior covariance into the
+                # derived quantity's width and correlations.
+                Wd = W.to(phys.device, phys.dtype)
+                phys = torch.cat([phys, phys @ Wd.T], dim=-1)
+                yt = torch.cat([yt, yt @ Wd.T], dim=-1)
             means.append(phys.mean(dim=1).cpu().numpy())
             sds.append(phys.std(dim=1).cpu().numpy())
-            truths.append(y[:, jidx].cpu().numpy())
+            truths.append(yt.cpu().numpy())
             pn = phys.cpu().numpy()
             for i in range(pn.shape[0]):
                 per_source.append(corr_matrix(pn[i]))
@@ -178,6 +225,12 @@ def main() -> None:
     show("3. CONDITIONAL (within p(y|x), averaged over sources)", cond)
     show("4. RESIDUAL    (truth - posterior mean, across sources)", res)
 
+    # Which base dims feed each column, so pairs that SHARE one can be flagged:
+    # corr(sSFR, M*) is partly mechanical because M* appears in sSFR, whereas
+    # corr(Lx, sSFR) shares nothing and is a clean comparison.
+    parts = [{d} for d in base_dims] + [
+        {b for c, b in zip(w, base_dims) if c} for _, w in derived]
+
     rng = np.random.default_rng(0)
     print("\n=== per pair: population vs conditional ===")
     print(f"{'pair':>30s} {'empirical [95% CI]':>24s} {'conditional':>12s} "
@@ -196,7 +249,10 @@ def main() -> None:
             # residual oppose the population sign, and the residual CI excludes 0.
             flip = (np.isfinite(e) and np.isfinite(c) and np.isfinite(r)
                     and e * c < 0 and e * r < 0 and r_lo * r_hi > 0)
+            shared = parts[a] & parts[b]
             tag = "FLIP" if flip else ("cond" if np.isfinite(e * c) and e * c < 0 else "")
+            if shared:
+                tag = (tag + "*").strip()
             print(f"{dims[a][:13]+' x '+dims[b][:13]:>30s} "
                   f"{e:>7.3f} [{e_lo:>6.3f},{e_hi:>6.3f}] {c:>12.3f} "
                   f"{r:>7.3f} [{r_lo:>6.3f},{r_hi:>6.3f}] {tag:>6s} "
@@ -207,6 +263,7 @@ def main() -> None:
                 "conditional_mean": c, "conditional_spread_ci": [float(c_lo), float(c_hi)],
                 "residual": r, "residual_ci": [r_lo, r_hi], "n_residual": n_r,
                 "frac_sources_negative": frac_neg,
+                "shares_constituent": sorted(shared),
                 "sign_flip_confirmed": bool(flip)})
 
     print("\n  FLIP  = population sign, model conditional sign, and DATA residual")
@@ -214,6 +271,8 @@ def main() -> None:
     print("          residual CI excluding zero. This is the defensible claim.")
     print("  cond  = only the model's posterior flips; the residuals do not")
     print("          confirm it, so it may be a modelling artefact.")
+    print("  *     = the two columns SHARE a constituent (e.g. M* appears in")
+    print("          sSFR), so part of the correlation is mechanical, not physical.")
     print("  frac<0 = fraction of SOURCES whose posterior correlation is")
     print("          negative. A mean near zero with frac<0 near 50% means the")
     print("          population splits in two, not that the correlation is absent.")
