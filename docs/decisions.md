@@ -72,7 +72,16 @@ view ≡ the previously materialized version (verified targetid-exact).
 | `log_sfr` | log10 SFR averaged over 10 Myr, Chabrier IMF — **CIGALE**, a different SED fit than logmstar (deliberately; see 2026-07-28) | DESI DR1 CIGALE VAC `LOGSFR` |
 
 **HR32, specifically** (all verified to ≤2e-15 on 30,375 rows):
-- Bands: **P2 = 0.5–1.0 keV (soft), P3 = 1.0–2.0 keV (hard)** count rates.
+- Bands: **P2 = 0.5–1.0 keV, P3 = 1.0–2.0 keV** count rates. Both sit INSIDE
+  the 0.2–2.3 keV broad band, so neither is a hard band and HR32 is a
+  soft-band ratio. The hard band is P4 (2.0–5.0 keV).
+- **Band provenance (2026-08-05).** Take the ranges from the TCOMM cards of
+  `eRASS3_Main_v1.3.fits` itself, not from a doc page: the file documents
+  every column, the page we had been trusting was the DR1 one, and the
+  table in the repo was offset by a band from P3 onward (it listed P4's
+  range for P3 and P5's for P4). Cross-checked on our own catalogue:
+  P1+P2+P3 sums to 0.915 of ML_FLUX_1, so those three tile the broad band,
+  while the old reading would need P1+P2 to sum to 1 and it gives 0.540.
 - `HR32 = (R_P3 − R_P2) / (R_P3 + R_P2)` from `ML_RATE_P2`, `ML_RATE_P3`.
 - Propagated error: `σ_HR = 2/(R2+R3)² · √(R3²σ2² + R2²σ3²)` from `ML_RATE_ERR_P2/P3`.
 - Model space: `u = arctanh(clip(HR, ±0.999))` → |u| ≤ 3.8002, so the bounded
