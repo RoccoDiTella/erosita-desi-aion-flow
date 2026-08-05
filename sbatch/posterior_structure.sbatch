@@ -31,6 +31,11 @@ SAMPLES="${SAMPLES:-512}"
 # Linear combinations of the joint dims (sSFR = SFR - M*). Only a joint
 # posterior can produce these: a difference needs the covariance.
 DERIVED="${DERIVED:-}"
+# Pool held-out splits and/or split the report by a class column. The GALAXY
+# subsample is small, so pooling val+test is usually needed for any power.
+SPLITS="${SPLITS:-val}"
+GROUP_CSV="${GROUP_CSV:-}"
+GROUP_COL="${GROUP_COL:-cigale_spectype}"
 : "${CKPT:?set CKPT to the body whose posterior you want to inspect}"
 OUT="${OUT:-$(dirname "$CKPT")/posterior_structure.json}"
 
@@ -41,4 +46,6 @@ python scripts/posterior_structure.py \
   --extra-targets-csv "$EXTRA_TARGETS_CSV" \
   --samples "$SAMPLES" \
   ${DERIVED:+--derived $DERIVED} \
+  --splits $SPLITS \
+  ${GROUP_CSV:+--group-csv "$GROUP_CSV" --group-col "$GROUP_COL"} \
   --out "$OUT"

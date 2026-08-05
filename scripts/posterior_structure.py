@@ -46,6 +46,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shareable_aion_flow"))
@@ -132,6 +133,15 @@ def main() -> None:
                     help="posterior draws per source; the per-source correlation "
                          "estimate is noisy below a few hundred")
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--splits", nargs="+", default=["val"],
+                    choices=["train", "val", "test"],
+                    help="which splits to pool. Held-out only by default: the "
+                         "RESIDUAL check needs unseen data, because a memorised "
+                         "training residual is not a fair test of the posterior.")
+    ap.add_argument("--group-csv", type=Path, default=None,
+                    help="CSV with targetid + a class column, to report the "
+                         "correlations separately per class")
+    ap.add_argument("--group-col", default="cigale_spectype")
     ap.add_argument("--derived", nargs="*", default=[],
                     help="extra columns as linear combinations of the joint dims, "
                          "e.g. log_ssfr=log_sfr-logmstar_cigale. Propagated through "
@@ -168,14 +178,18 @@ def main() -> None:
     stds = [TargetStandardizer.from_state_dict(s) for s in ck["standardizers"]]
 
     lookup = mt.MultiTargetLookup(args.staged_dir, args.extra_targets_csv)
-    _, val_loader, _ = build_dataloaders(
+    loaders = dict(zip(("train", "val", "test"), build_dataloaders(
         staged_dir=args.staged_dir, target_name="log_ml_flux_1",
         batch_size=args.eval_batch_size, eval_batch_size=args.eval_batch_size,
-        num_workers=args.num_workers, seed=42, clean_split_csv=args.clean_split_csv)
+        num_workers=args.num_workers, seed=42, clean_split_csv=args.clean_split_csv)))
+    if "train" in args.splits:
+        print("[post] WARNING: pooling TRAIN. Residuals there are shrunk by "
+              "memorisation, so the residual check is no longer a fair test.")
+    batches = [b for s in args.splits for b in loaders[s]]
 
-    truths, means, sds, per_source = [], [], [], []
+    truths, means, sds, per_source, tids = [], [], [], [], []
     with torch.no_grad():
-        for b in val_loader:
+        for b in batches:
             b = tuple(t.to(device, non_blocking=True) for t in b)
             y, _, _ = lookup.batch(b[7], device)
             cls_seq, _ = encoder.encode_tokens(b, ALL_COMBO)
@@ -198,73 +212,105 @@ def main() -> None:
             means.append(phys.mean(dim=1).cpu().numpy())
             sds.append(phys.std(dim=1).cpu().numpy())
             truths.append(yt.cpu().numpy())
+            tids.append(b[7].cpu().numpy().astype(np.int64))
             pn = phys.cpu().numpy()
             for i in range(pn.shape[0]):
                 per_source.append(corr_matrix(pn[i]))
 
-    truth = np.concatenate(truths)
-    mean = np.concatenate(means)
-    spread = np.concatenate(sds)
-    resid = truth - mean                    # NaN wherever the label is missing
-    stack = np.stack(per_source)
-    emp, pred = corr_matrix(truth), corr_matrix(mean)
-    res = corr_matrix(resid)
-    cond = np.nanmean(stack, axis=0)
-    print(f"[post] sources: {len(truth):,}   draws each: {args.samples}")
-    print("[post] median posterior sd per dim: " +
-          "  ".join(f"{d}={np.nanmedian(spread[:, k]):.3f}" for k, d in enumerate(dims)))
+    truth_all = np.concatenate(truths)
+    mean_all = np.concatenate(means)
+    spread_all = np.concatenate(sds)
+    stack_all = np.stack(per_source)
+    tid_all = np.concatenate(tids)
 
-    def show(title, m):
-        print(f"\n{title}")
-        print("            " + "".join(f"{d[:11]:>13s}" for d in dims))
-        for i, d in enumerate(dims):
-            print(f"{d[:11]:>11s} " + "".join(f"{m[i, j]:>13.3f}" for j in range(len(dims))))
-
-    show("1. EMPIRICAL   (true targets, across sources)", emp)
-    show("2. PREDICTED   (posterior means, across sources)", pred)
-    show("3. CONDITIONAL (within p(y|x), averaged over sources)", cond)
-    show("4. RESIDUAL    (truth - posterior mean, across sources)", res)
+    groups: list[tuple[str, np.ndarray]] = [("ALL", np.ones(len(tid_all), bool))]
+    if args.group_csv:
+        gdf = (pd.read_csv(args.group_csv, usecols=["targetid", args.group_col])
+               .drop_duplicates("targetid"))
+        gmap = dict(zip(gdf.targetid.astype(np.int64), gdf[args.group_col]))
+        labels = np.array([str(gmap.get(int(t), "MISSING")) for t in tid_all])
+        for lab in sorted(set(labels) - {"MISSING"}):
+            groups.append((lab, labels == lab))
 
     # Which base dims feed each column, so pairs that SHARE one can be flagged:
     # corr(sSFR, M*) is partly mechanical because M* appears in sSFR, whereas
     # corr(Lx, sSFR) shares nothing and is a clean comparison.
     parts = [{d} for d in base_dims] + [
         {b for c, b in zip(w, base_dims) if c} for _, w in derived]
-
     rng = np.random.default_rng(0)
-    print("\n=== per pair: population vs conditional ===")
-    print(f"{'pair':>30s} {'empirical [95% CI]':>24s} {'conditional':>12s} "
-          f"{'residual [95% CI]':>24s} {'flip?':>6s} {'frac<0':>7s} {'n':>6s}")
-    out_pairs = []
-    for a in range(len(dims)):
-        for b in range(a + 1, len(dims)):
-            e, n_e = pair_corr(truth[:, a], truth[:, b])
-            r, n_r = pair_corr(resid[:, a], resid[:, b])
-            c = float(np.nanmean(stack[:, a, b]))
-            c_lo, c_hi = np.nanpercentile(stack[:, a, b], [2.5, 97.5])
-            e_lo, e_hi = boot_ci(truth[:, a], truth[:, b], args.n_boot, rng)
-            r_lo, r_hi = boot_ci(resid[:, a], resid[:, b], args.n_boot, rng)
-            frac_neg = float(np.nanmean(stack[:, a, b] < 0))
-            # A flip counts only if BOTH the model's conditional and the data's
-            # residual oppose the population sign, and the residual CI excludes 0.
-            flip = (np.isfinite(e) and np.isfinite(c) and np.isfinite(r)
-                    and e * c < 0 and e * r < 0 and r_lo * r_hi > 0)
-            shared = parts[a] & parts[b]
-            tag = "FLIP" if flip else ("cond" if np.isfinite(e * c) and e * c < 0 else "")
-            if shared:
-                tag = (tag + "*").strip()
-            print(f"{dims[a][:13]+' x '+dims[b][:13]:>30s} "
-                  f"{e:>7.3f} [{e_lo:>6.3f},{e_hi:>6.3f}] {c:>12.3f} "
-                  f"{r:>7.3f} [{r_lo:>6.3f},{r_hi:>6.3f}] {tag:>6s} "
-                  f"{frac_neg:>6.1%} {n_r:>6d}")
-            out_pairs.append({
-                "a": dims[a], "b": dims[b],
-                "empirical": e, "empirical_ci": [e_lo, e_hi], "n_empirical": n_e,
-                "conditional_mean": c, "conditional_spread_ci": [float(c_lo), float(c_hi)],
-                "residual": r, "residual_ci": [r_lo, r_hi], "n_residual": n_r,
-                "frac_sources_negative": frac_neg,
-                "shares_constituent": sorted(shared),
-                "sign_flip_confirmed": bool(flip)})
+    report = {}
+
+  # ---- one full analysis per group -----------------------------------------
+    for gname, gmask in groups:
+        truth = truth_all[gmask]
+        mean = mean_all[gmask]
+        spread = spread_all[gmask]
+        stack = stack_all[gmask]
+        resid = truth - mean               # NaN wherever the label is missing
+        emp, pred = corr_matrix(truth), corr_matrix(mean)
+        res = corr_matrix(resid)
+        cond = np.nanmean(stack, axis=0)
+        print(f"\n{'='*100}\n### GROUP {gname}: {len(truth):,} sources"
+              f"   draws each: {args.samples}\n{'='*100}")
+        print("[post] median posterior sd per dim: " + "  ".join(
+            f"{d}={np.nanmedian(spread[:, k]):.3f}" for k, d in enumerate(dims)))
+
+        def show(title, m):
+            print(f"\n{title}")
+            print("            " + "".join(f"{d[:11]:>13s}" for d in dims))
+            for i, d in enumerate(dims):
+                print(f"{d[:11]:>11s} " + "".join(
+                    f"{m[i, j]:>13.3f}" for j in range(len(dims))))
+
+        show("1. EMPIRICAL   (true targets, across sources)", emp)
+        show("2. PREDICTED   (posterior means, across sources)", pred)
+        show("3. CONDITIONAL (within p(y|x), averaged over sources)", cond)
+        show("4. RESIDUAL    (truth - posterior mean, across sources)", res)
+
+        print("\n=== per pair: population vs conditional ===")
+        print(f"{'pair':>30s} {'empirical [95% CI]':>24s} {'conditional':>12s} "
+              f"{'residual [95% CI]':>24s} {'flip?':>6s} {'frac<0':>7s} {'n':>6s}")
+        out_pairs = []
+        for a in range(len(dims)):
+            for b in range(a + 1, len(dims)):
+                e, n_e = pair_corr(truth[:, a], truth[:, b])
+                r, n_r = pair_corr(resid[:, a], resid[:, b])
+                c = float(np.nanmean(stack[:, a, b]))
+                c_lo, c_hi = np.nanpercentile(stack[:, a, b], [2.5, 97.5])
+                e_lo, e_hi = boot_ci(truth[:, a], truth[:, b], args.n_boot, rng)
+                r_lo, r_hi = boot_ci(resid[:, a], resid[:, b], args.n_boot, rng)
+                frac_neg = float(np.nanmean(stack[:, a, b] < 0))
+                # A flip counts only if BOTH the model's conditional and the
+                # data's residual oppose the population sign, and the residual
+                # CI excludes 0.
+                flip = (np.isfinite(e) and np.isfinite(c) and np.isfinite(r)
+                        and e * c < 0 and e * r < 0 and r_lo * r_hi > 0)
+                shared = parts[a] & parts[b]
+                tag = "FLIP" if flip else (
+                    "cond" if np.isfinite(e * c) and e * c < 0 else "")
+                if shared:
+                    tag = (tag + "*").strip()
+                print(f"{dims[a][:13]+' x '+dims[b][:13]:>30s} "
+                      f"{e:>7.3f} [{e_lo:>6.3f},{e_hi:>6.3f}] {c:>12.3f} "
+                      f"{r:>7.3f} [{r_lo:>6.3f},{r_hi:>6.3f}] {tag:>6s} "
+                      f"{frac_neg:>6.1%} {n_r:>6d}")
+                out_pairs.append({
+                    "a": dims[a], "b": dims[b],
+                    "empirical": e, "empirical_ci": [e_lo, e_hi], "n_empirical": n_e,
+                    "conditional_mean": c,
+                    "conditional_spread_ci": [float(c_lo), float(c_hi)],
+                    "residual": r, "residual_ci": [r_lo, r_hi], "n_residual": n_r,
+                    "frac_sources_negative": frac_neg,
+                    "shares_constituent": sorted(shared),
+                    "sign_flip_confirmed": bool(flip)})
+
+        report[gname] = {
+            "n_sources": int(len(truth)),
+            "median_posterior_sd": {d: float(np.nanmedian(spread[:, k]))
+                                    for k, d in enumerate(dims)},
+            "empirical": emp.tolist(), "predicted": pred.tolist(),
+            "conditional": cond.tolist(), "residual": res.tolist(),
+            "pairs": out_pairs}
 
     print("\n  FLIP  = population sign, model conditional sign, and DATA residual")
     print("          sign all agree that conditioning reverses it, with the")
@@ -278,13 +324,8 @@ def main() -> None:
     print("          population splits in two, not that the correlation is absent.")
 
     args.out.write_text(json.dumps(
-        {"dims": dims, "n_sources": int(len(truth)), "samples": args.samples,
-         "checkpoint": str(args.checkpoint),
-         "median_posterior_sd": {d: float(np.nanmedian(spread[:, k]))
-                                 for k, d in enumerate(dims)},
-         "empirical": emp.tolist(), "predicted": pred.tolist(),
-         "conditional": cond.tolist(), "residual": res.tolist(),
-         "pairs": out_pairs}, indent=2))
+        {"dims": dims, "samples": args.samples, "splits": args.splits,
+         "checkpoint": str(args.checkpoint), "groups": report}, indent=2))
     print(f"\nwrote {args.out}")
 
 
