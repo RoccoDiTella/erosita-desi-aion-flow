@@ -1,17 +1,22 @@
 #!/usr/bin/env python
 """Is the joint posterior's correlation structure different from the data's?
 
-Three correlation matrices, which answer three different questions:
+FOUR correlation matrices, which answer four different questions:
 
   1. EMPIRICAL      corr of the true targets across sources.
                     "How do these quantities co-vary in the population?"
   2. PREDICTED      corr of the posterior MEANS across sources.
                     "How does the model think they co-vary in the population?"
-                    It should approximate 1; a large gap means the model has
+                    Should approximate 1; a large gap means the model has
                     collapsed real population structure.
   3. CONDITIONAL    corr WITHIN p(y|x), averaged over sources.
                     "Given everything we know about one object, how do our
                     remaining uncertainties co-vary?"
+  4. RESIDUAL       corr of (truth - posterior mean) across sources.
+                    The EMPIRICAL CHECK on 3. The flow can assert any
+                    conditional covariance it likes; the residuals are what the
+                    data actually did. If 3 and 4 disagree in sign, the
+                    conditional structure is a modelling artefact, not physics.
 
 1 and 3 are not the same quantity and have no reason to agree. A SIGN FLIP
 between them is the interesting case and is physically expected for
@@ -21,8 +26,13 @@ against star formation -- the classic mass/SFR degeneracy -- so the residual
 correlation can be NEGATIVE. That is structure only a joint head can express;
 independent marginals assert conditional independence by construction.
 
-Reported per source as well as on average, because a mean correlation can hide
-a population that splits into two signs.
+CAVEAT to carry into any claim: 3 and 4 agree exactly only if the posterior
+width is similar across sources. Where widths vary a lot, 4 is a
+spread-weighted average of 3. Treat agreement in SIGN as the test, not
+agreement to three decimals.
+
+Everything is computed pairwise-complete and BOOTSTRAPPED over sources, so a
+reported flip comes with an interval rather than a point estimate.
 
     python scripts/posterior_structure.py --checkpoint best.pt --staged-dir ... \
         --clean-split-csv ... --extra-targets-csv ... --out posterior_structure.json
@@ -47,12 +57,41 @@ from normalizing_flow import TargetStandardizer                       # noqa: E4
 ALL_COMBO = ("spectra", "z", "wise", "image")
 
 
-def corr(x: np.ndarray) -> np.ndarray:
-    """Correlation matrix of columns, NaN-safe."""
-    ok = np.isfinite(x).all(axis=1)
-    if ok.sum() < 10:
-        return np.full((x.shape[1], x.shape[1]), np.nan)
-    return np.corrcoef(x[ok], rowvar=False)
+def pair_corr(a: np.ndarray, b: np.ndarray) -> tuple[float, int]:
+    """Pearson r on pairwise-complete rows, plus the count used."""
+    ok = np.isfinite(a) & np.isfinite(b)
+    n = int(ok.sum())
+    if n < 10:
+        return float("nan"), n
+    x, y = a[ok], b[ok]
+    if x.std() == 0 or y.std() == 0:
+        return float("nan"), n
+    return float(np.corrcoef(x, y)[0, 1]), n
+
+
+def corr_matrix(x: np.ndarray) -> np.ndarray:
+    d = x.shape[1]
+    m = np.eye(d)
+    for i in range(d):
+        for j in range(i + 1, d):
+            m[i, j] = m[j, i] = pair_corr(x[:, i], x[:, j])[0]
+    return m
+
+
+def boot_ci(a: np.ndarray, b: np.ndarray, n_boot: int, rng) -> tuple[float, float]:
+    """Percentile CI on the correlation of two aligned columns."""
+    ok = np.isfinite(a) & np.isfinite(b)
+    x, y = a[ok], b[ok]
+    if len(x) < 10:
+        return float("nan"), float("nan")
+    idx = rng.integers(0, len(x), size=(n_boot, len(x)))
+    xs, ys = x[idx], y[idx]
+    xc = xs - xs.mean(1, keepdims=True)
+    yc = ys - ys.mean(1, keepdims=True)
+    num = (xc * yc).sum(1)
+    den = np.sqrt((xc ** 2).sum(1) * (yc ** 2).sum(1))
+    r = np.where(den > 0, num / np.maximum(den, 1e-30), np.nan)
+    return float(np.nanpercentile(r, 2.5)), float(np.nanpercentile(r, 97.5))
 
 
 def main() -> None:
@@ -65,6 +104,7 @@ def main() -> None:
     ap.add_argument("--samples", type=int, default=512,
                     help="posterior draws per source; the per-source correlation "
                          "estimate is noisy below a few hundred")
+    ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--eval-batch-size", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default=None)
@@ -73,10 +113,10 @@ def main() -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     mt.configure_heads_from_config(ck.get("config", {}))
-    dims = [n for n in mt.JOINT_PAIR]
     names = [t["name"] for t in mt.MULTI_TARGETS]
-    jidx = [names.index(n) for n in dims]
-    print(f"[post] joint dims: {dims}")
+    jidx = list(mt.JOINT_IDX)              # flow-column order, authoritative
+    dims = [names[j] for j in jidx]
+    print(f"[post] joint dims (flow order): {dims}")
 
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
                                num_cls=mt.N_HEADS).to(device)
@@ -94,7 +134,7 @@ def main() -> None:
         batch_size=args.eval_batch_size, eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers, seed=42, clean_split_csv=args.clean_split_csv)
 
-    truths, means, per_source = [], [], []
+    truths, means, sds, per_source = [], [], [], []
     with torch.no_grad():
         for b in val_loader:
             b = tuple(t.to(device, non_blocking=True) for t in b)
@@ -109,14 +149,23 @@ def main() -> None:
             phys = torch.stack([s[:, :, k] * stds[j].std + stds[j].mean
                                 for k, j in enumerate(jidx)], dim=-1)
             means.append(phys.mean(dim=1).cpu().numpy())
+            sds.append(phys.std(dim=1).cpu().numpy())
             truths.append(y[:, jidx].cpu().numpy())
-            for i in range(phys.shape[0]):
-                per_source.append(corr(phys[i].cpu().numpy()))
+            pn = phys.cpu().numpy()
+            for i in range(pn.shape[0]):
+                per_source.append(corr_matrix(pn[i]))
 
-    truth = np.concatenate(truths); mean = np.concatenate(means)
-    cond = np.nanmean(np.stack(per_source), axis=0)
-    emp, pred = corr(truth), corr(mean)
+    truth = np.concatenate(truths)
+    mean = np.concatenate(means)
+    spread = np.concatenate(sds)
+    resid = truth - mean                    # NaN wherever the label is missing
+    stack = np.stack(per_source)
+    emp, pred = corr_matrix(truth), corr_matrix(mean)
+    res = corr_matrix(resid)
+    cond = np.nanmean(stack, axis=0)
     print(f"[post] sources: {len(truth):,}   draws each: {args.samples}")
+    print("[post] median posterior sd per dim: " +
+          "  ".join(f"{d}={np.nanmedian(spread[:, k]):.3f}" for k, d in enumerate(dims)))
 
     def show(title, m):
         print(f"\n{title}")
@@ -124,32 +173,59 @@ def main() -> None:
         for i, d in enumerate(dims):
             print(f"{d[:11]:>11s} " + "".join(f"{m[i, j]:>13.3f}" for j in range(len(dims))))
 
-    show("1. EMPIRICAL  (true targets, across sources)", emp)
-    show("2. PREDICTED  (posterior means, across sources)", pred)
+    show("1. EMPIRICAL   (true targets, across sources)", emp)
+    show("2. PREDICTED   (posterior means, across sources)", pred)
     show("3. CONDITIONAL (within p(y|x), averaged over sources)", cond)
+    show("4. RESIDUAL    (truth - posterior mean, across sources)", res)
 
-    print("\n=== pairs where CONDITIONAL differs from EMPIRICAL ===")
-    print(f"{'pair':>28s} {'empirical':>10s} {'conditional':>12s} {'flip?':>7s} "
-          f"{'frac<0':>8s}")
-    stack = np.stack(per_source)
+    rng = np.random.default_rng(0)
+    print("\n=== per pair: population vs conditional ===")
+    print(f"{'pair':>30s} {'empirical [95% CI]':>24s} {'conditional':>12s} "
+          f"{'residual [95% CI]':>24s} {'flip?':>6s} {'frac<0':>7s} {'n':>6s}")
     out_pairs = []
     for a in range(len(dims)):
         for b in range(a + 1, len(dims)):
-            e, c = emp[a, b], cond[a, b]
+            e, n_e = pair_corr(truth[:, a], truth[:, b])
+            r, n_r = pair_corr(resid[:, a], resid[:, b])
+            c = float(np.nanmean(stack[:, a, b]))
+            c_lo, c_hi = np.nanpercentile(stack[:, a, b], [2.5, 97.5])
+            e_lo, e_hi = boot_ci(truth[:, a], truth[:, b], args.n_boot, rng)
+            r_lo, r_hi = boot_ci(resid[:, a], resid[:, b], args.n_boot, rng)
             frac_neg = float(np.nanmean(stack[:, a, b] < 0))
-            flip = "SIGN" if np.isfinite(e) and np.isfinite(c) and e * c < 0 else ""
-            print(f"{dims[a][:13]+' x '+dims[b][:13]:>28s} {e:>10.3f} {c:>12.3f} "
-                  f"{flip:>7s} {frac_neg:>8.1%}")
-            out_pairs.append({"a": dims[a], "b": dims[b], "empirical": float(e),
-                              "conditional": float(c), "sign_flip": bool(flip),
-                              "frac_sources_negative": frac_neg})
-    print("\n  frac<0 is the fraction of SOURCES whose posterior correlation is")
-    print("  negative -- a mean near zero with frac<0 near 50% means the population")
-    print("  splits, not that the correlation is absent.")
+            # A flip counts only if BOTH the model's conditional and the data's
+            # residual oppose the population sign, and the residual CI excludes 0.
+            flip = (np.isfinite(e) and np.isfinite(c) and np.isfinite(r)
+                    and e * c < 0 and e * r < 0 and r_lo * r_hi > 0)
+            tag = "FLIP" if flip else ("cond" if np.isfinite(e * c) and e * c < 0 else "")
+            print(f"{dims[a][:13]+' x '+dims[b][:13]:>30s} "
+                  f"{e:>7.3f} [{e_lo:>6.3f},{e_hi:>6.3f}] {c:>12.3f} "
+                  f"{r:>7.3f} [{r_lo:>6.3f},{r_hi:>6.3f}] {tag:>6s} "
+                  f"{frac_neg:>6.1%} {n_r:>6d}")
+            out_pairs.append({
+                "a": dims[a], "b": dims[b],
+                "empirical": e, "empirical_ci": [e_lo, e_hi], "n_empirical": n_e,
+                "conditional_mean": c, "conditional_spread_ci": [float(c_lo), float(c_hi)],
+                "residual": r, "residual_ci": [r_lo, r_hi], "n_residual": n_r,
+                "frac_sources_negative": frac_neg,
+                "sign_flip_confirmed": bool(flip)})
+
+    print("\n  FLIP  = population sign, model conditional sign, and DATA residual")
+    print("          sign all agree that conditioning reverses it, with the")
+    print("          residual CI excluding zero. This is the defensible claim.")
+    print("  cond  = only the model's posterior flips; the residuals do not")
+    print("          confirm it, so it may be a modelling artefact.")
+    print("  frac<0 = fraction of SOURCES whose posterior correlation is")
+    print("          negative. A mean near zero with frac<0 near 50% means the")
+    print("          population splits in two, not that the correlation is absent.")
+
     args.out.write_text(json.dumps(
         {"dims": dims, "n_sources": int(len(truth)), "samples": args.samples,
+         "checkpoint": str(args.checkpoint),
+         "median_posterior_sd": {d: float(np.nanmedian(spread[:, k]))
+                                 for k, d in enumerate(dims)},
          "empirical": emp.tolist(), "predicted": pred.tolist(),
-         "conditional": cond.tolist(), "pairs": out_pairs}, indent=2))
+         "conditional": cond.tolist(), "residual": res.tolist(),
+         "pairs": out_pairs}, indent=2))
     print(f"\nwrote {args.out}")
 
 
