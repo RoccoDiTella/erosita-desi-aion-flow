@@ -344,8 +344,22 @@ def main() -> None:
 
     args.out.write_text(json.dumps(
         {"dims": dims, "samples": args.samples, "splits": args.splits,
-         "checkpoint": str(args.checkpoint), "groups": report}, indent=2))
+         "combo": list(combo), "checkpoint": str(args.checkpoint),
+         "groups": report}, indent=2))
     print(f"\nwrote {args.out}")
+
+    # Per-source correlations, so the DISTRIBUTION can be inspected rather than
+    # only its mean. A mean near zero is ambiguous between "no correlation" and
+    # "two populations of opposite sign", and only the histogram separates them.
+    npz = args.out.with_suffix(".npz")
+    labels = np.array(["ALL"] * len(tid_all), dtype=object)
+    for gname, gmask in groups[1:]:
+        labels[gmask] = gname
+    np.savez_compressed(
+        npz, per_source=stack_all.astype(np.float32), targetid=tid_all,
+        group=labels.astype(str), dims=np.array(dims), truth=truth_all.astype(np.float32),
+        mean=mean_all.astype(np.float32), sd=spread_all.astype(np.float32))
+    print(f"wrote {npz}  (per-source correlations, {stack_all.shape})")
 
 
 if __name__ == "__main__":
