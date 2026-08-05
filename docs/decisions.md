@@ -72,7 +72,7 @@ view ≡ the previously materialized version (verified targetid-exact).
 | `log_sfr` | log10 SFR averaged over 10 Myr, Chabrier IMF — **CIGALE**, a different SED fit than logmstar (deliberately; see 2026-07-28) | DESI DR1 CIGALE VAC `LOGSFR` |
 
 **HR32, specifically** (all verified to ≤2e-15 on 30,375 rows):
-- Bands: **P2 = 0.6–2.3 keV (soft), P3 = 2.3–5.0 keV (hard)** count rates.
+- Bands: **P2 = 0.5–1.0 keV (soft), P3 = 1.0–2.0 keV (hard)** count rates.
 - `HR32 = (R_P3 − R_P2) / (R_P3 + R_P2)` from `ML_RATE_P2`, `ML_RATE_P3`.
 - Propagated error: `σ_HR = 2/(R2+R3)² · √(R3²σ2² + R2²σ3²)` from `ML_RATE_ERR_P2/P3`.
 - Model space: `u = arctanh(clip(HR, ±0.999))` → |u| ≤ 3.8002, so the bounded
@@ -534,9 +534,9 @@ verdict from v2 softens to "line windows suffice; continuum-minus-line-regions
 is the weaker channel."
 
 **Band-rate results (reruns 34629507/08/19/35, 2026-07-23; V_simple inject,
-gate σ≤1.0):** P1 (0.2–0.6 keV) all-inputs R² **0.320** / exp(IG) 1.15,
-**P2 (0.6–2.3) 0.380 / 1.17**, P3 (2.3–5.0) **0.378 / 1.14**,
-P4 (5.0–8.0) 0.071 / 0.94. **P1 and P3 land far ABOVE their
+gate σ≤1.0):** P1 (0.2–0.5 keV) all-inputs R² **0.320** / exp(IG) 1.15,
+**P2 (0.5–1.0) 0.380 / 1.17**, P3 (1.0–2.0) **0.378 / 1.14**,
+P4 (2.0–5.0) 0.071 / 0.94. **P1 and P3 land far ABOVE their
 predicted noise-floor ceilings (0.06 / 0.23)** → the eRASS1 per-band σ's are
 systematically overestimated for faint bands, so the ceiling table is a lower
 bound on achievable R², not an upper bound (same error-inflation family as the

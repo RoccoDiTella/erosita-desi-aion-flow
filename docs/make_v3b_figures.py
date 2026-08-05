@@ -26,10 +26,10 @@ HEADS = [
     ("log_ml_flux_1", "log flux"),
     ("log_lx", "log L$_X$"),
     ("logmstar", "log M$_*$"),
-    ("log_flux_p1", "P1 0.2-0.6"),
-    ("log_flux_p2", "P2 0.6-2.3"),
-    ("log_flux_p3", "P3 2.3-5.0"),
-    ("log_flux_p4", "P4 5.0-8.0"),
+    ("log_flux_p1", "P1 0.2-0.5"),
+    ("log_flux_p2", "P2 0.5-1.0"),
+    ("log_flux_p3", "P3 1.0-2.0"),
+    ("log_flux_p4", "P4 2.0-5.0"),
     ("p2xp3_joint", "P2$\\times$P3 joint"),
 ]
 

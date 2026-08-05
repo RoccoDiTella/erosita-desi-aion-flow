@@ -330,10 +330,10 @@ def main() -> None:
         fig, ax = new_slide("X-ray band coverage", "cleaned sample, n = 26,632")
         band_table = pd.DataFrame([
             {"band": "broad 0.2–2.3", "measured": "100%", "detected": "100%"},
-            {"band": "P1  0.2–0.6", "measured": "79%", "detected": "31%"},
-            {"band": "P2  0.6–2.3", "measured": "94%", "detected": "56%"},
-            {"band": "P3  2.3–5.0", "measured": "92%", "detected": "51%"},
-            {"band": "P4  5.0–8.0", "measured": "48%", "detected": "5%"},
+            {"band": "P1  0.2–0.5", "measured": "79%", "detected": "31%"},
+            {"band": "P2  0.5–1.0", "measured": "94%", "detected": "56%"},
+            {"band": "P3  1.0–2.0", "measured": "92%", "detected": "51%"},
+            {"band": "P4  2.0–5.0", "measured": "48%", "detected": "5%"},
         ])
         metric_table(ax, band_table, rect=(0.05, 0.30, 0.48, 0.52), fontsize=13)
         ax2 = fig.add_axes([0.60, 0.30, 0.37, 0.44]); ax2.axis("off")

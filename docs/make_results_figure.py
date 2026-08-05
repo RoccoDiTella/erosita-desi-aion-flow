@@ -33,10 +33,10 @@ HEADS = [
     ("log_lx", r"log $L_X$"),
     ("log_sfr", "log SFR"),
     ("logmstar", r"log $M_*$"),
-    ("log_flux_p1", "P1  0.2-0.6 keV"),
-    ("log_flux_p2", "P2  0.6-2.3 keV"),
-    ("log_flux_p3", "P3  2.3-5.0 keV"),
-    ("log_flux_p4", "P4  5.0-8.0 keV"),
+    ("log_flux_p1", "P1  0.2-0.5 keV"),
+    ("log_flux_p2", "P2  0.5-1.0 keV"),
+    ("log_flux_p3", "P3  1.0-2.0 keV"),
+    ("log_flux_p4", "P4  2.0-5.0 keV"),
 ]
 # the three targets the lines-only baseline was trained for
 PRIMARY = {"log_ml_flux_1", "log_lx", "log_sfr"}

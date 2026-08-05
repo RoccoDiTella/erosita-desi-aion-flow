@@ -34,6 +34,14 @@ agreement to three decimals.
 Everything is computed pairwise-complete and BOOTSTRAPPED over sources, so a
 reported flip comes with an interval rather than a point estimate.
 
+COMPARING ACROSS --combo IS NOT FREE. Dropping a modality removes information,
+which widens the posterior, and widening ONE dimension attenuates every
+correlation involving it by sqrt(V / (V + dV)) with no change in the underlying
+structure. Before reading a drop as "the artefact went away", predict the
+mechanical attenuation from how much that target's R^2 fell and subtract it.
+Dropping WISE costs log M* about 0.17 in R^2 and the X-ray heads almost
+nothing, so M* pairs need the correction and X-ray pairs essentially do not.
+
     python scripts/posterior_structure.py --checkpoint best.pt --staged-dir ... \
         --clean-split-csv ... --extra-targets-csv ... --out posterior_structure.json
 """
@@ -142,6 +150,15 @@ def main() -> None:
                     help="CSV with targetid + a class column, to report the "
                          "correlations separately per class")
     ap.add_argument("--group-col", default="cigale_spectype")
+    ap.add_argument("--combo", nargs="+", default=list(ALL_COMBO),
+                    choices=list(ALL_COMBO),
+                    help="input modalities to condition on. The model was trained "
+                         "with modality dropout, so any subset is valid without "
+                         "retraining. Dropping WISE is the CIGALE-artefact test: "
+                         "CIGALE fits M* and SFR from grz+WISE photometry, so "
+                         "conditioning on WISE offers a route to reproducing that "
+                         "fit rather than the physics. Read the caveat in the "
+                         "docstring before comparing correlations across combos.")
     ap.add_argument("--derived", nargs="*", default=[],
                     help="extra columns as linear combinations of the joint dims, "
                          "e.g. log_ssfr=log_sfr-logmstar_cigale. Propagated through "
@@ -157,7 +174,9 @@ def main() -> None:
     names = [t["name"] for t in mt.MULTI_TARGETS]
     jidx = list(mt.JOINT_IDX)              # flow-column order, authoritative
     dims = [names[j] for j in jidx]
+    combo = tuple(args.combo)
     print(f"[post] joint dims (flow order): {dims}")
+    print(f"[post] conditioning on: {combo}")
     derived = [parse_derived(s, dims) for s in args.derived]
     base_dims = list(dims)
     dims = dims + [n for n, _ in derived]
@@ -192,7 +211,7 @@ def main() -> None:
         for b in batches:
             b = tuple(t.to(device, non_blocking=True) for t in b)
             y, _, _ = lookup.batch(b[7], device)
-            cls_seq, _ = encoder.encode_tokens(b, ALL_COMBO)
+            cls_seq, _ = encoder.encode_tokens(b, combo)
             ctx = head(cls_seq)[:, mt.N_TARGETS]                # the joint's slot
             s = flows.joint.sample(ctx, num_samples=args.samples)   # [S, B, D]
             if s.dim() == 2:

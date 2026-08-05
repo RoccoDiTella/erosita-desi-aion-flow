@@ -36,6 +36,9 @@ DERIVED="${DERIVED:-}"
 SPLITS="${SPLITS:-val}"
 GROUP_CSV="${GROUP_CSV:-}"
 GROUP_COL="${GROUP_COL:-cigale_spectype}"
+# Modalities to condition on. Same checkpoint, no retraining: the model was
+# trained with modality dropout. COMBO="spectra z image" drops WISE.
+COMBO="${COMBO:-spectra z wise image}"
 : "${CKPT:?set CKPT to the body whose posterior you want to inspect}"
 OUT="${OUT:-$(dirname "$CKPT")/posterior_structure.json}"
 
@@ -47,5 +50,6 @@ python scripts/posterior_structure.py \
   --samples "$SAMPLES" \
   ${DERIVED:+--derived $DERIVED} \
   --splits $SPLITS \
+  --combo $COMBO \
   ${GROUP_CSV:+--group-csv "$GROUP_CSV" --group-col "$GROUP_COL"} \
   --out "$OUT"
