@@ -75,10 +75,20 @@ def fetch_group(survey: str, program: str, pix: int, want: np.ndarray, attempts:
     raise last
 
 
-def _fetch_once(survey: str, program: str, pix: int, want: np.ndarray):
+def _fetch_once(survey: str, program: str, pix: int, want: np.ndarray,
+                timeout: float = 120.0):
     from astropy.io import fits
 
-    with fits.open(coadd_url(survey, program, int(pix)), use_fsspec=True) as hdul:
+    # A TIMEOUT IS MANDATORY. Without one, a dead connection -- which is what a
+    # laptop suspend leaves behind -- blocks the worker thread forever: no
+    # exception is raised, so the retry logic never fires and the job hangs
+    # holding stale sockets. That silently cost 11 hours once. The cutout
+    # fetcher survived the identical suspend purely because it passes a timeout.
+    import aiohttp
+    kw = {"client_kwargs": {"timeout": aiohttp.ClientTimeout(total=timeout,
+                                                             sock_read=timeout)}}
+    with fits.open(coadd_url(survey, program, int(pix)), use_fsspec=True,
+                   fsspec_kwargs=kw) as hdul:
         tid = np.asarray(hdul["FIBERMAP"].data["TARGETID"], dtype=np.int64)
         pos = {t: i for i, t in enumerate(tid)}
         rows = [(t, pos[t]) for t in want if t in pos]
