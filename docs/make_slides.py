@@ -282,7 +282,7 @@ def main() -> None:
         alt = FIGS / "corner_alt_data.npz"
         if alt.exists():
             fig, ax = new_slide("The data",
-                                "same joint, but M$_*$ from FastSpecFit and SFR from H$\\alpha$ — "
+                                "same joint, but M$_*$ from FastSpecFit and SFR from H$\\alpha$, "
                                 "independent of CIGALE")
             import numpy as _np2
             from make_data_figures import VARS_ALT, draw_corner as _dc
