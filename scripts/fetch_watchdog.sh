@@ -46,24 +46,33 @@ start_cutouts () {
 
 supervise () {                       # $1 name  $2 pattern  $3 dir  $4 starter
   local name="$1" pat="$2" dir="$3" starter="$4"
-  if ! pgrep -f "[f]etch_${name%s}"* >/dev/null 2>&1; then :; fi
+  # Time of the last (re)start. Stall is judged against BOTH the newest file
+  # and this, because a freshly started process must not be condemned by a
+  # timestamp it had no chance to beat. Without the grace period, clearing old
+  # output makes every restart look instantly stalled and the watchdog kills
+  # the fetcher in a loop, which is exactly what happened once a batch of
+  # 696 MB coadds needed longer than STALL to produce their first file.
+  local started=0
   while true; do
-    local running age
+    local running age since_start
     case "$name" in
       spectra) pgrep -f "[f]etch_desi_spectra.py" >/dev/null && running=1 || running=0 ;;
       cutouts) pgrep -f "[f]etch_ls_cutouts.py"   >/dev/null && running=1 || running=0 ;;
     esac
     age=$(newest_age "$dir" "$pat")
+    since_start=$(( $(date +%s) - started ))
     if [ "$running" -eq 0 ]; then
       echo "[watchdog] $name not running -- starting ($(date '+%F %T'))" >&2
+      started=$(date +%s)
       $starter
-    elif [ "$age" -gt "$STALL" ]; then
+    elif [ "$age" -gt "$STALL" ] && [ "$since_start" -gt "$STALL" ]; then
       echo "[watchdog] $name STALLED: no new file for ${age}s -- restarting ($(date '+%F %T'))" >&2
       case "$name" in
         spectra) pkill -9 -f "[f]etch_desi_spectra.py" ;;
         cutouts) pkill -9 -f "[f]etch_ls_cutouts.py" ;;
       esac
       sleep 5
+      started=$(date +%s)
       $starter
     fi
     sleep "$POLL"
