@@ -67,12 +67,37 @@ def fetch_group(survey: str, program: str, pix: int, want: np.ndarray, attempts:
         try:
             return _fetch_once(survey, program, pix, want)
         except FileNotFoundError as e:
-            raise MissingFile(str(e)) from e
+            # NOT automatically permanent. fsspec raises FileNotFoundError for
+            # transient conditions as well as real 404s, and a laptop suspend
+            # produces exactly such a condition. Believing it the first time
+            # wrote 4,117 empty shards covering 74,000 targets, which resume
+            # then skipped forever because resume is by file existence. Confirm
+            # against a HEAD request before recording the file as absent.
+            last = e
+            if _really_missing(survey, program, pix):
+                raise MissingFile(str(e)) from e
+            if a < attempts - 1:
+                time.sleep(2 ** a * 3)
         except Exception as e:                      # 503, timeout, truncated read
             last = e
             if a < attempts - 1:
                 time.sleep(2 ** a * 3)              # 3, 6, 12 s
     raise last
+
+
+def _really_missing(survey: str, program: str, pix: int, timeout: float = 30.0) -> bool:
+    """True only when the archive actually answers 404 for this coadd."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(coadd_url(survey, program, int(pix)), method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status == 404
+    except urllib.error.HTTPError as e:
+        return e.code == 404
+    except Exception:
+        return False                                # unreachable is not absent
 
 
 def _fetch_once(survey: str, program: str, pix: int, want: np.ndarray,
