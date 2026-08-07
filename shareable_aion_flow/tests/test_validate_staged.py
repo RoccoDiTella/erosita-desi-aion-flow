@@ -36,7 +36,15 @@ def _log_lx(z: np.ndarray, flux: np.ndarray) -> np.ndarray:
     return np.log10(4.0 * np.pi * d_l_cm**2 * flux)
 
 
-def write_split(path: Path, targetids: np.ndarray, *, sig_lo: float = 0.1, extras: bool = True) -> None:
+def write_split(
+    path: Path,
+    targetids: np.ndarray,
+    *,
+    sig_lo: float = 0.1,
+    extras: bool = True,
+    labels: bool = True,
+) -> None:
+    """`labels=False` writes the inputs-only (dr2v2) contract: no X-ray labels."""
     n = len(targetids)
     rng = np.random.default_rng(len(targetids))
     with h5py.File(path, "w") as handle:
@@ -51,9 +59,10 @@ def write_split(path: Path, targetids: np.ndarray, *, sig_lo: float = 0.1, extra
         handle.create_dataset("redshift", data=z.astype(np.float64))
         for band in ("flux_w1", "flux_w2", "flux_w3"):
             handle.create_dataset(band, data=rng.normal(size=n).astype(np.float32))
-        handle.create_dataset("ml_flux_1", data=flux.astype(np.float64))
-        handle.create_dataset("log_ml_flux_1", data=np.log10(flux).astype(np.float64))
-        handle.create_dataset("log_lx", data=_log_lx(z, flux).astype(np.float64))
+        if labels:
+            handle.create_dataset("ml_flux_1", data=flux.astype(np.float64))
+            handle.create_dataset("log_ml_flux_1", data=np.log10(flux).astype(np.float64))
+            handle.create_dataset("log_lx", data=_log_lx(z, flux).astype(np.float64))
         handle.create_dataset(
             "image_flux",
             data=rng.normal(size=(n, vs.IMAGE_BANDS, vs.IMAGE_SIZE, vs.IMAGE_SIZE)).astype(np.float32),
@@ -142,12 +151,19 @@ def test_nonpositive_sigma_is_caught(tmp_path: Path) -> None:
     assert any("sigma > 0" in name for name in failed_names(rep))
 
 
-def test_missing_required_dataset_is_caught(tmp_path: Path) -> None:
+def test_missing_required_input_is_caught(tmp_path: Path) -> None:
+    """An INPUT is required under both staging contracts.
+
+    This used to delete `log_lx` and assert on "required datasets". log_lx is a
+    LABEL, and the current contract says the staged file must not carry one, so
+    its absence is now the expected state rather than a fault. The label rule is
+    asserted separately, in both directions, further down.
+    """
     staged = build_staged(tmp_path)
     with h5py.File(staged / "desi_train.hdf5", "a") as handle:
-        del handle["log_lx"]
+        del handle["flux_w2"]
     rep = run_checks(staged)
-    assert "[train] required datasets" in failed_names(rep)
+    assert "[train] required inputs" in failed_names(rep)
 
 
 def test_misaligned_row_counts_are_caught(tmp_path: Path) -> None:
@@ -285,3 +301,62 @@ def test_duplicates_allowed_in_superset_mode(tmp_path: Path) -> None:
     assert "[train] targetids unique" in warned
     # Leakage stays fatal even in superset mode.
     assert not [n for n in failed_names(rep) if n.startswith("leakage")]
+
+
+# --- staging contract -------------------------------------------------------
+#
+# There are two contracts and the validator has to be able to assert either.
+# It used to demand the labels unconditionally, which made it reject every
+# dr2v2 staged dir -- the exact directories sbatch/_dataset.sh gates on their
+# ABSENCE. train.sbatch runs this script as its pre-GPU gate, so that
+# disagreement meant a fresh clone failed validation before training started.
+
+
+def _schema_report(staged: Path, labels: str) -> vs.Report:
+    rep = vs.Report()
+    handles = {split: h5py.File(staged / f"desi_{split}.hdf5", "r") for split in vs.SPLITS}
+    try:
+        vs.check_schema(rep, handles, labels)
+    finally:
+        for handle in handles.values():
+            handle.close()
+    return rep
+
+
+def test_inputs_only_staging_passes_the_forbidden_contract(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path, labels=False, extras=False)
+    rep = _schema_report(staged, "forbidden")
+    assert failed_names(rep) == []
+
+
+def test_inputs_only_staging_is_rejected_when_labels_are_required(tmp_path: Path) -> None:
+    staged = build_staged(tmp_path, labels=False, extras=False)
+    rep = _schema_report(staged, "required")
+    assert "[train] staged labels present" in failed_names(rep)
+
+
+def test_labelled_staging_is_rejected_by_the_inputs_only_contract(tmp_path: Path) -> None:
+    """The check that matters: a leftover eRASS1 label must not pass silently."""
+    staged = build_staged(tmp_path)
+    rep = _schema_report(staged, "forbidden")
+    assert "[train] staged labels absent (inputs-only)" in failed_names(rep)
+
+
+def test_auto_reports_the_contract_without_failing_either_way(tmp_path: Path) -> None:
+    for labels in (True, False):
+        root = tmp_path / f"s{int(labels)}"
+        root.mkdir()
+        staged = build_staged(root, labels=labels, extras=labels)
+        rep = _schema_report(staged, "auto")
+        assert failed_names(rep) == []
+        contract = [d for s, n, d in rep.rows if n == "[train] staging contract"]
+        assert contract and contract[0].startswith("labelled" if labels else "inputs-only")
+
+
+def test_a_missing_input_still_fails_under_every_mode(tmp_path: Path) -> None:
+    """Relaxing the label rule must not relax the input rule."""
+    staged = build_staged(tmp_path, labels=False, extras=False)
+    with h5py.File(staged / "desi_train.hdf5", "a") as handle:
+        del handle["flux_w2"]
+    for mode in ("auto", "required", "forbidden"):
+        assert "[train] required inputs" in failed_names(_schema_report(staged, mode))

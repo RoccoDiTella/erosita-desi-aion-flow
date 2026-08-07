@@ -8,6 +8,14 @@ ranges, and that a batch matches what the model expects.
     python scripts/validate_staged.py --staged-dir <dir> \
         --match-quality-csv <csv> --expect-clean --expect-rows 25200
 
+There are two staging contracts and this script asserts whichever one you name.
+The legacy one writes the X-ray labels into the staged file; the current one
+(DATASET=dr2v2) writes INPUTS ONLY and takes every label from the sidecar at
+load time, so that a stale eRASS1 flux cannot be picked up by accident:
+
+    ... --labels forbidden --target none      # inputs-only, the dr2v2 contract
+    ... --labels required                     # legacy, labels in the HDF5
+
 Exit code 0 = all checks pass. 1 = at least one FAIL (warnings do not fail).
 Add --check-model to additionally push one real batch through AION + the head
 (needs the aion package; slow on CPU, use a GPU node).
@@ -25,8 +33,9 @@ import numpy as np
 
 SPLITS = ("train", "val", "test")
 
-# Datasets every staged split must have for the model to run at all.
-REQUIRED = (
+# INPUTS. Every staged split must carry these for the model to run at all, under
+# either staging contract.
+REQUIRED_INPUTS = (
     "source_row",
     "desi_targetid",
     "spectra",
@@ -36,12 +45,20 @@ REQUIRED = (
     "flux_w1",
     "flux_w2",
     "flux_w3",
-    "ml_flux_1",
-    "log_ml_flux_1",
-    "log_lx",
     "image_flux",
 )
-# Extra target + error columns, present only when --targets-extra-csv was used.
+
+# LABELS. Present under the legacy contract, ABSENT under the inputs-only one.
+#
+# Staging used to write its own copy of these out of the eRASS1 source file.
+# They now come from the DR2 sidecar at load time, so a staged copy is a second,
+# older copy of the truth waiting to be read by accident -- which is exactly how
+# a DR1 flux once ended up selecting a DR2 sample. `sbatch/_dataset.sh` asserts
+# their ABSENCE for DATASET=dr2v2, so this validator has to be able to assert
+# the same thing rather than demanding the opposite.
+STAGED_LABELS = ("ml_flux_1", "log_ml_flux_1", "log_lx")
+
+# Extra target + error columns, present only under the legacy contract.
 EXTRA = ("logmstar", "logmstar_sig", "hr32_u", "hr32_u_sig", "flux_sig_lo", "flux_sig_hi")
 
 # target -> (sig_lo dataset, sig_hi dataset); symmetric errors reuse one column.
@@ -107,10 +124,27 @@ def finite_frac(values: np.ndarray) -> float:
     return float(np.isfinite(values).mean()) if values.size else 0.0
 
 
-def check_schema(rep: Report, handles: dict[str, h5py.File]) -> None:
+def check_schema(rep: Report, handles: dict[str, h5py.File], labels: str = "auto") -> None:
     for split, handle in handles.items():
-        missing = [name for name in REQUIRED if name not in handle]
-        rep.check(not missing, f"[{split}] required datasets", f"missing: {missing}" if missing else "all present")
+        missing = [name for name in REQUIRED_INPUTS if name not in handle]
+        rep.check(not missing, f"[{split}] required inputs", f"missing: {missing}" if missing else "all present")
+
+        # The label contract, asserted in whichever direction the caller named.
+        # "auto" reports which contract the file satisfies without failing, so a
+        # bare run of this script still says something useful about an unknown
+        # staged dir.
+        present = [name for name in STAGED_LABELS if name in handle]
+        if labels == "required":
+            absent = [name for name in STAGED_LABELS if name not in handle]
+            rep.check(not absent, f"[{split}] staged labels present",
+                      f"missing: {absent}" if absent else f"{present}")
+        elif labels == "forbidden":
+            rep.check(not present, f"[{split}] staged labels absent (inputs-only)",
+                      f"PRESENT, so a stale label can be read: {present}" if present
+                      else "none of " + ", ".join(STAGED_LABELS))
+        else:
+            rep.ok(f"[{split}] staging contract",
+                   "labelled" if present else "inputs-only (labels come from the sidecar)")
 
         if "desi_targetid" not in handle:
             rep.fail(f"[{split}] row counts aligned", "no desi_targetid to align against")
@@ -378,7 +412,7 @@ def check_split_provenance(rep: Report, handles: dict[str, h5py.File], paper_man
     )
 
 
-def check_model_contract(rep: Report, staged_dir: Path, target: str, run_forward: bool) -> None:
+def check_model_contract(rep: Report, staged_dir: Path, target: str | None, run_forward: bool) -> None:
     """Confirm the dataloader emits exactly what train()/batch_nll() destructure."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from shareable_aion_flow.data_to_aion_embeddings import build_dataloaders
@@ -449,7 +483,24 @@ def main() -> int:
         help="Paper superset mode: duplicate targetids within a split warn instead of fail.",
     )
     parser.add_argument("--expect-rows", type=int, default=None, help="Expected total rows across splits (1%% tol).")
-    parser.add_argument("--target", default="log_ml_flux_1", help="Target used for the dataloader contract check.")
+    parser.add_argument(
+        "--labels",
+        choices=("auto", "required", "forbidden"),
+        default="auto",
+        help="Which staging contract to assert. 'forbidden' is the dr2v2 "
+             "inputs-only contract: the staged file must NOT carry "
+             f"{', '.join(STAGED_LABELS)}, so a stale eRASS1 label cannot be "
+             "read by accident. 'required' is the legacy contract. 'auto' "
+             "reports which contract the file satisfies and fails on neither.",
+    )
+    parser.add_argument(
+        "--target",
+        default="log_ml_flux_1",
+        help="Target used for the dataloader contract check. Pass 'none' for an "
+             "inputs-only staged dir, which carries no label to select on -- the "
+             "same word the loader itself uses (target_name=None means "
+             "'multi-target mode, select no rows').",
+    )
     parser.add_argument(
         "--max-missing-fits",
         type=float,
@@ -503,7 +554,7 @@ def main() -> int:
 
     handles = {split: h5py.File(path, "r") for split, path in paths.items()}
     try:
-        check_schema(rep, handles)
+        check_schema(rep, handles, args.labels)
         check_splits(rep, handles, args.expect_rows, limited, allow_duplicates=args.allow_duplicates)
         check_clean(rep, handles, args.match_quality_csv, args.expect_clean)
         check_values(rep, handles)
@@ -515,7 +566,8 @@ def main() -> int:
 
     if not args.skip_dataloader:
         try:
-            check_model_contract(rep, staged_dir, args.target, args.check_model)
+            target = None if args.target.lower() in ("none", "") else args.target
+            check_model_contract(rep, staged_dir, target, args.check_model)
         except Exception as exc:  # a broken contract must show up as a FAIL, not a traceback
             rep.fail("dataloader contract", f"{type(exc).__name__}: {exc}")
 
