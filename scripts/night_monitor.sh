@@ -25,7 +25,12 @@ STALL_SECS="${STALL_SECS:-2700}"
 SHARDS="$D/spectra_dr2_new.shards"
 POOL="$D/fits_pool_dr2"
 
-count () { ls "$1"/*."$2" 2>/dev/null | wc -l; }
+# find, not `ls dir/*.ext`: the glob is expanded by the shell into one argument
+# per file, and past ~21,000 cutouts that exceeded ARG_MAX. `ls` then failed and
+# the count silently read 0, so the log reported "cutouts 0" for half an hour
+# while 8.5 GB of files sat on disk. A zero here is indistinguishable from a
+# dead fetcher, so the bug had to go.
+count () { find "$1" -maxdepth 1 -name "*.$2" -printf . 2>/dev/null | wc -c; }
 newest_age () {
   local n
   n=$(find "$1" -maxdepth 1 -name "*.$2" -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
