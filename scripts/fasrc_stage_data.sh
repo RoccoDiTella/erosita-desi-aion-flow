@@ -30,7 +30,19 @@ declare -A PLAN=(
   # Only source of DESI spectype/zwarn for the current sample; build_manifest.py
   # needs it for has_z, and plan step 12 needs it for the class column.
   ["$ERO/erosita_desi_dr1_matches_all_properties.csv"]="$AIONFLOW_DATA/raw/erosita_desi"
-  # --- DR2 pair: what a run actually consumes ---
+  # --- dr2v2 quartet: what a CURRENT run actually consumes ---
+  # This block used to hold ONLY the un-suffixed dr2 pair, so every dr2v2 path
+  # `sbatch/_dataset.sh` resolves existed on the workstation and nowhere else,
+  # and `DATASET=dr2v2 source sbatch/_dataset.sh` on the cluster exited
+  # "targets_sidecar_dr2_v2.csv does not exist". That is the same failure this
+  # file's own header describes for the DR1 -> DR2 move: the data was never
+  # wrong, it was never sent. manifest_dr2.csv rides along because it is what
+  # sbatch/prepare_data_v2.sbatch stages FROM; without it the cluster can
+  # resolve the labels but cannot build the inputs.
+  ["$SD/data/dr2/clean_split_dr2_v2.csv"]="$AIONFLOW_DATA"
+  ["$SD/data/dr2/targets_sidecar_dr2_v2.csv"]="$AIONFLOW_DATA"
+  ["$SD/data/dr2/manifest_dr2.csv"]="$AIONFLOW_DATA"
+  # --- superseded dr2 pair: DATASET=dr2 only, to reproduce a published number ---
   ["$SD/data/dr2/clean_split_dr2.csv"]="$AIONFLOW_DATA"
   ["$SD/data/dr2/targets_sidecar_dr2.csv"]="$AIONFLOW_DATA"
   # --- DR1 leftovers, retained for a named reason each ---
