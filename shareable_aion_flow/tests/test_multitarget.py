@@ -576,3 +576,176 @@ def test_a_head_with_no_column_anywhere_is_refused_not_silently_skipped(tmp_path
         assert np.isfinite(y).all()
     finally:
         mt.configure_heads(())
+
+
+def test_configure_joint_marginal_recovers_rows_missing_the_optional_dimension() -> None:
+    """A row with M* and Lx but no SFR must count as usable once SFR is declared
+    marginalisable.
+
+    Catches configure_joint_marginal failing to actually update the JOINT_MARGINAL
+    global that joint_availability reads -- have_req would then equal have_all and
+    the recovered rows (the whole point of Run A's --joint-marginal) would vanish.
+    """
+    import multitarget as mt
+
+    try:
+        mt.configure_heads(("logmstar", "log_mbh_pan25", "log_mbh_vo09", "log_flux_p3"))
+        mt.configure_joint_marginal(("log_sfr",))
+
+        n = mt.N_TARGETS
+        mstar, sfr = mt.target_col("logmstar_cigale"), mt.target_col("log_sfr")
+        y = np.ones((6, n))
+        y[1:3, sfr] = np.nan          # SFR missing, M* and Lx present -> still usable
+        y[4, mstar] = np.nan          # a REQUIRED dimension missing -> unusable
+        have_req, have_all = mt.joint_availability(y)
+        assert have_req.sum() > have_all.sum()
+        assert bool(have_req[1]) and not bool(have_all[1])    # marginal branch
+        assert not bool(have_req[4])                          # required branch excludes it
+    finally:
+        mt.JOINT_MARGINAL = mt._DEFAULT_JOINT_MARGINAL
+        mt.configure_heads(())
+
+
+def test_configure_joint_marginal_rejects_a_name_that_is_not_a_joint_dimension() -> None:
+    """A typo'd --joint-marginal name must be refused, not silently ignored.
+
+    A silently-ignored name would leave every joint dimension required and the
+    run would keep dropping exactly the rows the flag claimed to rescue.
+    """
+    import multitarget as mt
+
+    try:
+        mt.configure_joint_marginal(("not_a_real_dimension",))
+    except ValueError as exc:
+        assert "not_a_real_dimension" in str(exc)
+    else:
+        raise AssertionError("an unknown --joint-marginal name must raise")
+    finally:
+        mt.JOINT_MARGINAL = mt._DEFAULT_JOINT_MARGINAL
+
+
+def test_configure_joint_marginal_rejects_covering_every_dimension() -> None:
+    """Marginalising every joint dimension must raise.
+
+    A row with none of them present would contribute an empty likelihood, i.e.
+    the quadrature would integrate over the whole joint rather than condition on
+    anything -- a silently meaningless head rather than a loud refusal.
+    """
+    import multitarget as mt
+
+    try:
+        mt.configure_joint_marginal(mt.JOINT_PAIR)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("covering every joint dimension must raise")
+    finally:
+        mt.JOINT_MARGINAL = mt._DEFAULT_JOINT_MARGINAL
+
+
+def test_configure_joint_marginal_none_is_a_noop() -> None:
+    """`--joint-marginal` omitted (None) must leave JOINT_MARGINAL untouched.
+
+    Catches a None-clobbers-to-something-else bug: since the default already
+    equals ("log_flux_p3",), the probe value is deliberately a DIFFERENT
+    dimension so a reset-to-default would still be caught.
+    """
+    import multitarget as mt
+
+    try:
+        mt.configure_joint_marginal(("log_sfr",))
+        before = mt.JOINT_MARGINAL
+        mt.configure_joint_marginal(None)
+        assert mt.JOINT_MARGINAL == before
+    finally:
+        mt.JOINT_MARGINAL = mt._DEFAULT_JOINT_MARGINAL
+
+
+def test_multi_target_nll_reports_joint_branch_stats() -> None:
+    """The `stats` out-param must expose both joint branches separately.
+
+    A pooled joint number mixes densities over different dimensionalities (see
+    the comment above the call site in multi_target_nll), so `stats` is the only
+    way --select-metric joint_complete can select on the complete branch alone.
+    Catches the out-param being silently dropped, only half-filled, or the two
+    branch counts not partitioning the usable rows.
+    """
+    import multitarget as mt
+
+    torch.manual_seed(0)
+    B = 12
+    flows = _stub_flows()
+    targets = torch.randn(B, N_TARGETS)
+    jm = mt.target_col(mt.JOINT_MARGINAL[0])
+    targets[B // 2:, jm] = float("nan")          # half the rows lack the marginal dim
+    contexts = torch.randn(B, N_HEADS, 256)
+    stds = [TargetStandardizer(0.0, 1.0) for _ in range(N_TARGETS)]
+    stats: dict = {}
+    mt.multi_target_nll(
+        contexts=contexts, flows=flows, targets=targets,
+        sig_lo=torch.zeros(B, N_TARGETS), sig_hi=torch.zeros(B, N_TARGETS),
+        standardizers=stds, weights=np.ones(N_HEADS), inject=False, stats=stats,
+    )
+    assert set(stats) == {"joint_complete_nll", "joint_complete_n",
+                          "joint_quadrature_nll", "joint_quadrature_n"}
+    have_req, _ = mt.joint_availability(targets)
+    assert stats["joint_complete_n"] + stats["joint_quadrature_n"] == int(have_req.sum())
+    assert math.isfinite(stats["joint_complete_nll"])
+    assert math.isfinite(stats["joint_quadrature_nll"])
+
+
+def test_train_multi_argparse_wires_the_new_flags() -> None:
+    """--select-metric, --joint-marginal, --fixed-combo must reach the parsed
+    namespace under the values passed.
+
+    run_train_multi trusts args.select_metric / args.joint_marginal /
+    args.fixed_combo directly, so a wiring slip (wrong dest, missing
+    add_argument) would silently no-op the flag while the CLI still accepted it.
+    """
+    import sys
+
+    import main
+
+    argv = ["prog", "train-multi",
+            "--staged-dir", "/tmp/staged", "--clean-split-csv", "/tmp/split.csv",
+            "--extra-targets-csv", "/tmp/extra.csv", "--run-id", "r1",
+            "--select-metric", "joint_complete",
+            "--joint-marginal", "log_sfr",
+            "--fixed-combo", "spectra+z"]
+    old_argv = sys.argv
+    sys.argv = argv
+    try:
+        args = main.parse_args()
+    finally:
+        sys.argv = old_argv
+    assert args.command == "train-multi"
+    assert args.select_metric == "joint_complete"
+    assert args.joint_marginal == ["log_sfr"]
+    assert args.fixed_combo == "spectra+z"
+
+
+def test_train_multi_argparse_rejects_an_invalid_select_metric() -> None:
+    """An unlisted --select-metric value must be refused at parse time.
+
+    Otherwise it would reach run_train_multi and fail -- or worse, silently
+    mis-select a checkpoint -- deep into a training run instead of at startup.
+    """
+    import sys
+
+    import main
+
+    argv = ["prog", "train-multi",
+            "--staged-dir", "/tmp/staged", "--clean-split-csv", "/tmp/split.csv",
+            "--extra-targets-csv", "/tmp/extra.csv", "--run-id", "r1",
+            "--select-metric", "bogus"]
+    old_argv = sys.argv
+    sys.argv = argv
+    try:
+        try:
+            main.parse_args()
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("an invalid --select-metric must exit, not parse")
+    finally:
+        sys.argv = old_argv
