@@ -18,6 +18,11 @@ Computed by direct quadrature over u -- no sampling, no KDE bandwidth bias
 (a sampled+KDE estimate of the same quantity is strictly noisier). All grid
 points evaluate under ONE context-conditioned distribution per source.
 
+This is an EXACTLY 2-D construction: the shear integrates one axis against the
+other and there is no third axis to hold fixed or integrate as well. A joint of
+any other width is refused at startup rather than silently reinterpreted, which
+is what `j2, j3 = JOINT_IDX` did while the joint was (M*, SFR, Lx, P3).
+
     python scripts/hr_from_joint.py --checkpoint .../best.pt --staged-dir ... \
         --clean-split-csv ... --extra-targets-csv ... --hr-ref-csv ...
 """
@@ -35,15 +40,25 @@ import torch
 from scipy.stats import gaussian_kde
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shareable_aion_flow.attention_pooling_head import MODALITIES  # noqa: E402
 from shareable_aion_flow.data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders  # noqa: E402
+from shareable_aion_flow.eval_core import C_P2, C_P3, HR_BANDS, assert_joint_matches_flow  # noqa: E402
 from shareable_aion_flow.multitarget import (  # noqa: E402
-    JOINT_IDX, N_HEADS, N_TARGETS, MultiTargetFlows, MultiTargetLookup, SharedCLSHead,
+    MultiTargetFlows, MultiTargetLookup, SharedCLSHead,
 )
 from shareable_aion_flow.normalizing_flow import TargetStandardizer  # noqa: E402
 
-C_P2, C_P3 = -12.1332, -12.0060       # exact log10(FLUX/RATE) per band
 DELTA = C_P2 - C_P3                   # d = v - u + DELTA
 LN10 = math.log(10.0)
+
+# Exit code for "this checkpoint's joint is not a 2-D (P2,P3) one", as opposed to
+# an ordinary failure. The distinction is not cosmetic: sbatch/eval_multi.sbatch
+# runs under `set -e`, so an undifferentiated exit 1 here marks the whole eval
+# job FAILED after eval_multitarget.py has already written every table plus
+# hr_joint_summary.csv, whose SAMPLED hardness works for any joint containing
+# both bands. Not-applicable is a property of the checkpoint, not an error, and
+# the launcher reports it as a skip.
+NOT_APPLICABLE = 3
 
 
 def hr_to_d(hr: np.ndarray | float) -> np.ndarray:
@@ -57,12 +72,17 @@ def d_to_hr(d: np.ndarray) -> np.ndarray:
 @torch.no_grad()
 def line_log_density(
     flow, context: torch.Tensor, d_phys: torch.Tensor, std2: TargetStandardizer,
-    std3: TargetStandardizer, u_nodes: torch.Tensor, chunk: int = 64
+    std3: TargetStandardizer, u_nodes: torch.Tensor, col2: int = 0, col3: int = 1,
+    chunk: int = 64,
 ) -> torch.Tensor:
     """log p(d|x) for one physical difference per source, by quadrature over u.
 
     ``d_phys`` [B]: the difference v-u+DELTA to evaluate per source.
     ``u_nodes`` [K]: integration nodes in PHYSICAL logF2 units (shared grid).
+    ``col2``/``col3``: which FLOW COLUMNS carry P2 and P3. They are passed in
+    from joint_col() rather than assumed to be 0 and 1 -- the flow's column
+    order is JOINT_PAIR declaration order, which need not put the bands first
+    or even in band order.
     Returns [B] log-densities in physical d units.
     """
     B = context.shape[0]
@@ -73,8 +93,10 @@ def line_log_density(
         u = u_nodes[lo : lo + chunk]                        # [k]
         uu = u.view(-1, 1).expand(-1, B)                    # [k, B] physical logF2
         vv = uu + d_phys.view(1, -1) - DELTA                # [k, B] physical logF3
-        pair = torch.stack([(uu - std2.mean) / std2.std,
-                            (vv - std3.mean) / std3.std], dim=-1)   # [k, B, 2]
+        cols: list[torch.Tensor | None] = [None, None]
+        cols[col2] = (uu - std2.mean) / std2.std
+        cols[col3] = (vv - std3.mean) / std3.std
+        pair = torch.stack(cols, dim=-1)                    # [k, B, 2]
         lp = flow.log_prob_draws(pair, context)             # [k, B] (standardized units)
         parts.append(lp)
     lp_all = torch.cat(parts, dim=0)
@@ -100,19 +122,35 @@ def main() -> None:
     ckpt = torch.load(args.checkpoint, map_location=device)
     import shareable_aion_flow.multitarget as _mt
     _mt.configure_heads_from_config(ckpt.get("config", {}))
-    N_HEADS, N_TARGETS, JOINT_IDX = _mt.N_HEADS, _mt.N_TARGETS, _mt.JOINT_IDX
+    dims = _mt.joint_dims()
+    # The shear quadrature is a 2-D construction. Refuse anything else loudly:
+    # a wider joint has axes this integral does not know how to hold fixed, and
+    # the failure mode of guessing is a finite, plausible-looking hardness.
+    if len(dims) != 2 or set(dims) != set(HR_BANDS):
+        print(
+            f"[hr] NOT APPLICABLE (exit {NOT_APPLICABLE}): hr_from_joint needs an exactly 2-D "
+            f"joint over {HR_BANDS}; this checkpoint's joint is {dims} ({len(dims)}-D). The "
+            "sampled HR block in scripts/eval_multitarget.py handles a wider joint and has "
+            "already written hr_joint_summary.csv; the exact quadrature applies to a P2xP3 "
+            "joint only. Nothing failed -- this checkpoint cannot answer this question.",
+            flush=True)
+        raise SystemExit(NOT_APPLICABLE)
+    col2, col3 = _mt.joint_col(HR_BANDS[0]), _mt.joint_col(HR_BANDS[1])
+
     encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
-                               num_cls=N_HEADS).to(device)
+                               num_cls=_mt.N_HEADS).to(device)
     encoder.load_state_dict(ckpt["encoder_trainable_state_dict"], strict=False)
     head = SharedCLSHead().to(device); head.load_state_dict(ckpt["head_state_dict"])
     flows = MultiTargetFlows().to(device); flows.load_state_dict(ckpt["flows_state_dict"])
+    assert_joint_matches_flow(flows)
     stds = [TargetStandardizer.from_state_dict(s) for s in ckpt["standardizers"]]
     encoder.eval(); head.eval(); flows.eval()
-    j2, j3 = JOINT_IDX
-    std2, std3 = stds[j2], stds[j3]
+    # Two different indexing spaces: target_col addresses the [B, N_TARGETS]
+    # target matrix, joint_col the flow's feature vector. Never one for the other.
+    std2, std3 = stds[_mt.target_col(HR_BANDS[0])], stds[_mt.target_col(HR_BANDS[1])]
 
     _, _, test_loader = build_dataloaders(
-        staged_dir=args.staged_dir, target_name="log_ml_flux_1",
+        staged_dir=args.staged_dir, target_name=None,
         batch_size=args.batch_size, eval_batch_size=args.batch_size,
         num_workers=8, clean_split_csv=args.clean_split_csv,
     )
@@ -127,6 +165,16 @@ def main() -> None:
     d_grid = hr_to_d(hr_grid)
 
     ref = pd.read_csv(args.hr_ref_csv).drop_duplicates("targetid").set_index("targetid")
+    if "hr32" not in ref.columns:
+        raise SystemExit(f"{args.hr_ref_csv} has no hr32 column; columns are "
+                         f"{sorted(ref.columns)[:12]}")
+    # hr32_ok is the DR1 reference's own quality flag. A DR2-depth reference need
+    # not carry one, and a missing quality flag must not take the whole run down
+    # on an AttributeError three minutes in -- it just means one fewer subset.
+    has_ok = "hr32_ok" in ref.columns
+    if not has_ok:
+        print(f"[hr] {args.hr_ref_csv} has no hr32_ok column: reporting the "
+              "'all finite' subset only", flush=True)
     assign = pd.read_csv(args.clean_split_csv)
     train_tids = assign.loc[assign.split == "train", "targetid"].to_numpy(np.int64)
     hr_train = ref.reindex(train_tids).hr32.to_numpy(np.float64)
@@ -141,11 +189,13 @@ def main() -> None:
         for batch in test_loader:
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
             y, _, _ = lookup.batch(batch[7], device)
-            mask = torch.isfinite(y[:, j2]) & torch.isfinite(y[:, j3])
+            # One availability rule, shared with the trainer. For this 2-D joint
+            # nothing is marginalisable, so have_req and have_all coincide.
+            _, mask = _mt.joint_availability(y)
             if not bool(mask.any()):
                 continue
-            cls_seq, _ = encoder.encode_tokens(batch, ("spectra", "z", "wise", "image"))
-            ctx = head(cls_seq)[mask, N_TARGETS]
+            cls_seq, _ = encoder.encode_tokens(batch, MODALITIES)
+            ctx = head(cls_seq)[mask, _mt.N_TARGETS]
             tids = batch[7][mask].cpu().numpy()
             meas = ref.reindex(tids).hr32.to_numpy(np.float64)
             good = np.isfinite(meas)
@@ -154,7 +204,8 @@ def main() -> None:
 
             # (a) density AT the measured hardness -- one line integral per source
             d_meas = torch.tensor(hr_to_d(np.nan_to_num(meas)), dtype=torch.float32, device=device)
-            lp_d = line_log_density(flows.joint, ctx, d_meas, std2, std3, u_nodes).cpu().numpy()
+            lp_d = line_log_density(flows.joint, ctx, d_meas, std2, std3, u_nodes,
+                                    col2, col3).cpu().numpy()
             log_jac = np.log(2.0 / (LN10 * (1.0 - np.clip(meas, -0.999, 0.999) ** 2)))
             log_post = lp_d + log_jac
 
@@ -162,7 +213,8 @@ def main() -> None:
             grid_lp = np.zeros((len(hr_grid), int(mask.sum())))
             for gi, dv in enumerate(d_grid):
                 dvec = torch.full((int(mask.sum()),), float(dv), dtype=torch.float32, device=device)
-                grid_lp[gi] = line_log_density(flows.joint, ctx, dvec, std2, std3, u_nodes).cpu().numpy()
+                grid_lp[gi] = line_log_density(flows.joint, ctx, dvec, std2, std3, u_nodes,
+                                               col2, col3).cpu().numpy()
             grid_lp = grid_lp + log_jac_grid[:, None]
             dens = np.exp(grid_lp - grid_lp.max(axis=0, keepdims=True))
             cdf = np.cumsum(dens, axis=0)
@@ -178,7 +230,7 @@ def main() -> None:
                              "hr_p16": float(p16[k]), "hr_p50": float(p50[k]),
                              "hr_p84": float(p84[k]), "log_post": float(log_post[k]),
                              "log_prior": lp0, "info_gain": float(log_post[k]) - lp0,
-                             "ok": bool(ref.hr32_ok.get(int(tid), False))})
+                             "ok": bool(ref.hr32_ok.get(int(tid), False)) if has_ok else False})
             print(f"[hr] {len(recs)} sources done", flush=True)
 
     df = pd.DataFrame(recs)

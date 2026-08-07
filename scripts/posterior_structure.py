@@ -198,7 +198,7 @@ def main() -> None:
 
     lookup = mt.MultiTargetLookup(args.staged_dir, args.extra_targets_csv)
     loaders = dict(zip(("train", "val", "test"), build_dataloaders(
-        staged_dir=args.staged_dir, target_name="log_ml_flux_1",
+        staged_dir=args.staged_dir, target_name=None,
         batch_size=args.eval_batch_size, eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers, seed=42, clean_split_csv=args.clean_split_csv)))
     if "train" in args.splits:
