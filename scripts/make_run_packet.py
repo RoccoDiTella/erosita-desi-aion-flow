@@ -1,28 +1,29 @@
 #!/usr/bin/env python
 """Build the evaluation packet for a finished run (port of the RunPod-era packet).
 
-Consumes a run directory containing ``test_predictions.csv`` + ``test_flow_metrics.csv``
-(written by ``aion-flow eval`` / ``--eval-after-train``) and the staged data (for
-redshift + spectype joins). Emits into ``<run_dir>/packet/``:
+Consumes a run directory containing ``test_predictions.csv`` +
+``test_flow_metrics.csv`` (written by ``aion-flow eval`` / ``--eval-after-train``)
+and the TARGET TABLE (for redshift, class and per-source sigma). Emits into
+``<run_dir>/packet/``:
 
 - ``test_diagnostics.pdf``  — scatter grid (pred vs true w/ 16-84 errorbars, R2+IG
   annotations), info-gain histograms, and interval-coverage calibration.
 - ``upset_metrics.pdf``     — combos sorted by R2 with an upset-style modality
   membership matrix; bars for R2 and exp(IG).
-- ``by_spectype.csv``       — per spectype x combo: n, R2, IG (QSO vs GALAXY).
+- ``by_spectype.csv``       — per class x combo: n, R2, IG (QSO vs GALAXY).
 - ``by_redshift.csv`` + ``performance_by_redshift.pdf`` — z-binned R2 / exp(IG).
 
     python scripts/make_run_packet.py --run-dir <outputs/run-id> \
-        --staged-dir <staged_paper> [--clean-split-csv <clean_split.csv>]
+        --extra-targets-csv <targets_sidecar_dr2.csv>
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
-import h5py
 import matplotlib
 
 matplotlib.use("Agg")
@@ -31,7 +32,13 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
-MODALITIES = ("z", "spectra", "wise", "image")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shareable_aion_flow.attention_pooling_head import (  # noqa: E402
+    MODALITIES, combo_name,
+)
+from shareable_aion_flow.multitarget import _ALL_TARGETS  # noqa: E402
+
+ALL_INPUTS = combo_name(MODALITIES)
 
 
 def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -42,33 +49,79 @@ def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
 
-TARGET_SIG_COLS = {
-    "log_ml_flux_1": ("flux_sig_lo", "flux_sig_hi"),
-    "log_lx": ("flux_sig_lo", "flux_sig_hi"),
-    "logmstar": ("logmstar_sig", "logmstar_sig"),
-    "hr32_u": ("hr32_u_sig", "hr32_u_sig"),
-}
+# Class column, in preference order. `spectype` is DESI's (QSO/GALAXY/STAR) and
+# is what stratification should use; the DR2 sidecar does not carry it yet (plan
+# step 12 adds it), so `cigale_spectype` stands in -- QSO 21,758 / GALAXY 2,764 /
+# NaN 1,060 of 25,582, and no STARs at all. The two disagree: DESI calls the same
+# rows QSO 22,299 / GALAXY 3,277 / STAR 6. Which one produced a table matters, so
+# the name of the column used is printed and written into by_spectype.csv.
+CLASS_COLS = ("spectype", "cigale_spectype")
 
 
-def attach_metadata(predictions: pd.DataFrame, staged_dir: Path, target: str) -> pd.DataFrame:
-    """Join redshift + spectype + per-source sigma by targetid (dedup'd)."""
-    sig_cols = TARGET_SIG_COLS.get(target)
-    frames = []
-    for split in ("train", "val", "test"):
-        with h5py.File(staged_dir / f"desi_{split}.hdf5", "r") as handle:
-            data = {
-                "targetid": handle["desi_targetid"][:].astype(np.int64),
-                "redshift": handle["redshift"][:].astype(np.float64),
-            }
-            if "spectype" in handle:
-                data["spectype"] = [s.decode() for s in handle["spectype"][:]]
-            if sig_cols and all(c in handle for c in sig_cols):
-                data["sigma"] = 0.5 * (
-                    handle[sig_cols[0]][:].astype(np.float64) + handle[sig_cols[1]][:].astype(np.float64)
-                )
-            frames.append(pd.DataFrame(data))
-    meta = pd.concat(frames, ignore_index=True).drop_duplicates("targetid")
-    return predictions.merge(meta, on="targetid", how="left")
+def sigma_columns(target: str) -> tuple[str, str] | None:
+    """(sig_lo, sig_hi) for a target, read off the trained target spec.
+
+    This was a hand-written map over four names, three of which no longer exist
+    anywhere (`logmstar_sig`, `hr32_u_sig`, and the staged copies of the flux
+    sigmas). Deriving it means a head appended to MULTI_TARGETS is covered here
+    with no second edit, and a head with no error model returns None rather than
+    quietly matching nothing.
+    """
+    for spec in _ALL_TARGETS:
+        if spec["name"] == target:
+            return tuple(spec["sig"]) if spec["sig"] else None
+    return None
+
+
+def attach_metadata(predictions: pd.DataFrame, sidecar_csv: Path, target: str) -> pd.DataFrame:
+    """Join redshift, class and per-source sigma from the TARGET TABLE.
+
+    All three used to be read out of the staged HDF5 behind `if col in handle`
+    guards. That is fail-soft in the worst place: when the staged file stopped
+    carrying `spectype` and the sigma columns, the join produced no column, the
+    by-class table came out empty and the kernel-consistency page silently did
+    not render. Nothing failed; a panel just went missing from a PDF.
+
+    The sidecar is where the labels and their error bars are defined, so it is
+    where their metadata belongs -- and it is the file the run was actually
+    trained against, which the staged HDF5 no longer is. A column that should be
+    here and is not is now a hard error naming the column.
+    """
+    side = pd.read_csv(sidecar_csv).drop_duplicates("targetid")
+    if "targetid" not in side.columns or "z" not in side.columns:
+        raise SystemExit(
+            f"{sidecar_csv} needs `targetid` and `z`; it has {sorted(side.columns)[:12]}...")
+    meta = pd.DataFrame({
+        "targetid": side["targetid"].to_numpy(np.int64),
+        "redshift": side["z"].to_numpy(np.float64),
+    })
+
+    class_col = next((c for c in CLASS_COLS if c in side.columns), None)
+    if class_col is None:
+        raise SystemExit(f"{sidecar_csv} has none of {CLASS_COLS}; cannot stratify by class")
+    meta["spectype"] = side[class_col].to_numpy()
+    meta["class_col"] = class_col
+    n_missing = int(side[class_col].isna().sum())
+    print(f"[packet] class from `{class_col}` ({n_missing:,} of {len(side):,} unclassified)")
+
+    sig_cols = sigma_columns(target)
+    if sig_cols is None:
+        print(f"[packet] {target} declares no error model -- coverage-vs-sigma page skipped")
+    else:
+        missing = [c for c in sig_cols if c not in side.columns]
+        if missing:
+            raise SystemExit(
+                f"{target} declares sigma columns {sig_cols} and {sidecar_csv} is missing "
+                f"{missing}. Rebuild the sidecar rather than dropping the calibration page.")
+        meta["sigma"] = 0.5 * (side[sig_cols[0]].to_numpy(np.float64).__abs__()
+                               + side[sig_cols[1]].to_numpy(np.float64).__abs__())
+
+    merged = predictions.merge(meta, on="targetid", how="left")
+    n_unjoined = int(merged["redshift"].isna().sum())
+    if n_unjoined:
+        print(f"[packet] WARNING: {n_unjoined:,} of {len(merged):,} prediction rows "
+              f"have no row in {sidecar_csv.name}")
+    return merged
 
 
 def combo_sort_order(metrics: pd.DataFrame) -> list[str]:
@@ -174,7 +227,7 @@ def page_coverage_by_sigma(pdf: PdfPages, predictions: pd.DataFrame, n_bins: int
     of sitting flat at 0.68. A flat panel is a precondition for interpreting the
     flow as the intrinsic (deconvolved) distribution.
     """
-    frame = predictions.loc[predictions["input_group"].eq("spectra+z+wise+image")]
+    frame = predictions.loc[predictions["input_group"].eq(ALL_INPUTS)]
     if "sigma" not in frame.columns or frame["sigma"].isna().all() or frame.empty:
         return
     frame = frame.dropna(subset=["sigma"])
@@ -237,17 +290,18 @@ def upset_plot(metrics: pd.DataFrame, output_path: Path) -> None:
 def slice_tables(predictions: pd.DataFrame, order: list[str], packet_dir: Path, n_z_bins: int = 8) -> None:
     # per-spectype
     rows = []
-    if "spectype" in predictions.columns:
-        for group in order:
-            frame = predictions.loc[predictions["input_group"].eq(group)]
-            for spectype, sub in frame.groupby(predictions["spectype"].fillna("UNKNOWN")):
-                if len(sub) < 10:
-                    continue
-                rows.append({
-                    "input_group": group, "spectype": spectype, "n": len(sub),
-                    "r2": r_squared(sub["y_true"].to_numpy(), sub["y_pred"].to_numpy()),
-                    "info_gain_nats": float(sub["info_gain"].mean()),
-                })
+    class_col = predictions["class_col"].dropna().iloc[0] if len(predictions) else "unknown"
+    for group in order:
+        frame = predictions.loc[predictions["input_group"].eq(group)]
+        for spectype, sub in frame.groupby(frame["spectype"].fillna("UNKNOWN")):
+            if len(sub) < 10:
+                continue
+            rows.append({
+                "input_group": group, "class_col": class_col,
+                "spectype": spectype, "n": len(sub),
+                "r2": r_squared(sub["y_true"].to_numpy(), sub["y_pred"].to_numpy()),
+                "info_gain_nats": float(sub["info_gain"].mean()),
+            })
     pd.DataFrame(rows).to_csv(packet_dir / "by_spectype.csv", index=False)
 
     # per-redshift (quantile bins over the full test set)
@@ -273,7 +327,11 @@ def slice_tables(predictions: pd.DataFrame, order: list[str], packet_dir: Path, 
         print("[packet] redshift slices skipped (too few rows per bin)")
         return
 
-    show = [g for g in ("z", "image", "spectra", "z+spectra+wise+image") if g in set(z_table["input_group"])]
+    # "z+spectra+wise+image" was hardcoded here and never matched anything:
+    # combo_name orders by MODALITIES, so the all-inputs row is spelled
+    # "spectra+z+wise+image". The one panel this figure exists to show was
+    # missing from every packet ever built.
+    show = [g for g in ("z", "image", "spectra", ALL_INPUTS) if g in set(z_table["input_group"])]
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     for group in show:
         sub = z_table.loc[z_table["input_group"].eq(group)]
@@ -290,7 +348,10 @@ def slice_tables(predictions: pd.DataFrame, order: list[str], packet_dir: Path, 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--staged-dir", type=Path, required=True)
+    parser.add_argument("--extra-targets-csv", type=Path, required=True,
+                        help="Target table the run was trained against (targets_sidecar_dr2.csv). "
+                             "Replaces --staged-dir: redshift, class and sigma all come from here "
+                             "now, and the staged HDF5 no longer carries them.")
     parser.add_argument("--target-label", default=None, help="Defaults to config.json's target.")
     args = parser.parse_args()
 
@@ -305,7 +366,7 @@ def main() -> None:
 
     packet_dir = run_dir / "packet"
     packet_dir.mkdir(exist_ok=True)
-    predictions = attach_metadata(predictions, args.staged_dir, target)
+    predictions = attach_metadata(predictions, args.extra_targets_csv, target)
     order = combo_sort_order(metrics)
 
     with PdfPages(packet_dir / "test_diagnostics.pdf") as pdf:
