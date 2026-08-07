@@ -11,25 +11,59 @@ rebuild chain), `rebuild_plan_2026-08-06.md` (the full ordered plan).
 
 ## 0. BLOCKERS — what stands between here and a launch
 
-Nothing below is a bug. Every known bug is fixed and covered by tests (105
-passing, and `AIONFLOW_STUB_ENCODER=1` runs the whole loop on CPU). These are
-missing capabilities, in the order they should be built.
+Nothing below is a bug. 170 tests pass, `AIONFLOW_STUB_ENCODER=1` runs the whole
+loop AND the eval/posterior path on CPU, and a Run A smoke has completed on GPU
+with the real encoder. What remains is listed per run.
 
-### Hard blockers, RUN A (all model-side, all locally testable)
+### RUN A — no model-side blockers remain (2026-08-07)
 
-| # | blocker | why it blocks | effort |
-|---|---|---|---|
-| A1 | **Declarable `JOINT_MARGINAL`.** `JOINT_PAIR`/`JOINT_MARGINAL` are module constants with no CLI. | **CORRECTED 2026-08-07: A1 does NOT block a Run A smoke.** `--drop-heads log_flux_p3` already yields exactly `(logmstar_cigale, log_sfr, log_lx)` with the quadrature branch empty, verified by construction and by a clean 2-epoch stub run. What IS still missing is a way to declare SFR marginalisable, which the row-eligibility decision requires and which is worth 1,259 galaxies on merged (see §2). Full named joints remain a Run B blocker: a band joint is a different joint, and `config.json` records NO joint information at all, so a checkpoint cannot say what it was trained with. | small (marginal) / medium (full) |
-| A2 | **`--fixed-combo spectra+z`.** | **Worse than first written:** there is no modality-combo control ANYWHERE in `train-multi`, so training is wrong too, not just the two validation loops that hardcode `("spectra","z","wise","image")`. Without it Run A silently becomes a full-dropout model early-stopped on a criterion it never trained for. A working `--fixed-combo` already exists on the retired single-target `train` parser (`main.py:918`) and can be copied rather than invented. Run B is the opposite and wants all four modalities, so the flag must pin A and leave B alone. | medium |
-| A3 | **`--select-metric`.** `val_pair_mean` gives every head an equal vote and pools the joint's complete and quadrature branches, which are densities over DIFFERENT numbers of dimensions. | `best.pt` is chosen on a number that moves with coverage rather than model quality. Per-branch stats are already exposed via the `stats={}` out-param; only the flag is missing. | small |
+All three landed and a 1-epoch GPU smoke ran the intended configuration end to
+end on the cluster (job 37695391, exit 0), with `config.json` confirming
+`fixed_combo ['spectra','z']`, `joint_dims ['logmstar_cigale','log_sfr','log_lx']`,
+`joint_marginal ['log_sfr']`, `select_metric joint_complete`, `inject False`.
 
-### Hard blocker, RUN B
+| # | was | status |
+|---|---|---|
+| A1 | joints not declarable | **DONE.** `--joint` declares it; `configure_heads_from_config` now CONSUMES `config.json`'s `joint_dims` instead of re-deriving from the module constant. Verified by reloading a checkpoint under a DIFFERENT same-arity `JOINT_PAIR`: dims come back correct under `strict=True`. `--joint-marginal` recovers rows with M* but no SFR (train split 12,803 -> 14,326). |
+| A2 | no combo control | **DONE.** `--fixed-combo` reaches training AND both validation loops. Was worse than documented: there had been no combo control anywhere in `train-multi`. |
+| A3 | selection on a pooled mean | **DONE.** `--select-metric`. On the GPU smoke: complete branch 1.885 (n=1,570) vs quadrature 1.566 (n=195) vs pooled 1.844 -- selection now uses the complete branch. |
 
-| # | blocker | why it blocks | effort |
-|---|---|---|---|
-| B1 | ~~**Counts columns are not carried.**~~ **CARRIED 2026-08-07** in `make_dr2_targets.py`: 44 new columns, `ape_cts/ape_bkg/ape_exp/ape_radius/ape_pois` and `ml_cts/ml_rate/ml_exp/ml_eef`, for the broad band and P1-P4, raw and untransformed. | What remains is the chain re-run (~15 min), which is deliberately NOT done yet — the merged rebuild is in flight. **Trap, CORRECTED 2026-08-07 (see §3.1): only `ML_CTS_UPERR_Pn` is in ct/s**, not the whole error family. | done pending re-run |
-| B2 | **A Poisson head does not exist.** Current heads are flows over log-flux. | Needs `p(log lambda | inputs)` as the latent with `N ~ Poisson(lambda*t + B)` as the observation model. | medium |
-| B3 | **Also needs A1** (a band joint is a different joint). | | |
+Run A's invocation:
+```
+--fixed-combo spectra+z --joint-marginal log_sfr --select-metric joint_complete \
+--drop-heads logmstar log_mbh_pan25 log_mbh_vo09 log_flux_p3 --no-inject
+```
+
+**What is NOT settled is the SCIENCE, not the machinery.** See the soundness
+threats in section 2.
+
+### RUN B — the head exists; the surrounding path does not
+
+| # | was | status |
+|---|---|---|
+| B1 | counts columns not carried | **DONE** in `make_dr2_targets.py` (44 columns). Chain re-run into the LIVE sidecar still pending. |
+| B2 | no Poisson head | **DONE.** Latent log-rate flow, Poisson marginal likelihood on observed counts by adaptive quadrature. Recovery verified: bias +0.009 dex, rms 0.193 against irreducible 0.200, posterior WIDTH 0.2005 vs true 0.200, calibration 0.964. N=0 gives an upper limit that tightens with exposure. |
+| B3 | needs A1 | **DONE** with A1. |
+
+**Still blocking a Run B smoke:**
+1. The chain re-run, so the counts columns reach the live sidecar. Poisson heads
+   are opt-in precisely because an absent column is a hard error.
+2. **A count-marginal-likelihood eval path.** `eval_core` now REFUSES a Poisson
+   checkpoint (`assert_no_poisson_heads`): it scores a density AT a target value
+   and these heads have none, so it would have emitted a complete, plausible,
+   entirely wrong table.
+3. **An HR-from-rates path.** `hr_from_joint.py` refuses any joint that is not
+   `(log_flux_p2, log_flux_p3)`, so it fails safe on a rate joint.
+
+Run B's invocation:
+```
+--add-heads log_rate_p2 log_rate_p3 --joint log_rate_p2,log_rate_p3 \
+--joint-quad-nodes 24 --select-metric joint_complete
+```
+`--joint-quad-nodes 24`, not 48: measured max error 4.9e-3 nats against 5.2e-3
+at 48, i.e. past 24 the floor is float32 rather than quadrature. The FIXED grid
+could not integrate a Poisson at all -- 7,424 nats of error at N=40,000 -- so
+node placement is now per-source Laplace. See commit 5240425.
 
 ### Scope limiters, not launch blockers
 
@@ -173,6 +207,38 @@ science claim rests on. **Use merged.**
 ---
 
 ## 3. RUN B — the counts / hardness run
+
+**BAND PAIR DECIDED 2026-08-07 by the user: P2/P3.** It is simultaneously the
+best-measured pair (median 68% HR-posterior width 0.697 against 0.850 for
+P3/P4; 706k + 596k net counts; 3.1% + 4.7% zero-count rows against 43% for P4)
+AND the standard convention: eROSITA's P1/P2/P3 are byte-identical to 4XMM's
+bands 1/2/3, so our pair IS the standard **HR2 = (R_1.0-2.0 - R_0.5-1.0) /
+(R_1.0-2.0 + R_0.5-1.0)** (Webb et al. 2020, A&A 641, A136; Saeedi et al. 2024,
+A&A 690, A152 use exactly this on eRASS1). Posterior on latent rates after Park
+et al. 2006 (BEHR).
+
+**BUT THE CLAIM MUST BE FRAMED AS CONTINUUM SHAPE, NOT OBSCURATION.** eFEDS AGN
+are only ~10% obscured and DESI QSO selection biases us further toward type 1,
+so an obscuration headline would be measuring a 10% tail. What HR2 tracks for
+this sample is Gamma and the soft excess -- and that is a defensible
+optical-to-X-ray channel: DESI spectra give M_BH and lambda_Edd, Gamma
+correlates with lambda_Edd (slope ~0.3, Shemmer et al. 2008; Brightman et al.
+2013), and soft-excess strength varies by ~5x across lambda_Edd (Chen et al.
+2025, A&A 701, A144).
+
+**REDSHIFT ENTANGLEMENT, act on this.** A fixed OBSERVED-frame split probes
+N_H ~ 10^22 at z=0 rising to ~10^24 by z=4.75, roughly as (1+z)^2.5. Beyond
+z ~ 2 an N_H = 10^22 absorber has redshifted out of eROSITA's band entirely
+(Wang et al. 2004, ApJ 612, L109). So a single sample-wide HR2 distribution is
+NOT physically interpretable. We hold spec-z for every source: report HR2 in z
+bins, with constant-N_H and constant-Gamma tracks overlaid.
+
+**eROSITA PUBLISHES NO HR COLUMN.** Confirmed against Merloni et al. 2024, the
+HEASARC ERASS1MAIN listing and the DR2 catalogue paper. So the standing
+"prefer catalogue values" preference cannot be satisfied by any HR -- every
+option is home-made. What IS catalogue-native is the per-band RATE, which is
+what Run B predicts. Frame it that way: we predict catalogue quantities and
+derive the standard-convention colour from the joint posterior.
 
 **Objective.** Learn `p(log lambda_band | all modalities)` for the X-ray bands and
 validate the implied hardness-ratio posterior against the analytical one. If it
