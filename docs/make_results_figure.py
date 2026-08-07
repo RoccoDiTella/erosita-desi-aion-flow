@@ -9,18 +9,30 @@ anything. The line-flux baseline is the classical alternative, so the distance
 between bar and mark is the part of the answer that AION supplies.
 
     python docs/make_results_figure.py --metrics .../multi_test_metrics.csv \
-        --baseline results/baseline_lines_only_clean.csv [--hr-r2 ..] [--hr-ig ..]
+        --baseline results/baseline_lines_only_clean.csv [--sample common] \
+        [--hr-csv .../hr_implied_target.csv]
+
+The HR32 row is drawn from `hr_implied_target.csv` when there is one. When there
+is not, the figure SAYS SO and says why, rather than quietly coming back one row
+shorter: the file is unproducible unless the run trained an exactly 2-D
+(P2,P3) joint and the eval was given a hardness reference.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import matplotlib
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deck_sample import (  # noqa: E402
+    add_sample_argument, hr_note_for, sample_caption, select_sample,
+)
+
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -82,11 +94,20 @@ def main() -> None:
     ap.add_argument("--hr-r2", type=float, default=np.nan, help="override --hr-csv")
     ap.add_argument("--hr-ig", type=float, default=np.nan, help="override --hr-csv")
     ap.add_argument("--out", type=Path, default=Path("docs/figures/fig_results_v3.png"))
+    add_sample_argument(ap)
     args = ap.parse_args()
 
-    t = pd.read_csv(args.metrics)
+    metrics = pd.read_csv(args.metrics)
+    # Filter on the sample declaration BEFORE the input_group filter: with
+    # `--sample both` in the eval, all-inputs is two rows per head and `.iloc[0]`
+    # below would take whichever one came first.
+    t, sample = select_sample(metrics, args.sample, source=str(args.metrics))
     t = t[t["input_group"] == ALL_INPUTS]
+    if t.duplicated(subset=["head"]).any():
+        raise SystemExit(f"[deck] {args.metrics}: repeated heads for input_group={ALL_INPUTS} "
+                         f"within sample={sample}; refusing to pick one.")
     base = pd.read_csv(args.baseline) if args.baseline and args.baseline.exists() else None
+    hr_note = hr_note_for(metrics, args.hr_csv)
 
     labels, r2, ig, br2, big = [], [], [], [], []
     for key, label in HEADS:
@@ -117,15 +138,22 @@ def main() -> None:
     panel(axes[1], labels, np.array(ig, float), np.array(big, float),
           "Info gain", "nats over the KDE prior")
     axes[1].set_yticklabels([])
+    fig.text(0.005, 1.0, sample_caption(sample, t), fontsize=9, color=MUTED,
+             ha="left", va="bottom")
     handles, lab = axes[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, lab, frameon=False, fontsize=9.5,
                    loc="lower center", bbox_to_anchor=(0.5, -0.02), ncol=2)
+    if hr_note and not (np.isfinite(hr_r2) or np.isfinite(hr_ig)):
+        # An absent panel that says nothing reads as a panel that was not
+        # interesting. Say which file is missing and what would produce it.
+        fig.text(0.005, -0.055 if handles else -0.02, hr_note, fontsize=8.6, color=MUTED,
+                 ha="left", va="top", wrap=True)
     fig.tight_layout()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=170, bbox_inches="tight")
     plt.close(fig)
-    print(f"wrote {args.out}  ({len(labels)} heads"
+    print(f"wrote {args.out}  ({len(labels)} heads, sample={sample}"
           f"{', with lines-only marks' if base is not None else ''})")
 
 

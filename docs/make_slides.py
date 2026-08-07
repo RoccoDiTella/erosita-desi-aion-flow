@@ -16,18 +16,24 @@ Full per-combination tables for every head live in the interactive HTML deck
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-import matplotlib
+DOCS = Path(__file__).resolve().parent
+sys.path.insert(0, str(DOCS))
+from deck_sample import (  # noqa: E402
+    add_sample_argument, hr_note_for, sample_caption, sample_meaning, select_sample,
+)
+
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import matplotlib.image as mpimg
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.image as mpimg  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent
 FIGS = DOCS / "figures"
 ASSETS = DOCS.parent / "assets"
 SLIDE = (13.333, 7.5)
@@ -164,8 +170,19 @@ def main() -> None:
                         help="multi_test_metrics.csv from the multi-target eval")
     parser.add_argument("--counts-csv", type=Path, default=None,
                         help="per-variable usable row counts for the data slide")
+    parser.add_argument("--hr-csv", type=Path, default=None,
+                        help="hr_implied_target.csv; when it is absent the deck says so "
+                             "on the results slide instead of quietly leaving HR out")
+    parser.add_argument("--hr-summary-csv", type=Path, default=None,
+                        help="hr_joint_summary.csv: the joint against the independent-band "
+                             "baseline, on the same rows")
     parser.add_argument("--output", type=Path, default=DOCS / "slides.pdf")
+    add_sample_argument(parser)
     args = parser.parse_args()
+
+    metrics = (pd.read_csv(args.mt_metrics)
+               if args.mt_metrics and Path(args.mt_metrics).exists() else None)
+    hr_note = hr_note_for(metrics, args.hr_csv) if metrics is not None else None
 
     with PdfPages(args.output) as pdf:
         # ---- Title
@@ -377,57 +394,6 @@ def main() -> None:
             ], y=0.30, dy=0.075, fontsize=12.5)
             pdf.savefig(fig); plt.close(fig)
 
-        # ---- TWO-STAGE 1: what phase 1 actually trains
-        if (FIGS / "fig_two_stage_heads.png").exists():
-            fig, ax = new_slide(
-                "Two stages, because one clock cannot serve every head",
-                "phase 1 trains the joint head alone, then the body is frozen and every "
-                "head is refit on cached contexts with its own stopping epoch")
-            image_panel(fig, FIGS / "fig_two_stage_heads.png", (0.025, 0.30, 0.95, 0.52))
-            bullets(ax, [
-                "Left: during phase 1 the marginal flows get no gradient at all. Their "
-                "validation loss still drifts, because the body underneath them keeps "
-                "moving, but they are passengers, not learners.",
-                "Right: refitting on the frozen body is where the marginals are actually "
-                "learned. log Lx falls from 1.71 to 0.16 nats, log SFR from 1.43 to 0.32.",
-                "Phase 2 is cheap by construction: the frozen AION forward runs once per "
-                "split, so per-head early stopping costs almost nothing and no head can "
-                "drag another.",
-            ], y=0.255, dy=0.075, fontsize=12.5)
-            pdf.savefig(fig); plt.close(fig)
-
-        # ---- TWO-STAGE 2: choosing the body, and what the joint buys
-        if (FIGS / "fig_two_stage_select.png").exists():
-            fig, ax = new_slide(
-                "The body is chosen after refitting, not before",
-                "phase 1 validation is the wrong criterion: what matters is how well the "
-                "heads do once they are refit on a given body")
-            image_panel(fig, FIGS / "fig_two_stage_select.png", (0.025, 0.32, 0.95, 0.50))
-            bullets(ax, [
-                "Seven snapshots were swept. The post-refit joint minimum sits at epoch 28, "
-                "and the summed marginals agree, so the choice is not a coin flip.",
-                "Dependence is the summed marginal NLL minus the joint NLL: how many nats "
-                "the joint buys over assuming the four targets are independent.",
-                "It holds near 0.8 nats at every snapshot. That stability, not its size, "
-                "is what makes the joint head worth keeping.",
-            ], y=0.275, dy=0.075, fontsize=12.5)
-            pdf.savefig(fig); plt.close(fig)
-
-        # ---- TWO-STAGE 3: the per-head ledger
-        if (FIGS / "two_stage_heads.csv").exists():
-            hd = pd.read_csv(FIGS / "two_stage_heads.csv")
-            hd = hd.rename(columns={"head": "Head", "val_nll": "val NLL",
-                                    "best_epoch": "stop", "n_train": "n train",
-                                    "n_val": "n val"})
-            fig, ax = new_slide(
-                "Every head, refit on the same frozen body",
-                "each row stopped on its own validation minimum, which is the point of "
-                "phase 2")
-            metric_table(ax, hd[["Head", "val NLL", "stop", "n train", "n val"]],
-                         rect=(0.10, 0.03, 0.80, 0.84), fontsize=11,
-                         left_align_first=True)
-            pdf.savefig(fig); plt.close(fig)
-
         # ---- REDSHIFT: where the headline R2 comes from
         if (FIGS / "fig_perf_vs_z.png").exists():
             fig, ax = new_slide(
@@ -471,14 +437,24 @@ def main() -> None:
             pdf.savefig(fig); plt.close(fig)
 
         # ---- Per-target tables, every input combination (three headline targets)
-        if args.mt_metrics and Path(args.mt_metrics).exists():
-            mt = pd.read_csv(args.mt_metrics)
+        if metrics is not None:
+            mt = metrics
+            # ONE sample declaration for the whole table. `--sample both` puts a
+            # common row and a native row in the table for each combination, and
+            # this slide renders one visual row per CSV row: without the filter a
+            # 15-combination table comes out with 30 rows and no way to tell which
+            # is which.
+            mt, sample = select_sample(mt, args.sample, source=str(args.mt_metrics))
             for head, label in TABLE_HEADS:
                 rows = mt[mt["head"] == head]
                 if not len(rows):
                     continue
                 rows = rows.sort_values("r2", ascending=True, na_position="first")
-                fig, ax = new_slide(label, f"n = {int(rows.iloc[0].n_test):,} test sources")
+                # n_test is the head's whole labelled test pool and does not depend
+                # on the combination, so it is NOT "the n" of any row here.
+                fig, ax = new_slide(
+                    label,
+                    f"{sample_caption(sample, rows)} · {sample_meaning(sample, short=True)}")
                 paper_table(ax, combo_table(rows), indicator_cols=4,
                             numeric_cmaps={r"$R^2$": _ramp(plt.cm.Blues),
                                            "Info Gain": _ramp(plt.cm.Purples),
@@ -491,7 +467,45 @@ def main() -> None:
                             "test set, all inputs · reference marks are a flow given only "
                             "emission-line fluxes")
         image_panel(fig, FIGS / "fig_results_v3.png", (0.03, 0.04, 0.94, 0.77))
+        if hr_note:
+            # The HR row used to disappear from this figure without a word,
+            # because both consumers guard on .exists(). State the absence.
+            fig.text(0.045, 0.055, hr_note, fontsize=10, color=MUTED, va="bottom",
+                     wrap=True)
         pdf.savefig(fig); plt.close(fig)
+
+        # ---- HR: does the joint beat independent bands? (Run B's headline)
+        if args.hr_summary_csv and Path(args.hr_summary_csv).exists():
+            hs = pd.read_csv(args.hr_summary_csv)
+            cols = [c for c in ("subset", "n", "corr_joint", "r2_joint", "halfwidth_joint",
+                                "corr_independent", "r2_independent", "halfwidth_independent")
+                    if c in hs.columns]
+            if len(hs) and cols:
+                nice = {"subset": "subset", "n": "n", "corr_joint": "corr (joint)",
+                        "r2_joint": "R$^2$ (joint)", "halfwidth_joint": "68% half-width (joint)",
+                        "corr_independent": "corr (indep.)", "r2_independent": "R$^2$ (indep.)",
+                        "halfwidth_independent": "68% half-width (indep.)"}
+                shown = hs[cols].copy()
+                for c in cols:
+                    if c not in ("subset", "n"):
+                        shown[c] = shown[c].map(lambda v: "-" if pd.isna(v) else f"{v:+.3f}")
+                shown = shown.rename(columns=nice)
+                has_ind = "corr_independent" in cols
+                fig, ax = new_slide(
+                    "Hardness ratio: joint bands vs independent bands",
+                    "same sources, same per-band flux/rate constants, both recomputed in "
+                    "this run" if has_ind else
+                    "this run has no independent-band baseline, so the joint stands alone")
+                metric_table(ax, shown, rect=(0.03, 0.55, 0.94, 0.30), fontsize=11,
+                             left_align_first=True)
+                bullets(ax, [
+                    "Hardness is a function of the DIFFERENCE of the two log fluxes and of "
+                    "nothing else, so the only thing the joint adds over two marginals is "
+                    "their dependence.",
+                    "The independent rows are drawn from this run's own P2 and P3 marginal "
+                    "heads on the same sources, not quoted from an earlier run.",
+                ], y=0.42, dy=0.10, fontsize=13)
+                pdf.savefig(fig); plt.close(fig)
 
         # ---- Modality UpSet, one slide per target
         for head, lbl in (("log_ml_flux_1", "log flux"), ("log_lx", "log $L_X$"),

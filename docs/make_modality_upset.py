@@ -14,19 +14,32 @@ for all-four, since the rightmost bar is that value.
 
 Palette matches the paper's performance-by-redshift figure.
 
-    python docs/make_modality_upset.py --metrics .../multi_test_metrics.csv
+This figure compares bars AGAINST EACH OTHER -- a bar below a dotted line it
+contains is redundancy -- so it is only meaningful within one row set. That is
+what `--sample common` buys, and it is why this script now filters on the sample
+column instead of `dict(zip(input_group, ig))`, which kept whichever row pandas
+saw last and therefore threw the common-sample numbers away.
+
+    python docs/make_modality_upset.py --metrics .../multi_test_metrics.csv \
+        --sample common
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import matplotlib
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deck_sample import (  # noqa: E402
+    add_sample_argument, cross_combo_warning, sample_caption, sample_meaning, select_sample,
+)
+
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -111,7 +124,7 @@ def value_label(ax, x, v, hi) -> None:
 
 
 def panel(ax, values: dict[str, float], order, title: str,
-          baseline: float = np.nan) -> None:
+          baseline: float = np.nan, subtitle: str = "", warning: str | None = None) -> None:
     xs = np.arange(len(order))
     vals = np.array([values.get(key(c), np.nan) for c in order], float)
     hi = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
@@ -129,7 +142,18 @@ def panel(ax, values: dict[str, float], order, title: str,
         if np.isfinite(v):
             ax.axhline(v, ls="-", lw=2.0, color=COLOR[m], alpha=0.95, zorder=2)
     ax.set_ylabel("information gain [nats]", fontsize=13)
-    ax.set_title(title, fontsize=17, color=INK, loc="left", pad=12)
+    ax.set_title(title, fontsize=17, color=INK, loc="left", pad=26 if subtitle else 12)
+    if subtitle:
+        # The row set is part of the number, so it goes on the figure, not in a
+        # commit message: these bars are read against each other.
+        ax.annotate(subtitle, xy=(0.0, 1.0), xycoords="axes fraction",
+                    xytext=(0, 10), textcoords="offset points",
+                    fontsize=10.5, color=MUTED, ha="left", va="bottom")
+    if warning:
+        ax.annotate(warning, xy=(1.0, 1.0), xycoords="axes fraction",
+                    xytext=(0, 10), textcoords="offset points",
+                    fontsize=10.5, color="#D55E00", ha="right", va="bottom",
+                    fontweight="bold")
     ax.grid(axis="y", color=GRID, lw=0.7, zorder=0)
     ax.set_axisbelow(True)
     ax.set_xticks([])
@@ -166,9 +190,12 @@ def main() -> None:
     ap.add_argument("--baseline", type=Path, default=None,
                     help="baseline_lines_only_clean.csv; drawn as the leftmost grey bar")
     ap.add_argument("--single-label", default="log flux")
+    add_sample_argument(ap)
     args = ap.parse_args()
 
     df = pd.read_csv(args.metrics)
+    df, sample = select_sample(df, args.sample, source=str(args.metrics))
+    warning = cross_combo_warning(sample)
     order = combo_order()
     args.figdir.mkdir(parents=True, exist_ok=True)
 
@@ -182,6 +209,8 @@ def main() -> None:
     handles = [Patch(facecolor=COLOR[m], edgecolor="none",
                      label=f"{NICE[m]}  ({LETTER[m]})") for m in MODALITIES]
     for head, lbl, d in targets:
+        # select_sample has already guaranteed one row per input_group, so this
+        # dict can no longer silently drop half the table.
         vals = dict(zip(d.input_group.astype(str), d.info_gain_nats.astype(float)))
         fig, ax = plt.subplots(figsize=(13.2, 6.0))
         bval = np.nan
@@ -190,7 +219,9 @@ def main() -> None:
             if len(r):
                 bval = float(r.info_gain_nats.iloc[0])
         panel(ax, vals, order, f"{lbl}: information gain by input combination",
-              baseline=bval)
+              baseline=bval,
+              subtitle=f"{sample_caption(sample, d)} · {sample_meaning(sample, short=True)}",
+              warning=warning)
         fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False,
                    fontsize=14, bbox_to_anchor=(0.5, -0.035), handlelength=1.8,
                    handleheight=1.4, columnspacing=1.9)

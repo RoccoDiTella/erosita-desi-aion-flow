@@ -2,21 +2,26 @@
 """V3b multi-target figures: per-target results and per-head training diagnostics.
 
     python docs/make_v3b_figures.py --history v3b_history.json \
-        --train-history v3b_train_history.json [--metrics multi_test_metrics.csv]
+        --train-history v3b_train_history.json [--metrics multi_test_metrics.csv] \
+        [--sample common]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-import matplotlib
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deck_sample import add_sample_argument, sample_caption, select_sample  # noqa: E402
+
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 FIGS = Path(__file__).resolve().parent / "figures"
 INK, ACCENT, MUTED = "#1a1a1a", "#0072B2", "#6a6a6a"
@@ -39,14 +44,23 @@ def load_hist(path: Path, key_filter: str) -> list[dict]:
     return [r for r in d if r.get(key_filter) is not None]
 
 
-def results_figure(metrics_csv: Path | None, hr: dict | None, out: Path) -> None:
+def results_figure(metrics_csv: Path | None, hr: dict | None, out: Path,
+                   sample: str | None = None) -> None:
     """Per-target R2 and info gain for the multi-target model (HR implied)."""
     rows = []
+    caption = ""
     if metrics_csv and metrics_csv.exists():
         t = pd.read_csv(metrics_csv)
+        # One sample first: `--sample both` makes all-inputs two rows per head
+        # and `r.iloc[0]` below would silently be whichever came first.
+        t, chosen = select_sample(t, sample, source=str(metrics_csv))
         t = t[t["input_group"] == "spectra+z+wise+image"]
+        caption = sample_caption(chosen, t)
         for key, label in HEADS[:-1]:
             r = t[t["head"] == key]
+            if len(r) > 1:
+                raise SystemExit(f"[deck] {metrics_csv}: head {key} appears {len(r)} times for "
+                                 f"all-inputs within sample={chosen}; refusing to pick one.")
             if len(r):
                 rows.append({"label": label, "r2": float(r.iloc[0].r2),
                              "ig": float(r.iloc[0].info_gain_nats)})
@@ -89,6 +103,8 @@ def results_figure(metrics_csv: Path | None, hr: dict | None, out: Path) -> None
         for sp in ("top", "right"):
             ax.spines[sp].set_visible(False)
         ax.tick_params(labelsize=10)
+    if caption:
+        fig.text(0.005, 1.0, caption, fontsize=9, color=MUTED, ha="left", va="bottom")
     fig.tight_layout()
     fig.savefig(out, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -135,13 +151,14 @@ def main() -> None:
     ap.add_argument("--best-epoch", type=int, default=19)
     ap.add_argument("--hr-r2", type=float, default=float("nan"))
     ap.add_argument("--hr-ig", type=float, default=float("nan"))
+    add_sample_argument(ap)
     args = ap.parse_args()
 
     FIGS.mkdir(exist_ok=True)
     val_rows = load_hist(args.history, "val/nll_log_ml_flux_1")
     train_rows = load_hist(args.train_history, "train/nll_log_ml_flux_1")
     results_figure(args.metrics, {"r2": args.hr_r2, "ig": args.hr_ig},
-                   FIGS / "fig_v3b_results.png")
+                   FIGS / "fig_v3b_results.png", sample=args.sample)
     curves_figure(val_rows, train_rows, args.best_epoch, FIGS / "fig_v3b_curves.png")
     print(f"wrote {FIGS/'fig_v3b_results.png'} and {FIGS/'fig_v3b_curves.png'}")
 
