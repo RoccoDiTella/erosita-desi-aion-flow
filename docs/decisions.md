@@ -61,6 +61,13 @@ dedup (first occurrence) → **re-split after cleaning** (targetid-grouped 80/10
 seed 42 → 20,160/2,520/2,520 of 25,200). One copy of the data serves both;
 view ≡ the previously materialized version (verified targetid-exact).
 
+> **SUPERSEDED 2026-08-06 (DR2).** The live view is `clean_split_dr2.csv`:
+> **25,582** rows, **20,465 / 2,548 / 2,569** (measured). It is still
+> targetid-grouped, which is **not** leakage-safe — 24,796 unique `ero_detuid`
+> over 25,582 rows means 773 detuids carry more than one DESI fibre, so the same
+> X-ray photons can land on both sides of the split. A detuid-grouped hash split
+> is plan step 11. See §11 below.
+
 ## 2. Targets — exact definitions
 
 | target | definition | source columns |
@@ -70,6 +77,16 @@ view ≡ the previously materialized version (verified targetid-exact).
 | `hr32_u` | arctanh-space hardness, see below | eRASS1 `ML_RATE_P2/P3` |
 | `logmstar` | stellar mass, h=1.0 Chabrier IMF — this is **FastSpecFit's** LOGMSTAR, reaching us via the `agngal` VAC | DESI VAC `logmstar` |
 | `log_sfr` | log10 SFR averaged over 10 Myr, Chabrier IMF — **CIGALE**, a different SED fit than logmstar (deliberately; see 2026-07-28) | DESI DR1 CIGALE VAC `LOGSFR` |
+
+> **RETIRED 2026-08-06: `logmstar` (FastSpecFit) is no longer a trained target.**
+> `logmstar_cigale` supersedes it, so that mass and SFR come from one fit and
+> sSFR is well defined. FastSpecFit has no AGN component, and this sample is 87%
+> QSO by DESI `spectype` (22,299 of 25,582, measured), so it attributes the
+> accretion-disk continuum to stars. The `_ALL_TARGETS` entry **stays** — the
+> per-run drop set is derived by name, so deleting it makes every pre-2026-08
+> checkpoint unloadable — and every run passes `--drop-heads logmstar`.
+> Consequence worth knowing: the SFR-vs-mass guard in eval has never fired
+> because the head is *dropped*, not because the label is absent.
 
 **HR32, specifically** (all verified to ≤2e-15 on 30,375 rows):
 - Bands: **P2 = 0.5–1.0 keV, P3 = 1.0–2.0 keV** count rates. Both sit INSIDE
@@ -105,6 +122,11 @@ failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
   `sig_lo = −log10(1 − LOWERR/F)` **capped at 1.0 dex** (cap active on 1 row),
   `sig_hi = log10(1 + UPERR/F)`. Medians: 0.188 / 0.161 dex.
   The same σ applies to `log_lx` (the distance modulus is z-deterministic).
+  > **DR2 (2026-08-06, measured):** medians are **0.1177 / 0.1053 dex** on the
+  > 25,582-row sample. eRASS:3 is ~2.7x the eRASS1 exposure here. The formula is
+  > unchanged; only the photons are. `sbatch/_dataset.sh` asserts the median
+  > `flux_sig_lo` lands in (0.10, 0.14) before any job starts, which is how a
+  > DR1 file under a DR2 name is caught.
 - HR: symmetric `σ_u` as above.
 - logmstar: **no per-object σ exists in the VAC** (external fetch non-viable), so
   a spectype floor: **0.2 dex (GALAXY), 0.3 dex (QSO/STAR)** — QSO masses are
@@ -128,6 +150,26 @@ failed fits → NaN'd in the sidecar. Loaders exclude non-finite-target rows.
   effective kernel. Multi-draw: `--inject-samples 8`.
 - `none`: paper behavior; σ columns ignored.
 - σ enters standardized space as **σ/std** of the target standardizer.
+
+> **CORRECTED 2026-08-06, on three counts.** The three bullets above are stale
+> and the middle one was never true of `train-multi`.
+> 1. **`convolve` is not the default.** `main.py` sets
+>    `--error-mode ... default="none"`. The "(default, principled)" label above
+>    is wrong and has been since the flag was added.
+> 2. **`train-multi` has no `--error-mode` at all.** The whole three-mode
+>    vocabulary applies only to the single-target path. `train-multi`'s only
+>    error knob is `--no-inject` / `--inject-samples`.
+> 3. **The operating mode is now `--no-inject`**, the reverse of the
+>    `--inject-samples 8` recorded here and of the 50 the launcher passed.
+>    Injection smears each label by its own split-normal error, and on the X-ray
+>    targets that error is most of the residual variance, so the objective is
+>    pulled toward the measurement kernel and away from p(y|x). The estimand is
+>    p(y|x); errors belong in the reported floor. `sbatch/train_multi.sbatch`
+>    passes `--no-inject` unconditionally and no longer has an
+>    `INJECT_SAMPLES` knob.
+>
+> σ-conditioning remains banned, unchanged: a per-source error bar as a model
+> input leaks the target and is unavailable at deployment.
 - **Eval consistency rule:** a convolve-trained checkpoint is *scored* through
   the same kernel (`log_prob_convolved`) — scoring the deconvolved density at
   noisy y against a KDE prior fit on noisy y understates IG structurally.
@@ -1145,3 +1187,369 @@ swing, and reverses the conclusion from "drop the joint head" to "keep it".
 body (2.256).** The body was adequate almost immediately; the joint FLOW was
 badly underfit. The refit used lr 1e-3 against phase 1's head_lr 3e-4, so the
 next phase-1 run should raise `head_lr`.
+
+---
+
+## 11. The DR2 rebuild: sample, selection function, and launcher hygiene (2026-08-06)
+
+Appended, not rewritten. Statements above that this section supersedes carry an
+inline note where they sit; nothing earlier was deleted. Every number below
+marked *measured* was recomputed on this machine on 2026-08-06 from
+`data/dr2/targets_sidecar_dr2.csv`, `data/dr2/clean_split_dr2.csv`,
+`data/clean_split.csv`, `data/targets_extra.csv`,
+`data/erosita_desi_matches_Xray_properties.csv` and `data/match_quality.csv`.
+
+### 11.1 DR1 → DR2 is a depth change, and it is large
+
+eRASS:3 is roughly 2.7x the eRASS1 exposure over this footprint. Comparing on
+the **23,283 sources both clean splits share** — the only like-for-like set —
+(*measured*):
+
+| quantity | DR1 (eRASS1) | DR2 (eRASS:3) |
+|---|---:|---:|
+| median `ML_EXP_1` / `ero_exp` (s) | 120.9 | 330.4 |
+| median `flux_sig_lo` (dex) | 0.1826 | 0.1181 |
+
+Over the full DR2 sample: median `flux_sig_lo` **0.1177**, `flux_sig_hi`
+**0.1053**, median `ero_exp` 326.7 s, median `det_like_0` 31.27 (*measured*).
+The DR1 clean split's own median `flux_sig_lo` was 0.1869.
+
+**This is why `sbatch/_dataset.sh` gates on the sigma distribution rather than
+on a filename.** A required-column check passes for any file that has the right
+headers; a half-merged sidecar, or a DR1 file copied over the DR2 name, does
+not survive `median(flux_sig_lo) in (0.10, 0.14)`. Verified against a
+deliberately half-merged file: it fails at 0.1822.
+
+### 11.2 The 1,917 rows that vanished are a purification, not a loss
+
+1,917 targetids in the DR1 clean split are absent from the DR2 one; 2,299 are
+new. The 1,917 are not quality rejects (*measured*):
+
+- **all 1,917 are `match_class == "correct"` with `keep == True`** in
+  `match_quality.csv` — the crossmatch never doubted them;
+- their DR1 `DET_LIKE_0` median is **7.53**, against **14.12** for the 23,283
+  survivors — they sit right above the eRASS1 detection threshold;
+- per the rebuild plan, none has an eRASS:3 counterpart within 1 arcsec.
+
+Marginal eRASS1 detections that failed to reproduce at 2.7x the exposure are, by
+definition, the ones most likely to have been noise. Their removal makes the
+sample deeper *and* cleaner at once. The operational consequence is the awkward
+one: **no DR1-era metric is comparable to a DR2 one**, because the depth, the
+labels and the row set all moved together.
+
+### 11.3 `p_any` and `match_quality.keep` are orthogonal
+
+`NWAY_p_any` is P(this X-ray source has **any** LS10 counterpart). It does not
+ask whether the DESI fibre sits on that counterpart, which is the failure mode
+`match_quality` was built to catch. The two are not alternatives: **336 of the
+345 sources `match_quality` calls "wrong" have `p_any > 0.5`, median 0.9994.**
+A reliability cut on `p_any` and a spectroscopic cut on `match_class` both have
+to be applied, and neither substitutes for the other.
+
+Second trap: `new_targets_nway.csv` has **zero** targetid overlap with the
+current sample — 0 of 25,582 (*measured*) — so every `p_any` threshold quoted
+from it (97,343 at >0.5, 90,955 at >0.8, 86,463 at >0.9) is a statement about
+the 104,945-row **expansion**, not about anything we train on. The column that
+covers both samples in one convention is `NWAY_p_any` in
+`eRASSc3_Main_LS10.fits`.
+
+> **Updated same day.** This paragraph ended "and it is not yet wired in". That
+> is true of the *artifacts* and false of the *code*: `scripts/make_split.py`
+> applies `--min-p-any` with a default of **0.5**, so it is cut 5 of the
+> selection function for everything built from here on. What is still missing is
+> the carry: `make_dr2_targets.py` has to bring `NWAY_p_any` across from
+> `eRASSc3_Main_LS10.fits`, and until it does, `make_split.py` exits with
+> "--targets carries no nway_p_any" rather than silently skipping the cut. See
+> §11.9 for the decision and the per-class cost.
+
+### 11.4 The CIGALE labels already carry the keep cut, silently
+
+`scripts/make_targets_sidecar.py` builds its universe from
+`match_quality.loc[mq.keep]`. So every `logmstar_cigale` (19,210), `log_sfr`
+(17,144) and `log_mbh_*` value in the sidecar is `keep == True` **by
+construction**. Two consequences:
+
+1. Applying `keep` again to the 17,118-row M*+SFR+Lx sample costs **exactly
+   zero rows** (*measured*). Anyone reporting it as an additional cut is
+   reporting a no-op.
+2. Rebuilding the sidecar for the 104,945-row expansion with that gate in place
+   yields **zero** CIGALE labels, because `match_quality` has no rows for those
+   targetids. The gate has to become an explicit `--universe` argument before
+   the expansion can be labelled at all.
+
+Related defect found while re-measuring (*measured*): **`ref_log_ssfr` is
+finite for 19,210 rows, exactly the `logmstar_cigale` population, while
+`log_sfr` is finite for 17,144.** `add()` applies `--max-sigma 1.0` to the
+targets; `ref_log_ssfr` is computed from the raw `LOGSFR`/`LOGM` arrays and
+never sees it. The reference used to validate a model-implied sSFR therefore
+includes 2,066 SFR values judged too uncertain to train on. On the overlap the
+identity is exact (max residual 5.3e-15).
+
+### 11.5 One detection gate replaces three stacked cuts
+
+`DET_LIKE_MIN = 6.0` is now a single module constant in `multitarget.py`. Six is
+the eRASS Main catalogue's own inclusion rule, so the selection function we
+report is the catalogue's rather than one we invented, and §1 already records
+its P(spurious) ~ 14%. It was 5 until 2026-08-06.
+
+The load-time `max_sigma = 1.0` gate is retired — `None` on every target. It
+removes **zero rows in every band at either threshold** once detection is
+applied (*measured*):
+
+| band | finite | + max_sigma | DET>5 | DET>5 & sigma | DET>6 | DET>6 & sigma |
+|---|---:|---:|---:|---:|---:|---:|
+| P1 | 23,364 | 22,583 | 14,122 | **14,122** | 12,847 | **12,847** |
+| P2 | 25,275 | 25,095 | 20,924 | **20,924** | 19,759 | **19,759** |
+| P3 | 25,113 | 24,842 | 20,269 | **20,269** | 19,102 | **19,102** |
+| P4 | 17,219 | 14,399 | 3,736 | **3,736** | 3,071 | **3,071** |
+
+P2-AND-P3, the joint's row set: 17,029 at DET>5, **15,589** at DET>6. On the
+CIGALE targets the load-time gate was a *second* copy of a cut
+`make_targets_sidecar.add()` had already applied at build time, invisible to
+anyone reading the sidecar. Availability is now decided by detection alone, so
+the selection function is one line per band. The move from 5 to 6 is a
+documented no-op on the broad band here (`det_like_0 > 6` for **all** 25,582
+rows, min exactly 6.00, *measured*) and costs the P2xP3 joint about 16% on the
+expansion.
+
+`log_ml_flux_1` and `log_lx` now read from the sidecar rather than the staged
+HDF5, so both are DR2 values. 33 rows have neither: they are censored by the
+sidecar's own SIG_CAP at build, not by detection.
+
+### 11.6 Launcher hygiene (plan step 14)
+
+**`sbatch/_dataset.sh` (new), sourced by `train_multi`, `eval_multi` and
+`posterior_structure`.** It requires `DATASET=dr2` — there is no default —
+resolves the split/sidecar/staged trio, and runs one preflight that checks the
+required columns (derived from `_ALL_TARGETS`, so a new head extends the gate
+for free) plus the sigma-median assertion of §11.1.
+
+The bug it closes was live: three launchers defaulted to the DR1 trio while
+`posterior_structure.sbatch` defaulted to the DR2 one. `--export=ALL` on a
+DR1-defaulted launcher is now a hard crash rather than a wrong run, because the
+DR1 sidecar lacks every detection column; but the reverse — analysing a
+DR1-trained checkpoint against DR2 labels — was silent. Naming the dataset at
+submit time puts it in the environment, the SLURM record and the failure text.
+
+**The `dr1` branch was deleted rather than given its own column list.** The DR1
+sidecar has none of the nine columns the detection-gated targets need
+(*measured*), so such a branch could only ever resolve paths to a crash.
+
+**No launcher enables injection.** See the correction block in §3 for why the
+mode reversed.
+
+> **Precision fix, same day.** This paragraph originally read "`--no-inject` on
+> every launcher", which could never be literally true. `--no-inject` is a
+> **`train-multi` flag only** (`main.py:1014`); the single-target `train`
+> subcommand has no such option and its error knob is `--error-mode`
+> (`main.py:883`, default `none`). Until 2026-08-06 `train.sbatch:53` and
+> `train_smoke.sbatch:38` still passed `--error-mode "$ERROR_MODE"` under
+> comments advertising `inject` as "the adopted training mode", so the reversal
+> recorded in §3 had not actually reached those two files. The accurate
+> invariant, and what the files now do: **`train_multi.sbatch` passes
+> `--no-inject`; `train.sbatch` and `train_smoke.sbatch` pass a hardcoded
+> `--error-mode none` and no longer expose a knob that can select `inject`.**
+> `CLAUDE.md:41` still states the stronger form and is wrong on that clause;
+> `main.py:886`'s help text still calls inject "the adopted training mode".
+> Both are outside this stream.
+
+**Account and partition: an `--account` line added to all three sbatch headers,
+and the value is `finkbeiner_lab` / `-p gpu`.** Every header previously had no
+`--account` line at all, which is the real defect that was fixed here.
+
+> **RETRACTION, same day.** This paragraph originally recorded the account as
+> having been *corrected to* `siag_lab` / `siag_gpu`. That was wrong and is
+> reverted. `siag_lab` has not landed. Measured against the scheduler on
+> 2026-08-06, not inferred:
+>
+> * `sacctmgr -nP show assoc user=rditella` returns `finkbeiner_lab` only
+> * `sbatch --test-only -A siag_lab -p siag_gpu` returns
+>   *"allocation failure: Invalid account or account/partition combination
+>   specified"*
+> * `sbatch --test-only -A finkbeiner_lab -p gpu` schedules, as does `gpu_test`
+>
+> Had this shipped, every submission would have failed at sbatch where the old
+> config worked. **The trap worth remembering:** `siag_gpu` IS visible in
+> `sinfo` (14-day walltime), and `FASRC_NOTES.md:60` states the partition is
+> hidden until you are in the group. That is no longer true, so visibility is
+> not a membership test. Only a dry-run submit settles it, and it costs seconds.
+
+`posterior_structure.sbatch` did move off `gpu_h200`, and that stands: TRES
+weight 2651.5 against A100's 836.5 means an H200 hour only pays above a 3.2x
+speedup, and that job is a single forward plus sampling.
+
+Batch sizes need no retuning: `--bucket-chunk 224` was calibrated on an
+A100-80GB and `gpu` is where we are actually running. (The retracted version
+claimed a move to 40 GB cards and therefore a retune.)
+
+**Storage root** `AIONFLOW_ROOT` stays at
+`/n/netscratch/finkbeiner_lab/Lab/rditella/aionflow`, verified in active use:
+the checkpoint path recorded in `results/dr2_37257713/posterior_structure_*.json`
+(written 2026-08-05) is under it. With the account unchanged there is no longer
+any question about write access surviving a move.
+
+### 11.7 Two gaps this section does not close
+
+**The registry has no row for the only DR2-trained model.** §6 ends at the DR1
+runs; `p1-dr2-37257713` produced four live deck figures and every posterior
+structure JSON in `results/dr2_37257713/`, and has no entry. Its numbers were
+not re-derivable from this workstation, so none are invented here.
+
+**`docs/figures/data_counts.csv` is still DR1.** `build_deck.sh` has been
+repointed at the DR2 sidecar and split, but `make_data_figures.py` recomputes
+`log_ml_flux_1` and `log_lx` from the DR1 merged HDF5 — overwriting the DR2
+columns — and inner-joins against it, which holds 24,181 of the 25,582 DR2
+targetids (*measured*). Regenerating today would produce a mixed-provenance
+artifact, which is worse than a consistently stale one. The DR2 counts are
+tabulated in `docs/DATA.md` §3 in the meantime.
+
+### 11.8 The sample size forks, and the docs now say which file they mean
+
+**Decision: every count in the docs names the artifact and the date it
+describes, and there is one register rather than numbers sprinkled in prose.**
+The register is `docs/DATA.md` §0.
+
+The problem it fixes. The artifacts on disk hold **25,582** rows (re-measured
+2026-08-06: `targets_sidecar_dr2.csv` built 2026-08-04 16:56, 25,582 rows and 47
+columns; `clean_split_dr2.csv` built 2026-08-04 17:03, 25,582 rows, train 20,465
+/ val 2,548 / test 2,569, sha256 `04442bab…`). The rebuild chain of `DATA.md`
+§7 is designed to emit **25,454** target rows and a split of about **22,800**
+(18,275 / 2,274 / 2,251) — figures taken from
+`docs/rebuild_integration_2026-08-06.md` §3 C1 and **not measured here**, since
+`dr2_targets.csv` and `manifest_dr2.csv` do not exist on this machine. Every
+doc, comment and fixture in the tree was written to 25,582, which is right about
+today's file and silently wrong about tomorrow's, and no filename distinguishes
+them.
+
+Three consequences worth stating separately:
+
+1. **768 vs 773 is not a typo, and the mislabel behind it is now closed.** 773
+   detuids carry more than one DESI fibre in the live 25,582-row file
+   (re-measured 2026-08-06: 24,796 unique detuids over 25,582 rows, hence 786
+   excess rows). On the unbuilt 25,454-row target table the same two quantities
+   are 756 and 768. Both pairs are right on their own row set; the actual error
+   was quoting 768 as a count of *detections*, which it never was.
+   `make_split.py`'s docstring now carries both row sets as a table and names
+   the old statement as wrong, so this is fixed at the source rather than merely
+   annotated here. `DATA.md` §3 reproduces that table.
+2. **The rebuild overwrites its own evidence.** `make_split.py`'s example writes
+   `--out data/dr2/clean_split_dr2.csv`, on top of the live split. `DATA.md` §7
+   now writes `clean_split_dr2_v2.csv` instead, and §0 carries the hazard box.
+   Repointing `sbatch/_dataset.sh` is the matching change and is not ours.
+3. **Nothing is marked "stale" line by line.** That was tried and it is noise.
+   `DATA.md` §0, `pipeline.md`'s header block and `targets.md`'s header block
+   each state once that all their counts describe the 2026-08-04 artifacts and
+   that the rebuild moves them.
+
+### 11.9 `p_any > 0.5` is the fifth selection cut, and it is charged to the galaxies
+
+**Decision (the user's, recorded here): `p_any > 0.5`, carried as a column so a
+different threshold is a re-split away, with the per-class cost written into the
+split provenance rather than left to be rediscovered.**
+
+`scripts/make_split.py:130` defaults `--min-p-any 0.5`, so the documented rebuild
+applies it whether or not anyone names it. `DATA.md` §5 previously described the
+selection function as **four** stacked cuts and said the covering `p_any` column
+was "not yet wired in"; that was true of the artifacts and false of the code,
+and running the documented chain therefore changed the science sample in a way
+the selection-function section denied. It is now stated as cut **5** of five.
+
+**Why this one needs a decision and not a footnote.** GALAXY is the science arm
+and QSO is the negative control. Counterpart ambiguity correlates with extended
+faint hosts, which are exactly the galaxies where sSFR is measurable, so this is
+a selection correlated with the estimand applied hardest to the arm that carries
+the result. The recorded costs of `p_any > 0.5`:
+
+| scope | QSO lost | GALAXY lost | source |
+|---|---:|---:|---|
+| full sample | **1.2%** | **12.5%** | `rebuild_integration_2026-08-06.md` §3 C2 |
+| Run A sample (M*+SFR+Lx complete) | 0.9% | 6.8% | `rebuild_plan_2026-08-06.md` §3 D1 |
+
+**Neither pair is reproducible on this workstation** (verified 2026-08-06: no
+current-sample row carries `nway_p_any` anywhere in `data/dr2/`; the live
+sidecar's 47 columns do not include it). They are measured on different row
+sets, which explains part of a roughly 2× disagreement on GALAXY but has not
+been shown to explain all of it. **Re-measure both against the rebuilt target
+table before either figure reaches a draft.** `make_split.py` prints the
+per-class cost and writes `p_any_cost_by_spectype` into the split provenance
+JSON; that is the number of record. It keys on the target table's `spectype`
+column, i.e. the DESI classes of §11.10, which is the right column for it.
+
+The catalogue's own recommendation is *looser* than 0.5: `NWAY_threshold6` has
+median 0.045 over our rows and 25,136 of 25,218 already clear their own row's
+threshold (`rebuild_plan` §3 D1). Choosing 0.5 is ours, not the catalogue's, and
+is recorded here as such.
+
+**Two follow-ups this decision does not close, both in files this stream does
+not own.** First, the comment at `make_split.py:123-132` still calls 0.5 "a
+placeholder default, not a recorded choice" and still describes `DATA.md` as
+stating four cuts with `p_any` "not yet wired in" — both stale as of this
+entry, and a reader who opens the splitter before the docs will conclude the
+threshold is unsettled. Second, `make_split.py:185-187` exits when
+`--min-p-any > 0` and the target table has no `nway_p_any`, and nothing in
+`data/dr2/` carries that column yet (verified 2026-08-06), so step 4 of the
+`DATA.md` §7 chain cannot be run against the live sidecar — only against a
+target table rebuilt by `make_dr2_targets.py`, which maps `NWAY_p_any` at
+`:56`. Neither is a defect in the decision; both are ordering constraints on
+executing it.
+
+### 11.10 Which class column is authoritative, and for what
+
+**Decision: DESI `spectype` is the class column. `cigale_spectype` answers a
+different question and is authoritative only for that question.**
+
+- **DESI `spectype`** — QSO 22,299 / GALAXY 3,277 / STAR 6 on the live 25,582
+  rows (*measured* 2026-08-06, joined from
+  `data/erosita_desi_dr1_matches_all_properties.csv`, which covers 25,582 of
+  25,582). Authoritative for: the QSO negative control, the GALAXY science arm,
+  every per-class metric split, and the `p_any` cost breakdown of §11.9.
+- **`cigale_spectype`** — QSO 21,758 / GALAXY 2,764 / NaN 1,060, zero STARs
+  (*measured* 2026-08-06 on the same rows). Authoritative for: **whether a row
+  has a CIGALE SED fit at all.** Its NaNs mean "not fitted", not "unclassified";
+  its zero STARs mean the fit was never attempted, not that the sample has no
+  stars. Using it as the class arm drops 513 galaxies and hides all 6 stars
+  inside the 1,060.
+
+The live sidecar carries only `cigale_spectype` (verified: 47 columns,
+`spectype` absent), so today's class arms are built on the wrong column. Plan
+step 12 carries `spectype` across.
+
+**The switch is silent-but-stamped.** `scripts/make_run_packet.py:58` resolves
+the class column in preference order `("spectype", "cigale_spectype")`, so
+`by_spectype.csv` changes its class definition on the first run after the
+sidecar gains `spectype` — no flag, no error, different numerator. It writes the
+resolved name into a `class_col` column, so two packets can be told apart;
+**check `class_col` before comparing them.** `sbatch/posterior_structure.sbatch:49`
+still defaults `GROUP_COL=cigale_spectype` and will *not* follow, so the packet
+and the posterior report can disagree about what "GALAXY" means inside one run.
+Needed change, not this stream's file: `GROUP_COL="${GROUP_COL:-spectype}"` once
+the sidecar carries it. The same launcher's `GROUP_CSV="${GROUP_CSV:-}"` leaves
+grouping off entirely despite the comment above it claiming a default, so the
+by-class report is not produced at all today.
+
+### 11.11 The documented rebuild chain was missing a required step
+
+**Decision: the chain is five steps and builds the manifest twice.** Written out
+with real invocations in `DATA.md` §7.
+
+`DATA.md` previously listed three steps — `make_dr2_targets` →
+`make_targets_sidecar` → `make_split` — and `scripts/build_manifest.py` appeared
+in no doc at all. That chain cannot run as written: `make_split
+--require-spectrum` reads the manifest, and the manifest's `split` column is
+only meaningful after the split exists, so neither can go first. The order is
+`make_dr2_targets` → `make_targets_sidecar` → `build_manifest` (no `--split`) →
+`make_split --require-spectrum manifest` → `build_manifest --split`.
+
+Two reasons the manifest is load-bearing rather than bookkeeping:
+
+- **Without `--require-spectrum` the split's fractions describe a sample that
+  cannot train.** A source with no spectrum has no staged row at all, so its
+  presence inflates every reported split count.
+- **`build_manifest.wise_presence` is the only correct definition of
+  `has_wise`**: `flux > 0 AND ivar > 0` per band, OR'd across bands. LS10 and
+  DESI write a finite number in every W band for all 25,582 rows, so a
+  finiteness rule marks WISE universally present and makes the entire WISE
+  ablation inert. It is the catalogue-side rule and can see `zwarn` and the WISE
+  ivars, which a training batch cannot; it is complementary to
+  `data_to_aion_embeddings.modality_presence()`, which is the batch-side rule,
+  and neither replaces the other.

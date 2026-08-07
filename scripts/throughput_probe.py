@@ -69,7 +69,7 @@ def main() -> None:
     device = torch.device("cuda")
     max_bs = max(args.batch_sizes)
     train_loader, _, _ = build_dataloaders(
-        staged_dir=args.staged_dir, target_name="log_ml_flux_1",
+        staged_dir=args.staged_dir, target_name=None,
         batch_size=max_bs, num_workers=8, seed=0,
         clean_split_csv=args.clean_split_csv,
     )
