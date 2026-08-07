@@ -18,6 +18,12 @@ becomes log10(F) with
 so a source whose lower error swallows its flux is treated as unmeasured rather
 than given an infinite bar.
 
+Counts (`ape_cts_*`, `ape_bkg_*`, `ape_exp_*`, `ml_cts_*`, ...) are carried too,
+raw and untransformed, because a Poisson likelihood on them is the only way a
+non-detection stays in the sample: eSASS reports aperture photometry for every
+catalogued source, so `N = 0` is a measurement and `log10(0)` is not. See the
+block comment on `APE_COLUMNS` for the three traps in those columns.
+
 DESI-side labels (CIGALE M*, SFR, black-hole mass) are deliberately NOT carried
 here. They used to be, read out of the previous sidecar via --old-sidecar, which
 made the DR2 table depend on the DR1 table it was meant to replace and left the
@@ -45,6 +51,81 @@ import astropy.units as u
 
 BANDS = (1, 2, 3, 4)
 SIG_CAP = 1.5          # dex; beyond this the measurement carries no information
+
+# Counts, for a Poisson likelihood. eSASS reports these for 100% of catalogued
+# sources in every band (measured 2026-08-07 on all 1,975,540 rows of
+# eRASS3_Main_v1.3.fits: every APE_* and every ML_CTS/RATE/EXP/EEF column is
+# finite on 100.0000% of rows), so a non-detection is an exact ZERO COUNT and
+# not a missing value. That is the whole reason to carry them: log(0) = -inf
+# destroys those rows, N = 0 is ordinary data.
+#
+#   APE_*  aperture photometry in an APE_RADIUS circle (units are PIXELS of 4
+#          arcsec, per the column's own TCOMM, so the ~7-10 pix radii are
+#          ~30-40 arcsec, set by eROSITA's ~30 arcsec survey PSF). This is what
+#          `N ~ Poisson(lambda * t + B)` is written against: N = APE_CTS,
+#          t = APE_EXP, B = APE_BKG, all per-band and per-source. The catalogue
+#          defines APE_CTS as "Total counts extracted within the aperture" --
+#          SOURCE PLUS BACKGROUND, which is why B is an additive term in the
+#          likelihood and must not also be subtracted from N.
+#   ML_*   the PSF-fitted alternative, carried so aperture-vs-PSF can be
+#          compared rather than assumed (RUN_PLAN §3(d)). ML_CTS is "Source NET
+#          counts", already background-subtracted and NOT an integer, so it is
+#          the wrong quantity for a Poisson likelihood and the right one for a
+#          cross-check. ML_EXP is the VIGNETTED exposure at the source position;
+#          APE_EXP is the exposure-map value (they agree to a median ratio of
+#          1.00000 in every band on the current sample).
+#
+# Bands, from the header: 1 = 0.2-2.3 keV (the broad band behind log_lx),
+# P1 = 0.2-0.5, P2 = 0.5-1.0, P3 = 1.0-2.0, P4 = 2.0-5.0.
+#
+# Carried RAW, in catalogue units, with no threshold, no repair and no
+# transform, per this file's stated principle. Three things a consumer must know
+# and cannot see from the column name, all measured 2026-08-07 on the full
+# parent catalogue:
+#
+# 1. APE_CTS IS int16 IN THE FITS ('I') AND IT OVERFLOWS. Rows with a negative
+#    APE_CTS: 20 in band 1, 2 in P1, 5 in P2, 8 in P3, 4 in P4 (of 1,975,540),
+#    always on sources whose ML_CTS is 5e4-9e5, i.e. the count wrapped past
+#    32,767. It is NOT repaired here: +65536 is a transform, it is not
+#    invertible (a source past 98,303 counts wraps twice, and a wrap can land
+#    back on a plausible positive number -- 7 band-1 rows already sit above
+#    |30,000|), and the catalogue value is what we promised to carry. The build
+#    PRINTS the count instead, so a rebuild that pulls in a bright source says
+#    so; a run that uses these columns must drop or repair them itself.
+# 2. APE_BKG can be slightly NEGATIVE: 20 rows in band 1 (min -13.5 counts),
+#    0 rows in P1-P4. Background-map subtraction, not a count. A Poisson
+#    likelihood needs B >= 0 and must clip or drop those.
+# 3. APE_POIS is the probability that the aperture counts are a background
+#    fluctuation alone -- verified numerically as poisson.sf(APE_CTS - 1,
+#    APE_BKG), matching to float32 on a 40,000-row slab -- with -9.99 as the
+#    SENTINEL wherever that statistic is undefined. It is a probability, not a
+#    log, so -9.99 is not a small number, it is "not computed". On the 25,454-row
+#    current sample the sentinel lands on EXACTLY the rows with no counts
+#    (ape_cts == 0: 1,744 in p1, 176 in p2, 332 in p3, 3,469 in p4, all four
+#    matching row for row) plus, in band 1 where nothing has zero counts, the 2
+#    rows with a negative ape_bkg.
+#
+# ML_EEF is a per-band CONSTANT, verified: exactly one distinct value per band
+# over all 1,975,540 rows -- 0.8836025 (band 1 and P3, the same number),
+# 0.89230239 (P1), 0.88694167 (P2), 0.85624605 (P4). It is carried anyway
+# because it is a catalogue value and the aperture/EEF systematic on a hardness
+# ratio (RUN_PLAN §3(d)) should read it from the table rather than from a
+# hardcode that goes stale at the next data release.
+#
+# NOT carried: ML_CTS_ERR/LOWERR/UPERR. A Poisson likelihood on the counts needs
+# no error bar, and one of the three is a units trap: ML_CTS_UPERR_Pn is bit for
+# bit ML_RATE_UPERR_Pn (100.0000% of rows in P2/P3/P4, 1,975,537 of 1,975,540 in
+# P1), i.e. ct/s, despite its own TUNIT saying "count" -- while ML_CTS_ERR and
+# ML_CTS_LOWERR really are counts, and the broad band _1 is exempt in all three.
+# RUN_PLAN §3.1 has the full measurement; the short version is that "multiply
+# them all by ML_EXP" inflates two of the three by the exposure.
+APE_COLUMNS = {"APE_CTS": "ape_cts", "APE_BKG": "ape_bkg", "APE_EXP": "ape_exp",
+               "APE_RADIUS": "ape_radius", "APE_POIS": "ape_pois"}
+ML_COUNT_COLUMNS = {"ML_CTS": "ml_cts", "ML_RATE": "ml_rate", "ML_EXP": "ml_exp",
+                    "ML_EEF": "ml_eef"}
+# FITS band suffix -> ours. "1" is the broad band, already the source of
+# log_ml_flux_1 and log_lx; P1-P4 are the sub-bands behind log_flux_p1..p4.
+BAND_SUFFIX = [("1", "1")] + [(f"P{b}", f"p{b}") for b in BANDS]
 
 # Carried verbatim off the matched counterpart row, FITS name -> our name.
 COUNTERPART_COLUMNS = {
@@ -267,6 +348,32 @@ def main() -> None:
     out["det_like_0"] = col("DET_LIKE_0")
     for b in BANDS:
         out[f"det_like_p{b}"] = col(f"DET_LIKE_P{b}")
+
+    # ---- counts, background and exposure per band (see APE_COLUMNS above) ----
+    # int32, not float: these are counts, and a CSV column of "9.0" invites a
+    # consumer to treat an exact integer as a measurement with a decimal part.
+    # The cast widens int16 but does NOT undo the wrap, by design.
+    icol = lambda c: np.asarray(mn[c]).astype(np.int32)[r]
+    for fits_b, ours in BAND_SUFFIX:
+        for src, dst in APE_COLUMNS.items():
+            name = f"{src}_{fits_b}"
+            out[f"{dst}_{ours}"] = icol(name) if src == "APE_CTS" else col(name)
+        for src, dst in ML_COUNT_COLUMNS.items():
+            if src == "ML_EXP" and fits_b == "1":
+                continue                      # already carried, as ero_exp
+            out[f"{dst}_{ours}"] = col(f"{src}_{fits_b}")
+
+    # Loud, because both are unusable in a Poisson likelihood and both are rare
+    # enough to slip through unnoticed. Silence here means the sample is clean.
+    for _, ours in BAND_SUFFIX:
+        n_wrap = int((out[f"ape_cts_{ours}"] < 0).sum())
+        n_negb = int((out[f"ape_bkg_{ours}"] < 0).sum())
+        if n_wrap:
+            print(f"[counts] ape_cts_{ours}: {n_wrap:,} rows NEGATIVE -- int16 overflow in "
+                  f"the parent catalogue, carried raw; a counts run must drop or repair them")
+        if n_negb:
+            print(f"[counts] ape_bkg_{ours}: {n_negb:,} rows negative (background subtraction); "
+                  f"a Poisson likelihood needs B >= 0")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.out, index=False)

@@ -27,7 +27,7 @@ missing capabilities, in the order they should be built.
 
 | # | blocker | why it blocks | effort |
 |---|---|---|---|
-| B1 | **Counts columns are not carried.** `dr2_targets.csv` has no `APE_CTS/BKG/EXP`, no `ML_CTS`, no `ML_RATE`, no `ML_EEF`. | The Poisson likelihood is impossible without them. Every ingredient is already in the FITS, so this is a column list plus a ~15 min chain re-run. **Trap:** `ML_CTS_ERR/LOWERR/UPERR` are in ct/s, not counts — multiply by `ML_EXP`. | small |
+| B1 | ~~**Counts columns are not carried.**~~ **CARRIED 2026-08-07** in `make_dr2_targets.py`: 44 new columns, `ape_cts/ape_bkg/ape_exp/ape_radius/ape_pois` and `ml_cts/ml_rate/ml_exp/ml_eef`, for the broad band and P1-P4, raw and untransformed. | What remains is the chain re-run (~15 min), which is deliberately NOT done yet — the merged rebuild is in flight. **Trap, CORRECTED 2026-08-07 (see §3.1): only `ML_CTS_UPERR_Pn` is in ct/s**, not the whole error family. | done pending re-run |
 | B2 | **A Poisson head does not exist.** Current heads are flows over log-flux. | Needs `p(log lambda | inputs)` as the latent with `N ~ Poisson(lambda*t + B)` as the observation model. | medium |
 | B3 | **Also needs A1** (a band joint is a different joint). | | |
 
@@ -229,16 +229,24 @@ likelihood constrains least. Decide whether that is acceptable, whether it needs
 an explicit prior, and how we would detect it going wrong.
 
 **(d) Aperture versus PSF-fitted, and whether HR inherits a band-dependent bias.**
-NOTE: this is the eROSITA 4" `APE_RADIUS`, a DIFFERENT aperture problem from the
-DESI 1.5" fibre. The fibre one biases SFR/sSFR and is a RUN A control needing
+NOTE: this is the eROSITA `APE_RADIUS` (in PIXELS, not arcsec -- the "4 inch"
+this line used to say is the eSASS 4"/pixel scale, not the aperture; the aperture
+is ~7-10 pix, i.e. ~30-40", set by the ~30" survey PSF), a DIFFERENT aperture
+problem from the DESI 1.5" fibre. The fibre one biases SFR/sSFR and is a RUN A control needing
 `LS10_shape_r`; this one biases HR between bands and needs `ML_EEF`. They share a
 word and nothing else.
-`APE_CTS` is photometry in a FIXED 4" radius; `ML_*` is PSF-fitted. The encircled
-energy fraction is ENERGY DEPENDENT (`ML_EEF_n` is in the catalogue), so a 4"
-aperture captures a different PSF fraction in P2 than in P4. In a hardness ratio
-the EEF partially cancels but NOT exactly, and the residual is a systematic in
-precisely the quantity we are trying to measure. Quantify before trusting an HR
-built from aperture counts.
+`APE_CTS` is photometry in a predetermined circular aperture; `ML_*` is PSF-fitted. The encircled
+energy fraction is ENERGY DEPENDENT, so that aperture captures a different PSF
+fraction in P2 than in P4. In a hardness ratio the EEF partially cancels but NOT
+exactly, and the residual is a systematic in precisely the quantity we are trying
+to measure. Quantify before trusting an HR built from aperture counts.
+Measured 2026-08-07 on all 1,975,540 rows: **`ML_EEF_n` is a per-band CONSTANT**,
+exactly one distinct value each -- 0.89230239 (P1), 0.88694167 (P2), 0.88360250
+(P3, and the broad band carries the same number), 0.85624605 (P4). So the P2/P3
+EEF ratio is 1.00378 and the P2/P4 ratio 1.03586: the systematic is a fixed
+multiplicative offset per band pair, not a per-source nuisance. `APE_RADIUS` by
+contrast **does** vary per source (median 7.31 pix in P2, 9.90 in P4 on the
+25,454-row sample), so the aperture itself is not fixed across bands either.
 
 **(e) Exposure and background are likelihood terms and must NEVER be model
 inputs.** They are per-source and known, and feeding them would let the model
@@ -248,11 +256,40 @@ stating in the head's docstring, because `APE_EXP` and `APE_BKG` will sit in the
 same table as the counts and the temptation is structural.
 
 **What is missing:**
-1. **Counts columns are not carried.** `dr2_targets.csv` has no `APE_*`, no
-   `ML_CTS`, no `ML_RATE`, no `ML_EEF`. Every ingredient is in the FITS; this is
-   a column list in `make_dr2_targets.py`, then a chain re-run (~15 min).
-   **Trap:** `ML_CTS_ERR/LOWERR/UPERR` are numerically identical to
-   `ML_RATE_*` -- they are in ct/s, not counts. Multiply by `ML_EXP`.
+1. **Counts columns: CARRIED 2026-08-07, chain re-run still pending.**
+   `make_dr2_targets.py` now emits `ape_cts_*`, `ape_bkg_*`, `ape_exp_*`,
+   `ape_radius_*`, `ape_pois_*`, `ml_cts_*`, `ml_rate_*`, `ml_exp_*`,
+   `ml_eef_*` for the broad band and P1-P4 (44 columns, `ml_exp_1` excluded
+   because it is already `ero_exp`), raw: no threshold, no transform. They reach
+   the sidecar through its LEFT join on the universe, so no other script
+   changes. The on-disk `dr2_targets.csv` does NOT have them yet -- the re-run
+   waits on the merged rebuild. Verified on a temp rebuild (25,454 rows): all 44
+   columns 100% finite, `ape_exp` strictly positive, `ape_cts` integer and
+   never negative, zero-count fractions p1 6.9% / p2 0.7% / p3 1.3% / p4 13.6%,
+   and the 52 pre-existing columns bit-identical to the live artifact.
+
+   **The trap, as previously written here, was WRONG. Corrected 2026-08-07**,
+   measured on all 1,975,540 rows of `eRASS3_Main_v1.3.fits`:
+   - `ML_CTS_UPERR_Pn` **is** `ML_RATE_UPERR_Pn`, bit for bit: 100.0000% of rows
+     in P2, P3, P4 and 1,975,537/1,975,540 in P1 (the 3 exceptions are NaN in
+     both). That one column is in ct/s and needs `* ML_EXP_Pn`. Its own
+     `TUNIT` says `count` and its `TCOMM` says "1-sigma upper counts error", so
+     the catalogue's metadata is wrong, not just our reading of it -- which is
+     exactly why it is worth a note here.
+   - `ML_CTS_ERR_Pn` and `ML_CTS_LOWERR_Pn` are **already in counts**:
+     `(ML_CTS_ERR/ML_RATE_ERR)/ML_EXP` has median exactly 1.000000 in every
+     band, and exact equality with the rate column occurs on 0 rows for `ERR`.
+     `LOWERR` looks equal on 3-42% of rows only because both are exactly 0
+     there (the equal-row counts match the zero counts exactly: 448,013 in P1,
+     63,967 P2, 94,422 P3, 826,995 P4). Multiplying these by `ML_EXP` would
+     inflate an error bar by the exposure, ~340x at the median.
+   - **The broad band `_1` is exempt entirely:** 0 rows of exact equality for
+     all three, and `ML_CTS_UPERR_1/ML_RATE_UPERR_1` has median 335.94 = the
+     median `ML_EXP_1`. All three band-1 error columns are in counts.
+
+   None of these are carried (a Poisson likelihood needs no error bar), so the
+   trap does not touch the new columns -- but anything that later reads
+   `ML_CTS_*ERR` from the FITS must apply the correction to `UPERR_Pn` only.
 2. **A Poisson head.** New likelihood; the current heads are Gaussian-ish flows
    over log-flux. A flow over a continuous density cannot represent the point
    mass at zero directly, so the rate is the latent and the Poisson is the
