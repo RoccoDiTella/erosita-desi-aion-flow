@@ -52,6 +52,67 @@ TOKEN_KEYS_BY_MODALITY = {
     "image": ("tok_image",),
 }
 
+# Presence flags carried per staged row, when the staged file is new enough to
+# have them. Written by the manifest, which is the only place that knows zwarn
+# and the per-band WISE inverse variances.
+PRESENCE_FLAGS = ("has_spectrum", "has_z", "has_wise", "has_image")
+_FLAG_TO_MODALITY = {"has_spectrum": "spectra", "has_z": "z",
+                     "has_wise": "wise", "has_image": "image"}
+
+
+def modality_presence(batch, flags: dict[str, torch.Tensor] | None = None
+                      ) -> dict[str, torch.Tensor]:
+    """THE definition of "this input exists for this row". One, not two.
+
+    There were briefly two, and they disagreed. That is worth explaining because
+    the disagreement was structural rather than careless:
+
+      * the MANIFEST knows zwarn and the per-band WISE inverse variances, so it
+        can say `has_z = finite AND z > 0 AND zwarn == 0` and
+        `has_wise = flux > 0 AND ivar > 0`;
+      * the BATCH carries neither zwarn nor a WISE ivar, so a batch-side
+        function physically cannot express those rules and had settled for
+        `isfinite(redshift)` and `flux > 0`.
+
+    The consequence was not cosmetic: `--sample common` admitted 352
+    zwarn-flagged rows that the manifest declares unusable, and any information
+    gain computed on that row set was computed on a sample nobody had declared.
+
+    So the authoritative source is the manifest, and the resolution is to carry
+    its verdict through staging as boolean columns. `flags` is that verdict when
+    present. The content heuristic below is the FALLBACK for staged files
+    written before those columns existed; it is strictly weaker and is only
+    correct up to the two rules it cannot see.
+
+    Content rules, for the fallback path:
+      spectra  finite flux somewhere AND positive ivar somewhere
+      z        finite (cannot check zwarn here -- that is the known gap)
+      wise     finite AND > 0 in at least one band. NOT finiteness alone: the
+               LS10 W-band fluxes are finite for 25,582 of 25,582 staged rows,
+               so a finiteness rule marks WISE universally present and makes the
+               whole sample declaration inert in exactly the arm it protects.
+      image    not identically zero. A real Legacy Survey cutout is never zero
+               across every band and pixel; sources staged without one carry an
+               all-zero frame, which AION would otherwise tokenize as real
+               4-band imagery.
+    """
+    flux, ivar, _wavelength, redshift, wise, image = batch[:6]
+    present = {
+        "spectra": torch.isfinite(flux).any(dim=1) & (ivar > 0).any(dim=1),
+        "z": torch.isfinite(redshift),
+        "wise": (torch.isfinite(wise) & (wise > 0)).any(dim=1),
+        "image": image.flatten(1).abs().any(dim=1),
+    }
+    if flags:
+        for key, modality in _FLAG_TO_MODALITY.items():
+            f = flags.get(key)
+            if f is None:
+                continue
+            # AND, never replace: a staged flag says the CATALOGUE believes the
+            # input exists, which does not make an all-zero frame usable.
+            present[modality] = present[modality] & f.to(torch.bool)
+    return present
+
 DATASET_ALIASES = {
     "desi_targetid": ("desi_targetid",),
     "spectra": ("spectra", "spectra_flux"),
@@ -77,7 +138,13 @@ DATASET_ALIASES = {
 
 # Extra target columns joined from targets_extra.csv (by desi_targetid) into each
 # staged split, and the (lower, upper) 1-sigma error column for each target.
-EXTRA_TARGET_COLUMNS = ("logmstar", "logmstar_sig", "hr32_u", "hr32_u_sig", "flux_sig_lo", "flux_sig_hi")
+# EMPTY on purpose. These were the DR1 extra targets (FastSpecFit logmstar,
+# hr32_u, and the eRASS1 flux sigmas) copied into the staged file. Every one now
+# comes from the DR2 sidecar at load time, so staging is INPUTS ONLY: spectra,
+# redshift, WISE, images, and the presence flags. A staged file that also
+# carries labels is a second, older copy of the truth waiting to be read by
+# accident, which is exactly how a DR1 flux ended up selecting a DR2 sample.
+EXTRA_TARGET_COLUMNS: tuple[str, ...] = ()
 TARGET_ERROR_COLS = {
     "log_ml_flux_1": ("flux_sig_lo", "flux_sig_hi"),
     "log_lx": ("flux_sig_lo", "flux_sig_hi"),
@@ -253,6 +320,23 @@ def prepare_staged_data(
 
     manifest = pd.read_csv(split_manifest_csv)
     original_manifest_rows = int(len(manifest))
+
+    # A manifest from scripts/build_manifest.py covers the whole TARGET table,
+    # not just the split: rows outside the split carry split = NaN, and rows with
+    # no spectrum carry source_row = -1. Both must go before the source read
+    # below, which indexes source_row for EVERY remaining row and then asserts
+    # targetid equality. Without this the assert fires on -1 and staging dies
+    # with a message about mismatched targetids that says nothing about why.
+    if "source_row" in manifest.columns:
+        before = len(manifest)
+        keep = manifest["source_row"].to_numpy() >= 0
+        if "split" in manifest.columns:
+            keep &= manifest["split"].notna().to_numpy()
+        manifest = manifest.loc[keep].copy()
+        if len(manifest) != before:
+            print(f"[stage] manifest {before:,} -> {len(manifest):,} rows "
+                  f"(dropped rows outside the split or with no staged spectrum)", flush=True)
+
     if clean:
         if match_quality_csv is None:
             raise ValueError("clean=True requires match_quality_csv (the NWAY keep filter).")
@@ -288,17 +372,13 @@ def prepare_staged_data(
         if not np.array_equal(source_targetids, manifest["targetid"].to_numpy(dtype=np.int64)):
             raise ValueError("Split manifest targetids do not match source_hdf5 targetids at source_row.")
 
-        ml_flux_sorted = read_ml_flux_1(source)[sorted_rows].astype(np.float64)
-        redshift_sorted = read_dataset(source, "redshift", sorted_rows).astype(np.float64)
-        ml_flux = np.empty_like(ml_flux_sorted)
-        redshift = np.empty_like(redshift_sorted)
-        ml_flux[read_order] = ml_flux_sorted
-        redshift[read_order] = redshift_sorted
-    log_flux = compute_log_flux(ml_flux)
-    log_lx = compute_log_luminosity(redshift, ml_flux)
-    finite_targets = np.isfinite(log_flux) & np.isfinite(log_lx)
-    dropped_nonfinite_targets = int((~finite_targets).sum())
-    manifest = manifest.loc[finite_targets].copy()
+    # The DR1 finite-flux row filter USED to live here: it read log_ml_flux_1
+    # out of the source HDF5 (eRASS1) and dropped every row where it was
+    # non-finite. Once log_ml_flux_1 and log_lx moved to the DR2 sidecar, that
+    # left a DR1 detection limit silently deciding which rows exist in a DR2
+    # experiment, at 2.7x less exposure. Membership is the split's job now, and
+    # per-target availability is multi_target_nll's (it treats NaN as missing).
+    dropped_nonfinite_targets = 0
     if limit is not None:
         if int(limit) < 3:
             raise ValueError(
@@ -355,21 +435,22 @@ def prepare_staged_data(
                 if any(candidate in source for candidate in DATASET_ALIASES[optional_name]):
                     _copy_dataset(source, dest, optional_name, rows, dtype=np.float32)
 
-            ml_flux = read_ml_flux_1(source)[rows].astype(np.float32)
-            dest.create_dataset("ml_flux_1", data=ml_flux, compression="gzip", compression_opts=4)
-            redshift = dest["redshift"][:].astype(np.float64)
-            dest.create_dataset(
-                "log_ml_flux_1",
-                data=compute_log_flux(ml_flux).astype(np.float32),
-                compression="gzip",
-                compression_opts=4,
-            )
-            dest.create_dataset(
-                "log_lx",
-                data=compute_log_luminosity(redshift, ml_flux).astype(np.float32),
-                compression="gzip",
-                compression_opts=4,
-            )
+            # log_ml_flux_1 / log_lx / ml_flux_1 are NO LONGER staged. They came
+            # from the eRASS1 source file, and the DR2 sidecar is authoritative
+            # for both. Writing a DR1 copy alongside a DR2 label is how the two
+            # got mixed in the first place, so the column is simply absent and a
+            # stale reader fails loudly instead of reading the wrong survey.
+
+            # Per-row modality presence, decided by the manifest -- which is the
+            # only place that can see zwarn and the per-band WISE inverse
+            # variances. modality_presence() ANDs these with a content check.
+            for flag in PRESENCE_FLAGS:
+                if flag in split_frame.columns:
+                    dest.create_dataset(
+                        flag,
+                        data=split_frame[flag].to_numpy(bool),
+                        compression="gzip", compression_opts=4,
+                    )
 
             if targets_extra is not None:
                 aligned = targets_extra.reindex(targetids)
@@ -448,15 +529,18 @@ class AIONHDF5Dataset(Dataset):
     def __init__(
         self,
         hdf5_path: Path,
-        target_name: str,
+        target_name: str | None,
         rows: np.ndarray | None = None,
         extra_targets: dict[int, tuple[float, float, float]] | None = None,
     ) -> None:
         self.hdf5_path = Path(hdf5_path)
+        # None = multi-target mode: the caller reads its own targets from the
+        # sidecar, so element 6 of the batch is NaN and nothing here selects
+        # rows. See _finite_target_rows for why this had to become explicit.
         self.target_name = target_name
         self.extra_targets = extra_targets
         self._handle: h5py.File | None = None
-        self.err_cols = TARGET_ERROR_COLS.get(target_name)
+        self.err_cols = TARGET_ERROR_COLS.get(target_name) if target_name else None
         self.rows = None if rows is None else np.asarray(rows, dtype=np.int64)
         with h5py.File(self.hdf5_path, "r") as handle:
             n = int(handle["desi_targetid"].shape[0])
@@ -508,6 +592,10 @@ class AIONHDF5Dataset(Dataset):
             ),
             torch.tensor(
                 target_value if self.extra_targets is not None
+                # multi-target mode: NaN, never a staged value. multi_target_nll
+                # already treats NaN as "unavailable", so a stale DR1 number
+                # here would be worse than nothing -- it would be used.
+                else float("nan") if self.target_name is None
                 else read_dataset(handle, self.target_name, slice(index, index + 1))[0],
                 dtype=torch.float32,
             ),
@@ -551,7 +639,8 @@ def clean_view_row_maps(
 
 
 def _finite_target_rows(
-    path: Path, target_name: str, rows: np.ndarray | None, max_target_sigma: float | None = None,
+    path: Path, target_name: str | None, rows: np.ndarray | None,
+    max_target_sigma: float | None = None,
     extra_targets: dict[int, tuple[float, float, float]] | None = None,
 ) -> np.ndarray | None:
     """Restrict ``rows`` (or the whole file) to usable rows for this target.
@@ -562,7 +651,21 @@ def _finite_target_rows(
     pathological error tails (hr32_u: median sigma 0.51 but max ~8e3 from
     band non-detections; those rows are upper limits, not measurements).
     Returns ``None`` when the whole file qualifies.
+
+    ``target_name=None`` means MULTI-TARGET MODE: the caller supplies its own
+    targets from the sidecar and decides per head which rows are usable, so this
+    function must not decide membership at all.
+
+    That distinction was load-bearing and got lost. Every multi-target caller
+    passed the literal "log_ml_flux_1", which is read FROM THE STAGED HDF5, i.e.
+    from DR1/eRASS1. Once log_ml_flux_1 and log_lx moved to the DR2 sidecar the
+    labels were DR2 but the SAMPLE was still whichever rows eRASS1 happened to
+    detect: a DR1 detection limit silently selecting a DR2 experiment. The
+    depths differ by 2.7x in exposure, so this is not a rounding difference.
+    Pass None from every multi-target path.
     """
+    if target_name is None and extra_targets is None:
+        return rows
     with h5py.File(path, "r") as handle:
         if extra_targets is not None:
             tids = handle["desi_targetid"][:].astype(np.int64)
@@ -598,7 +701,7 @@ def _finite_target_rows(
 def build_dataloaders(
     *,
     staged_dir: Path = STAGED_DIR,
-    target_name: str = "log_ml_flux_1",
+    target_name: str | None = "log_ml_flux_1",
     batch_size: int = 256,
     eval_batch_size: int | None = None,
     num_workers: int = 0,
