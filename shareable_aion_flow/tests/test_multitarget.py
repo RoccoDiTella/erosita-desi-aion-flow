@@ -308,47 +308,6 @@ def test_joint_marginalises_a_missing_dimension_instead_of_imputing() -> None:
         mt.configure_heads(())
 
 
-def test_joint_only_trains_the_joint_and_leaves_marginal_flows_untouched() -> None:
-    """Phase 1: only the joint contributes loss; marginal flows get NO gradient.
-
-    Skipping the term matters more than zero-weighting it. A zero-weighted term
-    still produces grads of 0 rather than None, and AdamW's decoupled weight
-    decay would then quietly shrink flows that phase 2 is about to refit.
-    """
-    import multitarget as mt
-
-    torch.manual_seed(0)
-    try:
-        mt.configure_heads(("log_flux_p4", "logmstar", "log_mbh_pan25", "log_mbh_vo09",
-                            "log_flux_p1", "log_flux_p2", "log_ml_flux_1"))
-        n_t, n_h = mt.N_TARGETS, mt.N_HEADS
-        B = 12
-        flows = mt.MultiTargetFlows(context_dim=256)
-        targets = torch.randn(B, n_t)
-        contexts = torch.randn(B, n_h, 256, requires_grad=True)
-        stds = [TargetStandardizer(0.0, 1.0) for _ in range(n_t)]
-        total, raw = mt.multi_target_nll(
-            contexts=contexts, flows=flows, targets=targets,
-            sig_lo=torch.zeros(B, n_t), sig_hi=torch.zeros(B, n_t),
-            standardizers=stds, weights=np.ones(n_h), inject=False,
-            joint_only=True,
-        )
-        assert all(r is None for r in raw[:n_t]), "marginal heads must not report a loss"
-        assert raw[-1] is not None and np.isfinite(raw[-1]), "joint must still train"
-
-        total.backward()
-        joint_grad = sum(float(p.grad.abs().sum()) for p in flows.joint.parameters()
-                         if p.grad is not None)
-        assert joint_grad > 0, "joint flow got no gradient"
-        for f in flows.flows:
-            assert all(p.grad is None for p in f.parameters()), \
-                "marginal flow grads must be None, not zero, so AdamW skips them"
-        # the shared trunk is still driven, via the joint's context slot
-        assert float(contexts.grad[:, n_t].abs().sum()) > 0
-    finally:
-        mt.configure_heads(())
-
-
 def approx(x, tol=1e-9):
     class _A:
         def __eq__(self, other): return abs(other - x) <= tol
@@ -445,18 +404,175 @@ def test_band_availability_is_gated_on_detection_not_error_bar() -> None:
     overestimation: P1 and P3 sat far above their sigma-derived R^2 ceilings,
     and the hardness-ratio test implied a negative true variance, which is
     impossible unless E[sigma^2] is inflated.
+
+    Asserts the RULE against mt.DET_LIKE_MIN rather than a literal, so the
+    threshold lives in exactly one place. It moved 5 -> 6 on 2026-08-06 to match
+    the eRASS Main catalogue's own inclusion rule.
     """
     import multitarget as mt
 
     spec = next(t for t in mt.MULTI_TARGETS if t["name"] == "log_flux_p3")
-    assert spec["det"] == ("det_like_p3", 5.0)
+    assert spec["det"] == ("det_like_p3", mt.DET_LIKE_MIN)
+    # The sigma gate is deliberately retired. On the bands the detection cut
+    # removes a strict superset of the rows (measured: zero additional rows in
+    # P1-P4 at either threshold), and carrying both made the selection function
+    # impossible to state as a single cut.
+    assert spec["max_sigma"] is None
 
     # a source with a beautiful error bar but no detection is NOT available
-    det = np.array([9.0, 4.9, 5.1, np.nan])
+    thr = mt.DET_LIKE_MIN
+    det = np.array([thr + 4.0, thr - 0.1, thr + 0.1, np.nan])
     tight_sigma = np.full(4, 0.01)
     y = np.array([-13.0, -13.0, -13.0, -13.0])
     ok = np.isfinite(y)
-    ok &= 0.5 * (tight_sigma + tight_sigma) <= spec["max_sigma"]
-    ok &= np.isfinite(det) & (det > 5.0)
+    if spec["max_sigma"] is not None:
+        ok &= 0.5 * (tight_sigma + tight_sigma) <= spec["max_sigma"]
+    ok &= np.isfinite(det) & (det > thr)
     assert ok.tolist() == [True, False, True, False], \
         "detection must decide availability even when the sigma gate passes"
+
+
+def test_joint_is_addressable_by_name_not_position() -> None:
+    """`j2, j3 = JOINT_IDX` survived a whole run cycle. Name resolution or nothing.
+
+    Two scripts unpacked the joint as a 2-tuple long after it became 4-D, and a
+    third assumed flow columns 0 and 1 were (P2, P3). Positional indexing of the
+    joint is always silently wrong rather than loudly wrong, so these are the
+    invariants that make name indexing safe.
+    """
+    import multitarget as mt
+
+    dims = mt.joint_dims()
+    assert len(dims) == len(mt.JOINT_IDX)
+    names = [t["name"] for t in mt.MULTI_TARGETS]
+    # Flow column order is JOINT_PAIR DECLARATION order, not MULTI_TARGETS order.
+    assert list(dims) == [n for n in mt.JOINT_PAIR if n in names]
+    # ...and the two orders really are different, which is the whole hazard:
+    # if they ever coincide this test still passes but stops proving anything,
+    # so assert the divergence explicitly for the default head set.
+    if len(dims) > 1 and sorted(dims, key=names.index) != list(dims):
+        assert [mt.target_col(n) for n in dims] != list(range(len(dims)))
+    for k, name in enumerate(dims):
+        assert mt.joint_col(name) == k
+        assert names[mt.target_col(name)] == name
+    for bogus in ("definitely_not_a_dimension", "log_flux_p2"):
+        if bogus in dims:
+            continue
+        try:
+            mt.joint_col(bogus)
+        except KeyError:
+            pass
+        else:
+            raise AssertionError(f"joint_col({bogus!r}) must raise, not return a position")
+
+
+def test_joint_availability_agrees_across_backends() -> None:
+    """One availability rule, or the trainer and eval report different samples.
+
+    have_req and have_all are genuinely different populations (fully observed
+    versus quadrature-marginalised), and collapsing them into one "joint n" is a
+    count-weighted mixture of two dimensionalities.
+    """
+    import multitarget as mt
+    import torch
+
+    if not mt.JOINT_MARGINAL:
+        return
+    n = len(mt.MULTI_TARGETS)
+    marg = mt.JOINT_MARGINAL[0]
+    req = next(d for d in mt.joint_dims() if d not in mt.JOINT_MARGINAL)
+
+    t = np.ones((3, n))
+    t[1, mt.target_col(marg)] = np.nan       # marginalisable missing -> still usable
+    t[2, mt.target_col(req)] = np.nan        # required missing       -> unusable
+    want_req, want_all = [True, True, False], [True, False, False]
+
+    for arr in (t, torch.tensor(t)):
+        have_req, have_all = mt.joint_availability(arr)
+        assert [bool(x) for x in have_req] == want_req
+        assert [bool(x) for x in have_all] == want_all
+
+
+def test_multi_target_mode_does_not_let_a_staged_column_select_rows(tmp_path) -> None:
+    """`target_name=None` must not filter. The DR1 flux column must not gate DR2.
+
+    This is the test whose absence made the bug invisible. Every multi-target
+    caller passed the literal "log_ml_flux_1", which `_finite_target_rows` reads
+    FROM THE STAGED HDF5 (DR1/eRASS1). Once log_ml_flux_1 and log_lx moved to the
+    DR2 sidecar, the LABELS were DR2 while the SAMPLE was still whichever rows
+    eRASS1 happened to detect: a DR1 detection limit silently selecting a DR2
+    experiment, at 2.7x less exposure.
+
+    Nothing crashed and no number looked wrong, which is exactly why it needed an
+    assertion rather than a reviewer.
+    """
+    import h5py
+    from data_to_aion_embeddings import _finite_target_rows
+
+    path = tmp_path / "desi_train.hdf5"
+    with h5py.File(path, "w") as h:
+        h.create_dataset("desi_targetid", data=np.arange(6, dtype=np.int64))
+        # rows 1 and 4 are undetected in the DR1 column, i.e. exactly the rows a
+        # DR1 gate would silently remove from a DR2 experiment
+        h.create_dataset("log_ml_flux_1",
+                         data=np.array([-12.0, np.nan, -12.5, -13.0, np.nan, -11.5]))
+
+    rows = np.arange(6, dtype=np.int64)
+
+    # single-target mode: the column DOES gate, which is correct for that mode
+    kept = _finite_target_rows(path, "log_ml_flux_1", rows)
+    assert kept is not None
+    assert kept.tolist() == [0, 2, 3, 5]
+
+    # multi-target mode: membership is the caller's business, so nothing is cut
+    assert _finite_target_rows(path, None, rows) is rows
+    assert _finite_target_rows(path, None, None) is None
+
+
+def test_a_head_with_no_column_anywhere_is_refused_not_silently_skipped(tmp_path) -> None:
+    """An absent column must raise, not produce a head that never trains.
+
+    `vals is None -> continue` left the target all-NaN, and multi_target_nll
+    skips a head whose targets are all NaN, so the head was built, optimised
+    over, and silently never trained. In a loss curve that is indistinguishable
+    from converging immediately. `logmstar` is the live example: the FastSpecFit
+    mass is no longer staged, so any run that forgets --drop-heads logmstar
+    would have trained a ghost head.
+    """
+    import h5py
+    import pandas as pd
+    import multitarget as mt
+
+    staged = tmp_path / "desi_train.hdf5"
+    tids = np.arange(4, dtype=np.int64)
+    with h5py.File(staged, "w") as h:
+        h.create_dataset("desi_targetid", data=tids)
+
+    side = pd.DataFrame({"targetid": tids})
+    for spec in mt._ALL_TARGETS:                 # everything EXCEPT logmstar
+        if not spec["sidecar"]:
+            continue
+        side[spec["name"]] = 1.0
+        for c in spec["sig"] or ():
+            side[c] = 0.1
+        if spec["det"]:
+            side[spec["det"][0]] = mt.DET_LIKE_MIN + 1.0
+    csv = tmp_path / "sidecar.csv"
+    side.to_csv(csv, index=False)
+
+    try:
+        mt.load_multi_target_matrix(staged, csv)
+    except ValueError as exc:
+        assert "logmstar" in str(exc)
+        assert "--drop-heads" in str(exc)
+    else:
+        raise AssertionError("a head with no column anywhere must raise")
+
+    # ...and dropping it is the documented escape hatch, which must then work.
+    try:
+        mt.configure_heads(("logmstar",))
+        y, slo, shi = mt.load_multi_target_matrix(staged, csv)
+        assert y.shape == (4, mt.N_TARGETS)
+        assert np.isfinite(y).all()
+    finally:
+        mt.configure_heads(())

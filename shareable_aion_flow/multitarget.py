@@ -34,36 +34,54 @@ except ImportError:
     from data_to_aion_embeddings import read_dataset
     from normalizing_flow import ConditionalNSFFlow, TargetStandardizer, sample_split_normal
 
+# Detection threshold, ONE number for the whole project. 6 is the eRASS Main
+# catalogue's own inclusion rule, so the selection function we report is the
+# catalogue's rather than one we invented. It was 5 until 2026-08-06; the change
+# is a no-op for the broad band on the current sample (det_like_0 > 6 for all
+# 25,582 rows) and costs the P2-AND-P3 joint about 16% on the expansion.
+DET_LIKE_MIN = 6.0
+
 # name, sigma columns (None = no error model), availability sigma gate
+#
+# `max_sigma` is None everywhere on purpose. It used to be 1.0 on the sidecar
+# targets and did nothing in both cases: on the bands the detection gate removes
+# a strict superset of the rows (measured: zero additional rows in P1-P4 at
+# either threshold), and on the CIGALE targets make_targets_sidecar.add() has
+# already applied the same 1.0 cut at build time. A second, unreported cut at
+# load time only made the selection function impossible to state in one line.
 MULTI_TARGETS: list[dict] = [
-    {"name": "log_ml_flux_1", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": None, "sidecar": False},
-    {"name": "log_lx", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": None, "sidecar": False},
+    {"name": "log_ml_flux_1", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": ("det_like_0", DET_LIKE_MIN), "sidecar": True},
+    {"name": "log_lx", "sig": ("flux_sig_lo", "flux_sig_hi"), "max_sigma": None, "det": ("det_like_0", DET_LIKE_MIN), "sidecar": True},
+    # FastSpecFit mass. Superseded by logmstar_cigale for this sample and dropped
+    # per run with --drop-heads, but the entry STAYS in _ALL_TARGETS: the drop set
+    # in configure_heads_from_config is derived by name, so deleting it makes
+    # every pre-2026-08 checkpoint unloadable.
     {"name": "logmstar", "sig": None, "max_sigma": None, "det": None, "sidecar": False},
-    {"name": "log_flux_p1", "sig": ("log_flux_p1_sig_lo", "log_flux_p1_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p1", 5.0), "sidecar": True},
-    {"name": "log_flux_p2", "sig": ("log_flux_p2_sig_lo", "log_flux_p2_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p2", 5.0), "sidecar": True},
-    {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p3", 5.0), "sidecar": True},
-    {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": 1.0, "det": ("det_like_p4", 5.0), "sidecar": True},
+    {"name": "log_flux_p1", "sig": ("log_flux_p1_sig_lo", "log_flux_p1_sig_hi"), "max_sigma": None, "det": ("det_like_p1", DET_LIKE_MIN), "sidecar": True},
+    {"name": "log_flux_p2", "sig": ("log_flux_p2_sig_lo", "log_flux_p2_sig_hi"), "max_sigma": None, "det": ("det_like_p2", DET_LIKE_MIN), "sidecar": True},
+    {"name": "log_flux_p3", "sig": ("log_flux_p3_sig_lo", "log_flux_p3_sig_hi"), "max_sigma": None, "det": ("det_like_p3", DET_LIKE_MIN), "sidecar": True},
+    {"name": "log_flux_p4", "sig": ("log_flux_p4_sig_lo", "log_flux_p4_sig_hi"), "max_sigma": None, "det": ("det_like_p4", DET_LIKE_MIN), "sidecar": True},
     # APPENDED, never inserted: the flows are indexed positionally, so adding a
     # head anywhere but the end silently renumbers every existing checkpoint.
     # log SFR comes from the CIGALE VAC, a DIFFERENT SED fit than the one that
     # produced logmstar -- see scripts/make_sfr_sidecar.py for why that matters.
-    {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": 1.0, "det": None, "sidecar": True},
+    {"name": "log_sfr", "sig": ("log_sfr_sig_lo", "log_sfr_sig_hi"), "max_sigma": None, "det": None, "sidecar": True},
     # CIGALE stellar mass. Supersedes the FastSpecFit `logmstar` above for this
     # sample: FastSpecFit has NO AGN component, so on 87% QSO it attributes the
     # accretion-disk continuum to stars. CIGALE fits the AGN explicitly. Keeping
     # both in the same fit as log_sfr also makes sSFR well defined. Drop the
     # older head with --drop-heads logmstar.
     {"name": "logmstar_cigale", "sig": ("logmstar_cigale_sig_lo", "logmstar_cigale_sig_hi"),
-     "max_sigma": 1.0, "det": None, "sidecar": True},
+     "max_sigma": None, "det": None, "sidecar": True},
     # Black-hole mass, DR1 qmassiron VAC. PAN25 is iron-corrected and primary;
     # VO09 is the classic estimator, kept as a comparison target. SHEN11/LE20/
     # YU23 ride in the sidecar as columns -- they correlate with VO09 at 0.99+
     # (LE20 is exactly 1.0000, a pure rescaling), so training them would be
     # training the same target several times.
     {"name": "log_mbh_pan25", "sig": ("log_mbh_pan25_sig_lo", "log_mbh_pan25_sig_hi"),
-     "max_sigma": 1.0, "det": None, "sidecar": True},
+     "max_sigma": None, "det": None, "sidecar": True},
     {"name": "log_mbh_vo09", "sig": ("log_mbh_vo09_sig_lo", "log_mbh_vo09_sig_hi"),
-     "max_sigma": 1.0, "det": None, "sidecar": True},
+     "max_sigma": None, "det": None, "sidecar": True},
 ]
 _ALL_TARGETS = list(MULTI_TARGETS)
 N_TARGETS = len(MULTI_TARGETS)          # scalar heads
@@ -94,6 +112,77 @@ def _joint_idx():
 JOINT_IDX = _joint_idx()
 N_HEADS = N_TARGETS + 1
 HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
+
+
+# ---------------------------------------------------------------------------
+# Name resolution. Everything that touches the joint head goes through these.
+#
+# The joint used to be a 2-tuple, and two scripts still unpacked it as one
+# (`j2, j3 = JOINT_IDX`) long after it became 4-D. That survived a whole run
+# cycle because nothing indexed the joint by NAME -- positional indexing is
+# always silently wrong rather than loudly wrong. Index by name, or not at all.
+# ---------------------------------------------------------------------------
+
+def joint_dims() -> tuple[str, ...]:
+    """Joint dimension names in FLOW COLUMN ORDER.
+
+    _joint_idx() iterates JOINT_PAIR, so JOINT_IDX -- and therefore the stacked
+    feature vector in multi_target_nll -- is in JOINT_PAIR DECLARATION order,
+    not MULTI_TARGETS order. The two genuinely differ: the current joint is
+    declared (M*, SFR, Lx, P3) but those sit at target columns (8, 7, 1, 5).
+
+    So there are two distinct indexing spaces and a joint dimension has a
+    different number in each. `j2, j3 = JOINT_IDX` conflated them on top of
+    assuming a 2-tuple. Use joint_col() for the flow, target_col() for the
+    target matrix, and never a literal.
+    """
+    names = [t["name"] for t in MULTI_TARGETS]
+    return tuple(names[j] for j in JOINT_IDX)
+
+
+def joint_col(name: str) -> int:
+    """Position of `name` inside the joint flow's feature vector."""
+    dims = joint_dims()
+    if name not in dims:
+        raise KeyError(f"{name!r} is not a joint dimension; joint is {dims}")
+    return dims.index(name)
+
+
+def target_col(name: str) -> int:
+    """Column of `name` in the [B, N_TARGETS] target matrix."""
+    for j, t in enumerate(MULTI_TARGETS):
+        if t["name"] == name:
+            return j
+    raise KeyError(f"{name!r} is not an active target; "
+                   f"have {[t['name'] for t in MULTI_TARGETS]}")
+
+
+def joint_availability(targets):
+    """(have_req, have_all) for the joint head. Accepts a tensor or an array.
+
+    have_req  every REQUIRED dimension present, so the head can use the row
+    have_all  additionally every MARGINALISABLE dimension present, so the row
+              gets the ordinary likelihood rather than the quadrature branch
+
+    One definition, shared by the trainer and by eval, so the two cannot report
+    different populations for the same head. Report both numbers: a single
+    "joint n" is a count-weighted mixture of two different dimensionalities.
+    """
+    names = [t["name"] for t in MULTI_TARGETS]
+    req_idx = [j for j in JOINT_IDX if names[j] not in JOINT_MARGINAL]
+    marg_idx = [j for j in JOINT_IDX if names[j] in JOINT_MARGINAL]
+    if isinstance(targets, torch.Tensor):
+        finite = torch.isfinite(targets)
+        have_req = torch.ones(targets.shape[0], dtype=torch.bool, device=targets.device)
+    else:
+        finite = np.isfinite(targets)
+        have_req = np.ones(targets.shape[0], dtype=bool)
+    for j in req_idx:
+        have_req = have_req & finite[:, j]
+    have_all = have_req.clone() if isinstance(have_req, torch.Tensor) else have_req.copy()
+    for j in marg_idx:
+        have_all = have_all & finite[:, j]
+    return have_req, have_all
 
 
 def configure_heads(drop: tuple[str, ...] = ()) -> None:
@@ -175,6 +264,7 @@ def load_multi_target_matrix(
     y = np.full((n, N_TARGETS), np.nan)
     slo = np.zeros((n, N_TARGETS))
     shi = np.zeros((n, N_TARGETS))
+    absent: list[str] = []
     for j, spec in enumerate(MULTI_TARGETS):
         if spec["sidecar"]:
             if side is None:
@@ -186,6 +276,13 @@ def load_multi_target_matrix(
                 return _store.get(c)
         vals = col(spec["name"])
         if vals is None:
+            # The column does not exist in EITHER source. That is a
+            # configuration error, not missing data: the head would be built,
+            # optimised over, and silently never trained, because an all-NaN
+            # target makes multi_target_nll skip its term every batch. It is
+            # how a declared head can post no loss for a whole run and look
+            # like it merely converged early. Collect and raise below.
+            absent.append(spec["name"])
             continue
         y[:, j] = vals
         if spec["sig"]:
@@ -211,6 +308,14 @@ def load_multi_target_matrix(
                     f"{spec['name']} gates on {det_col}, which the sidecar does not "
                     "provide. Rebuild it with scripts/make_dr2_targets.py.")
             y[~(np.isfinite(dl) & (dl > thresh)), j] = np.nan
+    if absent:
+        raise ValueError(
+            f"{len(absent)} active head(s) have no column in the sidecar or the "
+            f"staged file: {absent}. Drop them with --drop-heads, or rebuild the "
+            f"sidecar so they exist. Refusing to train a head on an all-NaN "
+            f"target: it would post no loss and read as early convergence. "
+            f"(`logmstar` is the usual one -- the FastSpecFit mass is no longer "
+            f"staged; use logmstar_cigale.)")
     return y, slo, shi
 
 
@@ -275,11 +380,11 @@ def multi_target_nll(
     contexts: torch.Tensor,            # [B, K, 256]
     flows: MultiTargetFlows,
     targets: torch.Tensor,             # [B, K] (NaN = unavailable)
-    joint_only: bool = False,
     sig_lo: torch.Tensor,              # [B, K]
     sig_hi: torch.Tensor,
     standardizers: list[TargetStandardizer],
     weights: np.ndarray,               # [K] detached loss weights
+    stats: dict | None = None,         # out-param: per-branch joint diagnostics
     inject: bool = True,
     inject_samples: int = 50,
     return_terms: bool = False,
@@ -314,14 +419,11 @@ def multi_target_nll(
 
     B = targets.shape[0]
     for j, flow in enumerate(flows.flows):
-        # joint_only (phase 1): the marginal flows are not trained at all. Their
-        # targets are still loaded and standardized, because the JOINT indexes
-        # into the same target matrix -- dropping the heads would break
-        # JOINT_IDX. Skipping the term (rather than zero-weighting it) leaves
-        # their grads None, so AdamW skips them entirely and weight decay does
-        # not quietly shrink flows that phase 2 is about to refit.
+        # Skipping the term (rather than zero-weighting it) leaves the grads
+        # None, so AdamW skips the head entirely and weight decay does not
+        # quietly shrink a flow that saw no data this batch.
         mask = torch.isfinite(targets[:, j])
-        if joint_only or not bool(mask.any()):
+        if not bool(mask.any()):
             raw.append(None)
             terms.append(None)
             continue
@@ -340,21 +442,18 @@ def multi_target_nll(
     names = [t["name"] for t in MULTI_TARGETS]
     req_idx = [j for j in JOINT_IDX if names[j] not in JOINT_MARGINAL]
     marg_idx = [j for j in JOINT_IDX if names[j] in JOINT_MARGINAL]
-    have_req = torch.ones(B, dtype=torch.bool, device=targets.device)
-    for j in req_idx:
-        have_req = have_req & torch.isfinite(targets[:, j])
+    # one definition, shared with eval -- see joint_availability()
+    have_req, have_all = joint_availability(targets)
 
-    joint_terms, joint_counts = [], []
+    joint_terms, joint_counts, joint_branch = [], [], []
     if bool(have_req.any()) and len(JOINT_IDX) >= 2:
         ctx_j = contexts[:, N_TARGETS]
-        have_all = have_req.clone()
-        for j in marg_idx:
-            have_all = have_all & torch.isfinite(targets[:, j])
         # (a) fully observed rows: ordinary joint likelihood
         if bool(have_all.any()):
             vec = torch.stack([_std_inject(j, have_all) for j in JOINT_IDX], dim=-1)
             lp = flows.joint.log_prob_draws(vec, ctx_j[have_all])
             joint_terms.append(-lp.mean()); joint_counts.append(int(have_all.sum()))
+            joint_branch.append("complete")
         # (b) rows missing a marginalisable dimension: integrate it out
         part = have_req & ~have_all
         if bool(part.any()) and len(marg_idx) == 1:
@@ -375,10 +474,21 @@ def multi_target_nll(
             lp = flows.joint.log_prob_draws(vec, ctx_j[part]).view(k, K, m)
             lp = torch.logsumexp(lp, dim=1) + float(np.log(du))   # [k, m]
             joint_terms.append(-lp.mean()); joint_counts.append(int(part.sum()))
+            joint_branch.append("quadrature")
 
     if joint_terms:
         tot_n = float(sum(joint_counts))
         nll = sum(t * (c / tot_n) for t, c in zip(joint_terms, joint_counts))
+        # The two branches are densities over DIFFERENT NUMBERS OF DIMENSIONS,
+        # so this pooled number is a count-weighted mixture of two things that
+        # are not on one scale, and it drifts with coverage rather than with
+        # model quality. Fine as a training signal, wrong as a SELECTION
+        # criterion: report the branches separately so a run can be selected on
+        # the complete branch alone. See --select-metric.
+        if stats is not None:
+            for name, t, c in zip(joint_branch, joint_terms, joint_counts):
+                stats[f"joint_{name}_nll"] = float(t.item())
+                stats[f"joint_{name}_n"] = int(c)
         raw.append(float(nll.item()))
         terms.append(nll)
         total = total + float(weights[N_TARGETS]) * (tot_n / B) * nll
@@ -497,11 +607,13 @@ def run_train_multi(args) -> None:
     import time
 
     try:
+        from .stub_encoder import stub_requested
         from .attention_pooling_head import ComboSampler
         from .data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
         from .main import _OOM_ERROR  # noqa: F401  (import kept for parity)
         from .tracking import init_tracking
     except ImportError:
+        from stub_encoder import stub_requested
         from attention_pooling_head import ComboSampler
         from data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
         from tracking import init_tracking
@@ -520,7 +632,7 @@ def run_train_multi(args) -> None:
     # attention transient (B x H x N^2) stays bounded regardless of loader size.
     eval_bs = min(args.batch_size, args.bucket_chunk if args.bucketed else 224)
     train_loader, val_loader, _ = build_dataloaders(
-        staged_dir=Path(args.staged_dir), target_name="log_ml_flux_1",
+        staged_dir=Path(args.staged_dir), target_name=None,
         batch_size=args.batch_size, eval_batch_size=eval_bs,
         num_workers=args.num_workers, seed=args.seed,
         clean_split_csv=Path(args.clean_split_csv) if args.clean_split_csv else None,
@@ -547,14 +659,49 @@ def run_train_multi(args) -> None:
     standardizers = []
     for j in range(N_TARGETS):
         vals = train_y[:, j][np.isfinite(train_y[:, j])]
-        standardizers.append(TargetStandardizer.fit(vals))
+        try:
+            standardizers.append(TargetStandardizer.fit(vals))
+        except ValueError as exc:
+            # Naming the head matters more than it sounds. The bare message
+            # ("At least two finite target values are required") gives no clue
+            # WHICH of eleven heads is empty, and the answer is usually a head
+            # whose coverage is fine on the full sample and collapses on a
+            # subset -- the BH masses are 39% overall but QSO-only, so any
+            # galaxy-leaning slice can empty them. Without the name this is a
+            # ten-minute bisect on a cluster; with it, it is a --drop-heads.
+            raise ValueError(
+                f"head {MULTI_TARGETS[j]['name']!r} has {len(vals)} finite train "
+                f"value(s) in this split, too few to standardize. Drop it with "
+                f"--drop-heads {MULTI_TARGETS[j]['name']}, or use a split where it "
+                f"has coverage.") from exc
         print(f"[multi] {MULTI_TARGETS[j]['name']}: {len(vals)} train values, "
               f"mean {standardizers[j].mean:.3f} std {standardizers[j].std:.3f}", flush=True)
 
-    encoder = AIONTokenEncoder(
-        freeze=False, cls_mode=True, cls_variant="readonly", num_cls=N_HEADS,
-        grad_checkpoint=args.grad_checkpoint,
-    ).to(device)
+    # AIONFLOW_STUB_ENCODER=1 swaps in a deterministic stand-in so the whole
+    # loop -- optimiser groups, EMA weighting, scheduler, validation,
+    # checkpointing, early stopping -- runs on a workstation with no `aion`
+    # installed. It exists because a wiring bug used to cost an A100 allocation
+    # and a SLURM log to find. It teaches nothing about the science; the
+    # contexts are synthetic. Never report a number from a stub run.
+    if stub_requested():
+        # Package/flat fallback, matching the import block at the top of this
+        # function. The stub exists FOR the workstation and the tests import
+        # this module flat, so a package-relative import alone would raise
+        # "attempted relative import with no known parent package" in exactly
+        # the environment the stub was written for.
+        try:
+            from .stub_encoder import StubTokenEncoder
+        except ImportError:
+            from stub_encoder import StubTokenEncoder
+        print("[multi] AIONFLOW_STUB_ENCODER set: using StubTokenEncoder. "
+              "PIPELINE SMOKE ONLY -- every metric from this run is meaningless.",
+              flush=True)
+        encoder = StubTokenEncoder(num_cls=N_HEADS).to(device)
+    else:
+        encoder = AIONTokenEncoder(
+            freeze=False, cls_mode=True, cls_variant="readonly", num_cls=N_HEADS,
+            grad_checkpoint=args.grad_checkpoint,
+        ).to(device)
     head = SharedCLSHead().to(device)
     flows = MultiTargetFlows().to(device)
     # Separate LR for the zero-initialized read adapters: on a single LR they
@@ -569,7 +716,6 @@ def run_train_multi(args) -> None:
     # zero-initialised, so on a shared LR they move ~30x faster in
     # update/weight terms than the standard-initialised MLP and flows.
     head_lr = args.head_lr if getattr(args, "head_lr", None) is not None else args.lr
-    joint_only = bool(getattr(args, "joint_only", False))
     # Quadrature resolution is a memory knob: rows missing the marginalisable
     # dimension cost nodes x inject_samples flow evaluations, so 48 nodes with
     # 50 draws is 2400x a single row. See --joint-quad-nodes for the measured
@@ -581,9 +727,7 @@ def run_train_multi(args) -> None:
         JOINT_QUAD_SPAN = float(args.joint_quad_span)
     print(f"[multi] joint quadrature: {JOINT_QUAD_NODES} nodes, span +/-{JOINT_QUAD_SPAN}",
           flush=True)
-    # joint_only: only the joint flow is optimized. The marginal flows still
-    # exist (the joint indexes the same target matrix) but get no loss term.
-    flow_params = list(flows.joint.parameters()) if joint_only else list(flows.parameters())
+    flow_params = list(flows.parameters())
     param_groups = [
         {"params": list(head.parameters()), "lr": args.lr,
          "weight_decay": args.weight_decay},
@@ -657,7 +801,7 @@ def run_train_multi(args) -> None:
     config = {
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
         "batch_size": args.batch_size, "lr": args.lr, "lr_schedule": args.lr_schedule,
-        "joint_only": joint_only, "warmup_steps": warmup_steps,
+        "warmup_steps": warmup_steps,
         "diag_every": int(getattr(args, "diag_every", 1)),
         "grad_clip": float(getattr(args, "grad_clip", 5.0)),
         "weight_decay": args.weight_decay, "adapter_wd": args.adapter_wd,
@@ -692,10 +836,6 @@ def run_train_multi(args) -> None:
         }, path)
 
     grad_clip = float(getattr(args, "grad_clip", 5.0))
-    snapshot_every = int(getattr(args, "snapshot_every", 0))
-    snap_dir = run_dir / "snapshots"
-    if snapshot_every > 0:
-        snap_dir.mkdir(parents=True, exist_ok=True)
     diag_groups = param_diagnostic_groups(encoder, head, flows)
     prev_snapshot = None
     best = float("inf"); best_epoch = 0; global_step = 0
@@ -707,7 +847,7 @@ def run_train_multi(args) -> None:
         # With ONE head the EMA normaliser (weight = 1/EMA) becomes a
         # time-varying global scale on the only loss, i.e. a second learning
         # rate schedule fighting the cosine. Pin it.
-        weights = (np.ones(N_HEADS) if joint_only
+        weights = (np.ones(N_HEADS) if N_HEADS == 1
                    else ema.update_and_weights([None] * N_HEADS)) * head_weight
         n_seen = 0
         ep_sum = {n: 0.0 for n in HEAD_NAMES}; ep_cnt = {n: 0 for n in HEAD_NAMES}
@@ -760,7 +900,6 @@ def run_train_multi(args) -> None:
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=weights, inject=not args.no_inject,
                     inject_samples=args.inject_samples, return_terms=True,
-                    joint_only=joint_only,
                 )
                 if want_diag and si == 0:
                     diag_extra.update(head_influence(terms, contexts))
@@ -780,7 +919,7 @@ def run_train_multi(args) -> None:
                     optimizer.step()
                     if scheduler is not None:
                         scheduler.step()
-                    if not joint_only:
+                    if N_HEADS > 1:
                         weights = ema.update_and_weights(raw) * head_weight
                     global_step += 1
                 last_raw, last_loss = raw, float(loss.item())
@@ -789,7 +928,7 @@ def run_train_multi(args) -> None:
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
-                if not joint_only:
+                if N_HEADS > 1:
                     weights = ema.update_and_weights(last_raw) * head_weight
                 global_step += 1
             # NOT gated on tracker.enabled: tracker.log mirrors to
@@ -888,11 +1027,10 @@ def run_train_multi(args) -> None:
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
         save(run_dir / "last.pt", epoch, val_pair_mean)
-        # Periodic snapshots: phase 2 picks the BODY by post-refit validation,
-        # which is not the same epoch as min joint val NLL. AION is frozen and
-        # excluded, so these are small.
-        if snapshot_every > 0 and epoch % snapshot_every == 0:
-            save(snap_dir / f"epoch_{epoch:03d}.pt", epoch, val_pair_mean)
+        # NOTE val_pair_mean gives every head an equal vote, so the joint --
+        # the whole point of a multi-target run -- counts for 1/N_HEADS of the
+        # selection. Choosing on something better is RUN_PLAN A3; it is not
+        # implemented here.
         if val_pair_mean < best:
             best = val_pair_mean
             best_epoch = epoch
