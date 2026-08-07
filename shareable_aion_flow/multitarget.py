@@ -923,6 +923,83 @@ def poisson_log_integrand(
     return u, log_q + log_lik, log_volume
 
 
+class UnconditionalRatePrior:
+    """A KDE over standardized log10 lambda, wearing the flow's call surface.
+
+    The "predict the marginal" baseline for a Poisson head: what a model that
+    ignores every input achieves on the same counts. Information gain is the
+    prior's count-NLL minus the model's count-NLL, in nats -- the SAME
+    definition Run A uses for its heads (normalizing_flow.KDEPrior), so a rate
+    head and a flux head can sit in one column of the modality table.
+
+    Fit to the TRAINING ANCHORS, i.e. the plug-in per-source MAP rates
+    log10(max(N - B, 1)/t). Two things follow and both are deliberate:
+
+      * the one-count floor puts a pile-up at the faint end, so this is a
+        PLUG-IN estimate of p(lambda), not a deconvolved one. It is a baseline,
+        not a claim about the rate distribution.
+      * both sides of the information gain are count-marginal likelihoods
+        pushed through the IDENTICAL quadrature, so whatever the plug-in gets
+        wrong it gets wrong on both sides of the subtraction. That is what
+        makes the difference fair even though neither term is exact.
+
+    Duck-types ConditionalNSFFlow.log_prob_draws, and ignores the context --
+    which is the entire point of a no-inputs baseline.
+    """
+
+    features = 1
+
+    def __init__(self, prior) -> None:
+        self.prior = prior
+
+    def log_prob_draws(self, y_draws: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        shape = y_draws.shape[:2]
+        return self.prior.log_prob_tensor(y_draws.reshape(-1)).reshape(shape)
+
+
+def build_poisson_rate_priors(train_y: np.ndarray, standardizers) -> list:
+    """One UnconditionalRatePrior per Poisson head (None elsewhere), from TRAIN rows."""
+    try:
+        from .normalizing_flow import KDEPrior
+    except ImportError:
+        from normalizing_flow import KDEPrior
+    out: list = []
+    for j, spec in enumerate(MULTI_TARGETS):
+        if not spec.get("pois"):
+            out.append(None)
+            continue
+        vals = train_y[:, j][np.isfinite(train_y[:, j])]
+        std = standardizers[j]
+        out.append(UnconditionalRatePrior(KDEPrior(std.transform_numpy(vals))))
+    return out
+
+
+def poisson_prior_count_nll(
+    *, priors, targets: torch.Tensor, pois: torch.Tensor, standardizers,
+) -> dict[int, tuple[float, int]]:
+    """{head index: (summed prior count-NLL, n rows)} over the available rows.
+
+    Scored on exactly the rows the model is scored on, through exactly the same
+    quadrature, so the difference of the two means is an information gain and
+    not a comparison of two row sets.
+    """
+    out: dict[int, tuple[float, int]] = {}
+    for j, prior in enumerate(priors):
+        if prior is None:
+            continue
+        mask = torch.isfinite(targets[:, j])
+        m = int(mask.sum())
+        if not m:
+            continue
+        n_b, b_b, t_b, present = _poisson_columns(pois, [j], mask)
+        nll = poisson_marginal_nll(
+            flow=prior, context=targets.new_zeros((m, 1)),
+            standardizers=[standardizers[j]], counts=n_b, bkg=b_b,
+            exposure=t_b, present=present)
+        out[j] = (float(nll.sum()), m)
+    return out
+
+
 def _poisson_columns(pois: torch.Tensor, cols: list[int], rows: torch.Tensor):
     """(counts, bkg, exposure, present) [m, D] for target columns `cols`."""
     sub = pois[rows][:, cols, :]                      # [m, D, 3]
@@ -1326,6 +1403,17 @@ def run_train_multi(args) -> None:
         print(f"[multi] {MULTI_TARGETS[j]['name']}: {len(vals)} train values, "
               f"mean {standardizers[j].mean:.3f} std {standardizers[j].std:.3f}", flush=True)
 
+    # Information-gain baseline for the Poisson heads: a KDE over the TRAIN
+    # anchors (the plug-in per-source MAP rates), scored through the same count
+    # marginal likelihood as the model. IG = prior count-NLL - model count-NLL.
+    # Per BAND only, not for the joint: an independent-band baseline would let a
+    # joint IG mix "the inputs help" with "the bands are correlated", and a
+    # metric that answers two questions at once answers neither.
+    rate_priors = build_poisson_rate_priors(train_y, standardizers) if pois_heads else []
+    if pois_heads:
+        print(f"[multi] count information-gain baseline: KDE over train anchors for "
+              f"{pois_heads} (per band; the joint has no unconfounded baseline)", flush=True)
+
     # AIONFLOW_STUB_ENCODER=1 swaps in a deterministic stand-in so the whole
     # loop -- optimiser groups, EMA weighting, scheduler, validation,
     # checkpointing, early stopping -- runs on a workstation with no `aion`
@@ -1650,19 +1738,25 @@ def run_train_multi(args) -> None:
         # choose on the complete branch alone.
         jb_sums = {"complete": 0.0, "quadrature": 0.0}
         jb_counts = {"complete": 0, "quadrature": 0}
+        prior_sums = np.zeros(N_TARGETS); prior_counts = np.zeros(N_TARGETS)
         preds = [[] for _ in range(N_TARGETS)]; trues = [[] for _ in range(N_TARGETS)]
         with torch.no_grad():
             for batch in val_loader:
                 batch = tuple(t.to(device, non_blocking=True) for t in batch)
                 y, slo, shi = lookup.batch(batch[7], device)
+                pois_v = lookup.batch_pois(batch[7], device)
                 cls_seq, _ = encoder.encode_tokens(batch, val_combo)
                 contexts = head(cls_seq)
                 jstats: dict = {}
                 _, raw = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
-                    stats=jstats, pois=lookup.batch_pois(batch[7], device),
+                    stats=jstats, pois=pois_v,
                 )
+                for jj, (tot, nn_) in poisson_prior_count_nll(
+                        priors=rate_priors, targets=y, pois=pois_v,
+                        standardizers=standardizers).items():
+                    prior_sums[jj] += tot; prior_counts[jj] += nn_
                 for br in ("complete", "quadrature"):
                     nb = jstats.get(f"joint_{br}_n", 0)
                     if nb:
@@ -1750,6 +1844,16 @@ def run_train_multi(args) -> None:
                             in zip(HEAD_NAMES, val_nll, probe_nll)})
             payload["gap/pair_mean"] = float(np.mean(val_nll - probe_nll))
         payload.update({f"val/r2_{n}": float(v) for n, v in zip(HEAD_NAMES[:N_TARGETS], val_r2) if np.isfinite(v)})
+        # Count information gain, per band: how many nats the inputs buy over a
+        # model that only knows the marginal rate distribution. Run B's headline
+        # modality number, and the only metric a Poisson head has that is
+        # comparable across heads at all (a bare count-NLL is not: it moves with
+        # exposure and with how many counts the band happens to get).
+        for j in range(N_TARGETS):
+            if prior_counts[j]:
+                prior_nll = prior_sums[j] / prior_counts[j]
+                payload[f"val/count_prior_nll_{HEAD_NAMES[j]}"] = float(prior_nll)
+                payload[f"val/count_ig_{HEAD_NAMES[j]}"] = float(prior_nll - val_nll[j])
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
         save(run_dir / "last.pt", epoch, selection)
