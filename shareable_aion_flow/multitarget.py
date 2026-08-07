@@ -204,6 +204,44 @@ def configure_heads(drop: tuple[str, ...] = ()) -> None:
     HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
 
 
+def configure_joint_marginal(names: tuple[str, ...] | None) -> None:
+    """Declare which joint dimensions may be MISSING and are integrated out.
+
+    A dimension in JOINT_MARGINAL is optional: a source lacking it goes through
+    the quadrature branch instead of being dropped. Every other joint dimension
+    is required, and a source lacking one is skipped for this head entirely.
+
+    This exists because the row-eligibility rule for Run A is "exclude only when
+    SFR and M* are BOTH missing", and the code could not express it. With P3
+    dropped, JOINT_MARGINAL was empty, so all three dimensions were required and
+    a source with M* but no SFR was thrown away. Measured on the merged split:
+    10,411 such rows, 1,259 of them galaxies -- an 18.7% loss on the arm the
+    science claim rests on, for want of one declaration.
+
+    SFR is never present without M* (measured: 0 rows, both samples), so making
+    SFR marginalisable implements the decided rule exactly.
+
+    Call AFTER configure_heads(): the required set is validated against the heads
+    that actually survive.
+    """
+    global JOINT_MARGINAL
+    if names is None:
+        return
+    names = tuple(names)
+    unknown = [n for n in names if n not in JOINT_PAIR]
+    if unknown:
+        raise ValueError(
+            f"--joint-marginal names {unknown}, which are not joint dimensions; "
+            f"the joint is {JOINT_PAIR}")
+    if set(names) == set(JOINT_PAIR):
+        raise ValueError(
+            "--joint-marginal cannot cover EVERY joint dimension: a row with none "
+            "of them present would contribute an empty likelihood, and the "
+            "quadrature would integrate over the whole joint rather than "
+            "conditioning on anything.")
+    JOINT_MARGINAL = names
+
+
 def configure_heads_from_config(config: dict | None) -> None:
     """Rebind the head set to match a CHECKPOINT, not the current default list.
 
@@ -623,6 +661,11 @@ def run_train_multi(args) -> None:
     configure_heads(tuple(args.drop_heads or ()))
     if args.drop_heads:
         print(f"[multi] dropped heads: {list(args.drop_heads)} -> {N_HEADS} heads", flush=True)
+    configure_joint_marginal(tuple(args.joint_marginal) if args.joint_marginal else None)
+    print(f"[multi] joint: {joint_dims()}"
+          + (f"  marginalised: {tuple(n for n in JOINT_MARGINAL if n in joint_dims())}"
+             if any(n in joint_dims() for n in JOINT_MARGINAL)
+             else "  (every dimension required)"), flush=True)
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     run_dir = Path(args.output_dir) / args.run_id
@@ -846,6 +889,7 @@ def run_train_multi(args) -> None:
         # column of every stored checkpoint. Written for the reader; the loader
         # does not consume these yet (RUN_PLAN A1).
         "fixed_combo": list(fixed_combo) if fixed_combo else None,
+        "select_metric": getattr(args, "select_metric", "pair_mean"),
         "val_combo": list(val_combo),
         "joint_dims": list(joint_dims()),
         "joint_marginal": [n for n in JOINT_MARGINAL if n in joint_dims()],
@@ -1003,6 +1047,13 @@ def run_train_multi(args) -> None:
         # R^2 per scalar head so the review does not need a separate eval pass
         encoder.eval(); head.eval(); flows.eval()
         sums = np.zeros(N_HEADS); counts = np.zeros(N_HEADS)
+        # Per-branch joint accounting. The joint's complete and quadrature
+        # branches are densities over DIFFERENT numbers of dimensions, so the
+        # pooled number is a coverage-weighted mixture of two things that are
+        # not on one scale. Accumulate them separately so --select-metric can
+        # choose on the complete branch alone.
+        jb_sums = {"complete": 0.0, "quadrature": 0.0}
+        jb_counts = {"complete": 0, "quadrature": 0}
         preds = [[] for _ in range(N_TARGETS)]; trues = [[] for _ in range(N_TARGETS)]
         with torch.no_grad():
             for batch in val_loader:
@@ -1010,10 +1061,17 @@ def run_train_multi(args) -> None:
                 y, slo, shi = lookup.batch(batch[7], device)
                 cls_seq, _ = encoder.encode_tokens(batch, val_combo)
                 contexts = head(cls_seq)
+                jstats: dict = {}
                 _, raw = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
+                    stats=jstats,
                 )
+                for br in ("complete", "quadrature"):
+                    nb = jstats.get(f"joint_{br}_n", 0)
+                    if nb:
+                        jb_sums[br] += jstats[f"joint_{br}_nll"] * nb
+                        jb_counts[br] += nb
                 n = int(batch[6].shape[0])
                 for j, val in enumerate(raw):
                     if val is not None:
@@ -1033,13 +1091,40 @@ def run_train_multi(args) -> None:
         val_nll = sums / np.maximum(counts, 1)
         val_sum = float(val_nll.sum())
         val_pair_mean = float(sums.sum() / max(counts.sum(), 1))
+        joint_branch_nll = {br: (jb_sums[br] / jb_counts[br]) if jb_counts[br] else float("nan")
+                            for br in ("complete", "quadrature")}
+        # THE number best.pt is chosen on. val_pair_mean gives every head an
+        # equal vote, so the joint -- the entire point of a multi-target run --
+        # counts for 1/N_HEADS, alongside band fluxes the run may not care
+        # about. --select-metric names something better.
+        select_metric = getattr(args, "select_metric", "pair_mean") or "pair_mean"
+        if select_metric == "pair_mean":
+            selection = val_pair_mean
+        elif select_metric == "joint":
+            selection = float(val_nll[N_TARGETS])
+        elif select_metric == "joint_complete":
+            selection = joint_branch_nll["complete"]
+        elif select_metric == "sum":
+            selection = val_sum
+        else:
+            raise ValueError(f"unknown --select-metric {select_metric!r}")
+        if not np.isfinite(selection):
+            raise ValueError(
+                f"--select-metric {select_metric} is {selection} at epoch {epoch}: "
+                f"joint branch counts were {jb_counts}. Selecting on a metric no "
+                f"row supports would checkpoint arbitrarily; choose another.")
         dt = time.monotonic() - t0
         peak = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
         print(f"epoch={epoch} val_sum={val_sum:.3f} " +
               " ".join(f"{n}={v:.3f}" for n, v in zip(HEAD_NAMES, val_nll)) +
               f" ({dt:.0f}s, {n_seen/dt:.1f}/s, {peak:.1f}GB)", flush=True)
         payload = {"epoch": epoch, "val/multi_nll_sum": val_sum,
-                   "val/pair_mean_nll": val_pair_mean, "epoch_seconds": dt,
+                   "val/pair_mean_nll": val_pair_mean,
+                   "val/joint_complete_nll": joint_branch_nll["complete"],
+                   "val/joint_quadrature_nll": joint_branch_nll["quadrature"],
+                   "val/joint_complete_n": jb_counts["complete"],
+                   "val/joint_quadrature_n": jb_counts["quadrature"],
+                   "val/selection": selection, "epoch_seconds": dt,
                    "throughput/samples_per_second": n_seen / dt, "vram/peak_gb": peak}
         payload.update({f"val/nll_{n}": float(v) for n, v in zip(HEAD_NAMES, val_nll)})
         # per-epoch train means (count-weighted): smooth convergence signal,
@@ -1062,20 +1147,17 @@ def run_train_multi(args) -> None:
         payload.update({f"val/r2_{n}": float(v) for n, v in zip(HEAD_NAMES[:N_TARGETS], val_r2) if np.isfinite(v)})
         payload.update({f"ema/weight_{n}": float(w) for n, w in zip(HEAD_NAMES, weights)})
         tracker.log(payload, step=global_step)
-        save(run_dir / "last.pt", epoch, val_pair_mean)
-        # NOTE val_pair_mean gives every head an equal vote, so the joint --
-        # the whole point of a multi-target run -- counts for 1/N_HEADS of the
-        # selection. Choosing on something better is RUN_PLAN A3; it is not
-        # implemented here.
-        if val_pair_mean < best:
-            best = val_pair_mean
+        save(run_dir / "last.pt", epoch, selection)
+        if selection < best:
+            best = selection
             best_epoch = epoch
-            save(run_dir / "best.pt", epoch, val_pair_mean)
+            save(run_dir / "best.pt", epoch, selection)
         if epoch - best_epoch >= args.early_stop_patience:
             print(f"[early-stop] no improvement for {args.early_stop_patience} epochs "
                   f"(best epoch {best_epoch})", flush=True)
             break
-    tracker.summary({"val/best_pair_mean_nll": best, "best_epoch": best_epoch})
+    tracker.summary({"val/best_selection": best, "select_metric": select_metric,
+                     "best_epoch": best_epoch})
     tracker.finish()
 
 

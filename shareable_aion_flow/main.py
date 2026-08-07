@@ -1032,6 +1032,29 @@ def parse_args() -> argparse.Namespace:
                          "untrained flow, which is smoother than a trained one.")
     mt.add_argument("--joint-quad-span", type=float, default=None,
                     help="Half-width of the quadrature grid in standardized units (default 5.0).")
+    mt.add_argument("--joint-marginal", nargs="*", default=None, metavar="DIM",
+                    help="Joint dimensions that may be MISSING and are integrated "
+                         "out by quadrature instead of dropping the row. Every "
+                         "other joint dimension is required. Run A wants "
+                         "`--joint-marginal log_sfr`: the rule is 'exclude only "
+                         "when SFR and M* are BOTH missing', and SFR is never "
+                         "present without M*, so this recovers 10,411 rows "
+                         "(1,259 galaxies) on the merged sample that are "
+                         "otherwise thrown away. Pass with no names to require "
+                         "every dimension.")
+    mt.add_argument("--select-metric",
+                    choices=("pair_mean", "joint", "joint_complete", "sum"),
+                    default="pair_mean",
+                    help="What best.pt and early stopping are chosen on. "
+                         "pair_mean (default, and what every run before "
+                         "2026-08-07 used) gives EVERY head an equal vote, so "
+                         "the joint counts for 1/N_HEADS alongside band fluxes "
+                         "the run may not care about. `joint` selects on the "
+                         "joint head alone; `joint_complete` on its complete "
+                         "branch only, which is the right choice when some rows "
+                         "go through quadrature, because the two branches are "
+                         "densities over different numbers of dimensions and the "
+                         "pooled number drifts with coverage.")
     mt.add_argument("--fixed-combo", default=None,
                     help="Pin the conditioning set for the WHOLE run, '+'-joined, "
                          "e.g. 'spectra+z'. Applies to training AND to both "
