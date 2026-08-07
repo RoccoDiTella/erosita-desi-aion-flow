@@ -60,6 +60,22 @@ DIAG_EVERY="${DIAG_EVERY:-50}"
 JOINT_QUAD_NODES="${JOINT_QUAD_NODES:-}"
 JOINT_QUAD_SPAN="${JOINT_QUAD_SPAN:-}"
 
+# What experiment this job IS. All three default to empty, i.e. the historical
+# behaviour, so an existing recipe keeps its meaning.
+#   FIXED_COMBO     pins the conditioning set for training AND validation AND
+#                   therefore checkpoint selection. Run A: "spectra+z". Run B
+#                   wants all four modalities, so it leaves this empty.
+#   JOINT_MARGINAL  joint dimensions that may be MISSING and get integrated out
+#                   rather than dropping the row. Run A: "log_sfr", which is the
+#                   rule "exclude only when SFR and M* are BOTH missing" and is
+#                   worth 1,523 rows on the dr2v2 train split alone.
+#   SELECT_METRIC   what best.pt is chosen on. The default pair_mean gives every
+#                   head an equal vote, so the joint counts for 1/N_HEADS.
+#                   Run A: "joint_complete".
+FIXED_COMBO="${FIXED_COMBO:-}"
+JOINT_MARGINAL="${JOINT_MARGINAL:-}"
+SELECT_METRIC="${SELECT_METRIC:-}"
+
 # --no-inject is passed unconditionally, and there is no INJECT_SAMPLES knob any
 # more. Injection smears each label by its own split-normal error bar, which on
 # the X-ray targets is most of the residual variance, so it trains the flow
@@ -79,6 +95,9 @@ python -m shareable_aion_flow.main train-multi \
   --diag-every "$DIAG_EVERY" \
   ${JOINT_QUAD_NODES:+--joint-quad-nodes $JOINT_QUAD_NODES} \
   ${JOINT_QUAD_SPAN:+--joint-quad-span $JOINT_QUAD_SPAN} \
+  ${FIXED_COMBO:+--fixed-combo $FIXED_COMBO} \
+  ${JOINT_MARGINAL:+--joint-marginal $JOINT_MARGINAL} \
+  ${SELECT_METRIC:+--select-metric $SELECT_METRIC} \
   --adapter-lr "$ADAPTER_LR" --adapter-wd "$ADAPTER_WD" \
   --weight-decay "$WEIGHT_DECAY" --beta1 "$BETA1" \
   --no-inject \
