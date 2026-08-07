@@ -38,6 +38,11 @@
 set -eo pipefail
 cd "$SLURM_SUBMIT_DIR"
 source scripts/fasrc_env.sh
+# _dataset.sh refuses to guess, by design. This sweep sizes RUN A, so it names
+# dr2v2 rather than inheriting whatever happens to be in the caller's env --
+# but an explicit DATASET= still wins, so the same script can size a dr2
+# reproduction without editing.
+export DATASET="${DATASET:-dr2v2}"
 source sbatch/_dataset.sh
 
 OUT="${AIONFLOW_ROOT}/outputs/sweep-${SLURM_JOB_ID}"
