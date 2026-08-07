@@ -60,8 +60,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shareable_aion_flow"))
 
 import multitarget as mt                                              # noqa: E402
-from data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders  # noqa: E402
+from data_to_aion_embeddings import build_dataloaders                 # noqa: E402
 from normalizing_flow import TargetStandardizer                       # noqa: E402
+from stub_encoder import build_encoder                                # noqa: E402
 
 ALL_COMBO = ("spectra", "z", "wise", "image")
 
@@ -186,8 +187,7 @@ def main() -> None:
         print(f"[post] derived {n} = " + " ".join(
             f"{c:+g}*{d}" for c, d in zip(w, base_dims) if c))
 
-    encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
-                               num_cls=mt.N_HEADS).to(device)
+    encoder = build_encoder(num_cls=mt.N_HEADS, device=device, tag="post")
     encoder.load_state_dict(ck["encoder_trainable_state_dict"], strict=False)
     head = mt.SharedCLSHead().to(device)
     head.load_state_dict(ck["head_state_dict"])

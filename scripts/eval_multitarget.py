@@ -43,7 +43,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shareable_aion_flow.attention_pooling_head import MODALITIES, combo_name  # noqa: E402
-from shareable_aion_flow.data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders  # noqa: E402
+from shareable_aion_flow.data_to_aion_embeddings import build_dataloaders  # noqa: E402
 from shareable_aion_flow.eval_core import (  # noqa: E402
     SAMPLE_CHOICES, build_priors, hr_summary_rows, resolve_samples, run_eval,
 )
@@ -51,6 +51,7 @@ from shareable_aion_flow.multitarget import (  # noqa: E402
     MultiTargetFlows, MultiTargetLookup, SharedCLSHead,
 )
 from shareable_aion_flow.normalizing_flow import TargetStandardizer  # noqa: E402
+from shareable_aion_flow.stub_encoder import build_encoder  # noqa: E402
 
 
 def main() -> None:
@@ -63,6 +64,12 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=224)
     ap.add_argument("--num-samples", type=int, default=128)
     ap.add_argument("--joint-samples", type=int, default=256)
+    ap.add_argument("--num-workers", type=int, default=8)
+    ap.add_argument("--device", default=None,
+                    help="torch device; default cuda when available. Pass cpu to run "
+                         "this script on a workstation, which together with "
+                         "AIONFLOW_STUB_ENCODER=1 makes the eval path smoke-testable "
+                         "off the cluster (its numbers are then meaningless).")
     ap.add_argument("--sample", choices=SAMPLE_CHOICES, default="native",
                     help="row set per combo: native = rows supporting that combo, "
                          "common = rows supporting every modality (required for cross-combo "
@@ -71,7 +78,7 @@ def main() -> None:
                          "names no sample cannot be mistaken for a deck-grade table.")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ckpt = torch.load(args.checkpoint, map_location=device)
     # The checkpoint may have been trained with heads dropped, and with a
     # different joint. Rebind the head configuration before building anything:
@@ -81,8 +88,7 @@ def main() -> None:
     _mt.configure_heads_from_config(ckpt.get("config", {}))
     print(f"[eval] heads: {_mt.HEAD_NAMES}", flush=True)
     print(f"[eval] joint dimensions (flow column order): {_mt.joint_dims()}", flush=True)
-    encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
-                               num_cls=_mt.N_HEADS).to(device)
+    encoder = build_encoder(num_cls=_mt.N_HEADS, device=device, tag="eval")
     missing, unexpected = encoder.load_state_dict(ckpt["encoder_trainable_state_dict"], strict=False)
     assert not unexpected, f"unexpected encoder keys: {unexpected[:4]}"
     head = SharedCLSHead().to(device)
@@ -95,7 +101,7 @@ def main() -> None:
     _, _, test_loader = build_dataloaders(
         staged_dir=args.staged_dir, target_name=None,
         batch_size=args.batch_size, eval_batch_size=args.batch_size,
-        num_workers=8, clean_split_csv=args.clean_split_csv,
+        num_workers=args.num_workers, clean_split_csv=args.clean_split_csv,
     )
     lookup = MultiTargetLookup(args.staged_dir, args.extra_targets_csv)
     assign = pd.read_csv(args.clean_split_csv)

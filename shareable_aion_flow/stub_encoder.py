@@ -20,6 +20,16 @@ validates, checkpoints and exits. Treat a green smoke as "the pipeline is
 wired", never as "the model works".
 
     AIONFLOW_STUB_ENCODER=1 python -m shareable_aion_flow.main train-multi ...
+    AIONFLOW_STUB_ENCODER=1 python scripts/eval_multitarget.py --device cpu ...
+
+`build_encoder` is the ONE place that reads the switch. It used to live inside
+`run_train_multi` only, which meant the train loop ran off-GPU while everything
+downstream of it -- eval, posterior structure, the HR quadrature -- built the
+real encoder unconditionally and could not run at all without `aion`. The
+train->eval chain was therefore only smoke-testable up to the checkpoint, and
+the eval half was first exercised on the cluster after the expensive part had
+already succeeded. Every consumer now goes through this function, so a stub
+run covers the whole chain.
 """
 
 from __future__ import annotations
@@ -34,6 +44,44 @@ EMBED_DIM = 768
 
 def stub_requested() -> bool:
     return os.environ.get("AIONFLOW_STUB_ENCODER", "").strip() not in ("", "0", "false", "False")
+
+
+def build_encoder(num_cls: int, device, grad_checkpoint: bool = False, tag: str = "aionflow"):
+    """The read-only-CLS encoder: StubTokenEncoder if the switch is set, else AION.
+
+    THE SINGLE READER OF `AIONFLOW_STUB_ENCODER`. Call this instead of
+    constructing `AIONTokenEncoder` directly, so train, eval, posterior
+    structure and the HR quadrature all honour the same switch and a
+    workstation can run the whole chain.
+
+    `tag` only prefixes the log line ("multi", "eval", "post", "hr"), so a log
+    says which stage is stubbed. The warning is printed on EVERY stub build and
+    is deliberately loud: the contexts are synthetic, so no number produced
+    downstream of a stub encoder means anything.
+    """
+    if stub_requested():
+        print(f"[{tag}] AIONFLOW_STUB_ENCODER set: using StubTokenEncoder. "
+              "PIPELINE SMOKE ONLY -- the contexts are synthetic and every metric "
+              "from this run is meaningless.", flush=True)
+        return StubTokenEncoder(num_cls=num_cls).to(device)
+    # Deferred, and via the package/flat fallback the rest of this repo uses:
+    # importing the real encoder module at import time would drag the heavy
+    # dependency chain into the very environment the stub exists to serve.
+    try:
+        from .data_to_aion_embeddings import AIONTokenEncoder
+    except ImportError:
+        from data_to_aion_embeddings import AIONTokenEncoder
+    try:
+        return AIONTokenEncoder(
+            freeze=False, cls_mode=True, cls_variant="readonly",
+            num_cls=num_cls, grad_checkpoint=grad_checkpoint,
+        ).to(device)
+    except ImportError as exc:
+        # The bare "No module named 'aion'" gives no clue that this repo has a
+        # supported way to run without it.
+        raise ImportError(
+            f"{exc}  (no `aion` here? set AIONFLOW_STUB_ENCODER=1 for a "
+            f"plumbing-only smoke run -- its numbers are meaningless)") from exc
 
 
 class StubTokenEncoder(nn.Module):

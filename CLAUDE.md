@@ -45,7 +45,7 @@ That script lists which figures it regenerates and which are one-off PNGs it can
 
 - **`logmstar` must be in `--drop-heads`.** It is `sidecar: False`, reads from the staged HDF5, and staging no longer writes it. The loader now RAISES rather than handing a head an all-NaN target — that used to build the head, optimise over it, and never train it, which in a loss curve is indistinguishable from instant convergence.
 - **Two-phase training is gone** (2026-08-06). No `--joint-only`, no `--snapshot-every`, no `refit_heads.py`/`refit_compare.py`. Models train from scratch on a declared head set; a different head set is a different job. The EMA loss-weight pin survives, re-derived from `N_HEADS == 1`.
-- **Local smoke without a GPU:** `AIONFLOW_STUB_ENCODER=1` runs the entire `train-multi` loop on CPU with no `aion` installed. Every metric from such a run is meaningless; it proves plumbing only. See `docs/RUN_PLAN.md` and the stub's docstring.
+- **Local smoke without a GPU:** `AIONFLOW_STUB_ENCODER=1` runs the entire `train-multi` loop on CPU with no `aion` installed. Every metric from such a run is meaningless; it proves plumbing only. See `docs/RUN_PLAN.md` and the stub's docstring. The switch is read in ONE place — `shareable_aion_flow/stub_encoder.py::build_encoder` — so it now covers the chain past the checkpoint too: `eval_multitarget.py`, `posterior_structure.py` and `hr_from_joint.py` build their encoder through it and all take `--device cpu`. Anything that constructs `AIONTokenEncoder` directly is unrunnable off the cluster; `tests/test_stub_encoder.py` guards that.
 
 ## Pointers
 - FASRC ops + push-allowlist: `FASRC_NOTES.md`; env config `.fasrc.env` (from `.fasrc.env.example`).

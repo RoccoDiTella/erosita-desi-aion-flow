@@ -645,15 +645,15 @@ def run_train_multi(args) -> None:
     import time
 
     try:
-        from .stub_encoder import stub_requested
+        from .stub_encoder import build_encoder
         from .attention_pooling_head import ComboSampler, MODALITIES
-        from .data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
+        from .data_to_aion_embeddings import build_dataloaders, write_json
         from .main import _OOM_ERROR  # noqa: F401  (import kept for parity)
         from .tracking import init_tracking
     except ImportError:
-        from stub_encoder import stub_requested
+        from stub_encoder import build_encoder
         from attention_pooling_head import ComboSampler, MODALITIES
-        from data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
+        from data_to_aion_embeddings import build_dataloaders, write_json
         from tracking import init_tracking
 
     import pandas as pd
@@ -726,25 +726,8 @@ def run_train_multi(args) -> None:
     # installed. It exists because a wiring bug used to cost an A100 allocation
     # and a SLURM log to find. It teaches nothing about the science; the
     # contexts are synthetic. Never report a number from a stub run.
-    if stub_requested():
-        # Package/flat fallback, matching the import block at the top of this
-        # function. The stub exists FOR the workstation and the tests import
-        # this module flat, so a package-relative import alone would raise
-        # "attempted relative import with no known parent package" in exactly
-        # the environment the stub was written for.
-        try:
-            from .stub_encoder import StubTokenEncoder
-        except ImportError:
-            from stub_encoder import StubTokenEncoder
-        print("[multi] AIONFLOW_STUB_ENCODER set: using StubTokenEncoder. "
-              "PIPELINE SMOKE ONLY -- every metric from this run is meaningless.",
-              flush=True)
-        encoder = StubTokenEncoder(num_cls=N_HEADS).to(device)
-    else:
-        encoder = AIONTokenEncoder(
-            freeze=False, cls_mode=True, cls_variant="readonly", num_cls=N_HEADS,
-            grad_checkpoint=args.grad_checkpoint,
-        ).to(device)
+    encoder = build_encoder(num_cls=N_HEADS, device=device,
+                            grad_checkpoint=args.grad_checkpoint, tag="multi")
     head = SharedCLSHead().to(device)
     flows = MultiTargetFlows().to(device)
     # Separate LR for the zero-initialized read adapters: on a single LR they

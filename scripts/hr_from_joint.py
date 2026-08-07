@@ -41,12 +41,13 @@ from scipy.stats import gaussian_kde
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shareable_aion_flow.attention_pooling_head import MODALITIES  # noqa: E402
-from shareable_aion_flow.data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders  # noqa: E402
+from shareable_aion_flow.data_to_aion_embeddings import build_dataloaders  # noqa: E402
 from shareable_aion_flow.eval_core import C_P2, C_P3, HR_BANDS, assert_joint_matches_flow  # noqa: E402
 from shareable_aion_flow.multitarget import (  # noqa: E402
     MultiTargetFlows, MultiTargetLookup, SharedCLSHead,
 )
 from shareable_aion_flow.normalizing_flow import TargetStandardizer  # noqa: E402
+from shareable_aion_flow.stub_encoder import build_encoder  # noqa: E402
 
 DELTA = C_P2 - C_P3                   # d = v - u + DELTA
 LN10 = math.log(10.0)
@@ -116,9 +117,12 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=224)
     ap.add_argument("--u-nodes", type=int, default=96)
     ap.add_argument("--hr-grid", type=int, default=81)
+    ap.add_argument("--device", default=None,
+                    help="torch device; default cuda when available. cpu + "
+                         "AIONFLOW_STUB_ENCODER=1 runs this off the cluster.")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ckpt = torch.load(args.checkpoint, map_location=device)
     import shareable_aion_flow.multitarget as _mt
     _mt.configure_heads_from_config(ckpt.get("config", {}))
@@ -137,8 +141,7 @@ def main() -> None:
         raise SystemExit(NOT_APPLICABLE)
     col2, col3 = _mt.joint_col(HR_BANDS[0]), _mt.joint_col(HR_BANDS[1])
 
-    encoder = AIONTokenEncoder(freeze=False, cls_mode=True, cls_variant="readonly",
-                               num_cls=_mt.N_HEADS).to(device)
+    encoder = build_encoder(num_cls=_mt.N_HEADS, device=device, tag="hr")
     encoder.load_state_dict(ckpt["encoder_trainable_state_dict"], strict=False)
     head = SharedCLSHead().to(device); head.load_state_dict(ckpt["head_state_dict"])
     flows = MultiTargetFlows().to(device); flows.load_state_dict(ckpt["flows_state_dict"])
