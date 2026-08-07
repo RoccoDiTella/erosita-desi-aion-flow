@@ -41,6 +41,11 @@ SAMPLES="${SAMPLES:-512}"
 DERIVED="${DERIVED:-}"
 # Pool held-out splits and/or split the report by a class column. The GALAXY
 # subsample is small, so pooling val+test is usually needed for any power.
+SAVE_DRAWS="${SAVE_DRAWS:-1}"   # per-source DRAWS, not just correlation
+# matrices. scripts/posterior_correlation.py needs them: the kernel-conditional
+# estimator and BOTH nulls are impossible from stored correlation matrices alone,
+# which fix the answer to the linear/Gaussian estimator. ~140 MB at N=22,800.
+# Set SAVE_DRAWS= (empty) to get the old, smaller npz.
 SPLITS="${SPLITS:-val}"
 # cigale_spectype lives in the sidecar, so --group-csv defaults to the same file
 # _dataset.sh resolved. It is NaN for 1,060 of 25,582 rows and contains no STARs
@@ -62,5 +67,6 @@ python scripts/posterior_structure.py \
   ${DERIVED:+--derived $DERIVED} \
   --splits $SPLITS \
   --combo $COMBO \
+  ${SAVE_DRAWS:+--save-draws} \
   ${GROUP_CSV:+--group-csv "$GROUP_CSV" --group-col "$GROUP_COL"} \
   --out "$OUT"

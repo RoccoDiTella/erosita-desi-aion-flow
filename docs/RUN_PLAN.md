@@ -59,7 +59,9 @@ synthetic-independent null are a property of the ESTIMATOR, not the model, and
 Run A's claim ("which objects get negative correlation") is a claim about the
 SKEW of the per-source correlation distribution -- uninterpretable without one.
 But they run AGAINST Run A's posteriors, so they are a **gate on reading the
-result**, not work sitting in front of us.
+result**, not work sitting in front of us. **BUILT 2026-08-07**, both of them,
+in `scripts/posterior_correlation.py` (§2) -- so the gate is now a command to
+run rather than code to write.
 
 **Demoted: the alpha_ox existential check.** It was existential when the framing
 was "predict X-ray luminosity from optical". Run A claims a posterior correlation
@@ -102,6 +104,28 @@ retraining, and the choice is deferred until real posteriors can be eyeballed:
   shortcut held.
 Sanity check to hold: within a posterior r_LM and r_SM are both positive, so the
 partial correlation MUST come out more negative than the raw one.
+
+**BUILT 2026-08-07: `scripts/posterior_correlation.py`.** Both estimators, both
+nulls (permutation and synthetic-independent), the sanity check, a per-source CSV
+stratified by spectype and carrying z / log M*, and the distribution figure with
+the nulls overlaid. Covered by `tests/test_posterior_correlation.py` (20 tests,
+including recovery of a conditional correlation that is known by construction and
+a joint whose rho FLIPS SIGN with M*, where the kernel estimator succeeds and the
+partial correlation averages to zero -- the case that justifies carrying two).
+
+Two operational facts that bind the run:
+- **`posterior_structure.py` must be invoked with `--save-draws`.** Its `.npz`
+  otherwise stores only per-source correlation MATRICES, which fix the estimator
+  to the linear/Gaussian one; the kernel estimator and both nulls need the raw
+  draws. Cost is ~140 MB at N=22,800 x S=512 x D=3. Without the flag the analysis
+  script exits with instructions rather than silently reporting half the answer.
+- **The sanity check is not quite the theorem it is written as above.** With
+  c = r_LM r_SM and d = sqrt((1-r_LM^2)(1-r_SM^2)), `rho < r_LS` holds iff
+  `r_LS (1 - d) < c`. That is unconditional for r_LS <= 0 (the script hard-asserts
+  it) and for symmetric r_LM ~ r_SM, but it fails legitimately for large positive
+  r_LS with strongly ASYMMETRIC r_LM/r_SM (r_LM=0.9, r_SM=0.1, r_LS=0.30 gives
+  rho=+0.48). The script warns loudly, reports the violators' asymmetry so the
+  algebraic corner can be told from a bug, and escalates above 5%.
 
 **Settled decisions.** Conditioning is spectrum + z only (no WISE, no images).
 Noise injection OFF. Train on the whole sample, evaluate stratified by spectype,

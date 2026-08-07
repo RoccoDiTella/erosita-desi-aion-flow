@@ -3,7 +3,12 @@
 #SBATCH --account=finkbeiner_lab
 #SBATCH -p shared
 #SBATCH -c 16
-#SBATCH --mem 48G
+#SBATCH --mem 8G
+# 8G is MEASURED, not guessed: job 37694119 staged all 22,800 rows with
+# MaxRSS 963 MB. It asked for 48G, i.e. 2% utilisation. Over-requesting memory
+# on a shared cluster delays our own jobs, holds RAM other users cannot have,
+# and counts against fairshare -- and an inflated request is what got the first
+# gpu_test submission rejected outright. 8G is ~8x the measured peak.
 #SBATCH -t 0-02:00
 #SBATCH -o logs/prepare_v2_%j.out
 #SBATCH -e logs/prepare_v2_%j.err

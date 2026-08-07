@@ -164,6 +164,15 @@ def main() -> None:
                     help="extra columns as linear combinations of the joint dims, "
                          "e.g. log_ssfr=log_sfr-logmstar_cigale. Propagated through "
                          "the DRAWS, so the posterior covariance is carried exactly.")
+    ap.add_argument("--save-draws", action="store_true",
+                    help="also store the raw per-source posterior DRAWS "
+                         "[N, samples, D] in the .npz. The per-source correlation "
+                         "matrices are a lossy summary: they fix the estimator to a "
+                         "linear/Gaussian one. Anything that conditions NONLINEARLY "
+                         "-- the kernel-weighted rho(M*) in "
+                         "scripts/posterior_correlation.py -- needs the draws "
+                         "themselves, and so do the permutation and synthetic nulls. "
+                         "Costs 4*N*samples*D bytes (~140 MB at N=22,800, S=512, D=3).")
     ap.add_argument("--eval-batch-size", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default=None)
@@ -206,7 +215,7 @@ def main() -> None:
               "memorisation, so the residual check is no longer a fair test.")
     batches = [b for s in args.splits for b in loaders[s]]
 
-    truths, means, sds, per_source, tids = [], [], [], [], []
+    truths, means, sds, per_source, tids, draws = [], [], [], [], [], []
     with torch.no_grad():
         for b in batches:
             b = tuple(t.to(device, non_blocking=True) for t in b)
@@ -233,6 +242,8 @@ def main() -> None:
             truths.append(yt.cpu().numpy())
             tids.append(b[7].cpu().numpy().astype(np.int64))
             pn = phys.cpu().numpy()
+            if args.save_draws:
+                draws.append(pn.astype(np.float32))
             for i in range(pn.shape[0]):
                 per_source.append(corr_matrix(pn[i]))
 
@@ -355,11 +366,15 @@ def main() -> None:
     labels = np.array(["ALL"] * len(tid_all), dtype=object)
     for gname, gmask in groups[1:]:
         labels[gmask] = gname
-    np.savez_compressed(
-        npz, per_source=stack_all.astype(np.float32), targetid=tid_all,
+    payload = dict(
+        per_source=stack_all.astype(np.float32), targetid=tid_all,
         group=labels.astype(str), dims=np.array(dims), truth=truth_all.astype(np.float32),
         mean=mean_all.astype(np.float32), sd=spread_all.astype(np.float32))
-    print(f"wrote {npz}  (per-source correlations, {stack_all.shape})")
+    if args.save_draws:
+        payload["draws"] = np.concatenate(draws)                # [N, samples, D]
+    np.savez_compressed(npz, **payload)
+    print(f"wrote {npz}  (per-source correlations, {stack_all.shape}" +
+          (f"; draws {payload['draws'].shape}" if args.save_draws else "") + ")")
 
 
 if __name__ == "__main__":
