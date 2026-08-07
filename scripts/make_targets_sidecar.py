@@ -4,6 +4,17 @@
 Everything here is joined by targetid and consumed at training time via
 ``--extra-targets-csv``; nothing is re-staged.
 
+**The row set comes from ``--universe``, the DR2 target table, and from nowhere
+else.** It used to come from ``match_quality.csv`` filtered to ``keep``, which
+made every CIGALE label in the file keep=True by construction: an unreported
+cut, invisible in the sidecar, and one that could not be stated alongside the
+detection gate as a single selection function. Worse, it made the sidecar
+un-rebuildable outside the DR1 audit -- `match_quality.csv` holds no row for any
+of the 104,945 expansion targets, so rebuilding with that gate in place yields
+zero CIGALE labels rather than an error. The reliability cuts (NWAY p_any, and
+the DR1 audit where its verdict still transfers) now live in
+``make_split.py``, which records them.
+
 **Why CIGALE for stellar mass, SFR and sSFR.** All three must come from ONE fit
 or sSFR is a mongrel of two catalogues. CIGALE is chosen over FastSpecFit for
 this sample because it fits an explicit AGN component (that is where AGNFRAC
@@ -29,9 +40,13 @@ that differs from the pack -- VO09/LE20/SHEN11/YU23 intercorrelate at 0.99+, and
 LE20 vs VO09 is exactly 1.0000, a pure rescaling. VO09 rides along as the
 classic comparison target; the other three are carried as columns, not trained.
 
-    python scripts/make_targets_sidecar.py --cigale IronPhysProp_v1.2.fits \
-        --bh-vac VAC_BHmass_338_v1.7.fits --match-quality match_quality.csv \
-        --all-properties ... --bands-csv targets_bands.csv --out targets_sidecar.csv
+    python scripts/make_targets_sidecar.py --universe data/dr2/dr2_targets.csv \
+        --cigale data/vac/IronPhysProp_v1.2.fits \
+        --bh-vac data/VAC_BHmass_338_v1.7.fits --out data/dr2/targets_sidecar_dr2_v2.csv
+
+Write to the `_v2` name. `sbatch/_dataset.sh` DATASET=dr2v2 resolves it, and the
+un-suffixed `targets_sidecar_dr2.csv` is the pre-rebuild artifact kept so an
+already-published number stays reproducible.
 """
 
 from __future__ import annotations
@@ -89,32 +104,44 @@ def load_bh(path: Path, want: set) -> pd.DataFrame:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--universe", type=Path, required=True,
+                    help="DR2 target table from make_dr2_targets.py; defines the row set")
     ap.add_argument("--cigale", type=Path, required=True)
     ap.add_argument("--bh-vac", type=Path, default=None,
                     help="VAC_BHmass_338_v1.7.fits; omit to skip the M_BH targets")
-    ap.add_argument("--match-quality", type=Path, required=True)
-    ap.add_argument("--all-properties", type=Path, required=True)
-    ap.add_argument("--bands-csv", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--max-sigma", type=float, default=1.0,
-                    help="drop a label whose error exceeds this (dex)")
+                    help="drop a label whose error exceeds this (dex); 'inf' to keep all")
     args = ap.parse_args()
 
-    props = pd.read_csv(args.all_properties, low_memory=False,
-                        usecols=["targetid", "survey", "program", "spectype", "logmstar", "z"])
-    mq = pd.read_csv(args.match_quality)
-    keep = set(mq.loc[mq.keep.astype(bool), "targetid"].astype(np.int64))
-    ours = props[props.targetid.isin(keep)].drop_duplicates("targetid").reset_index(drop=True)
+    ours = pd.read_csv(args.universe, low_memory=False)
+    if "targetid" not in ours.columns:
+        raise SystemExit(f"--universe {args.universe} has no targetid column")
+    ours["targetid"] = ours.targetid.astype(np.int64)
+    if ours.targetid.duplicated().any():
+        raise SystemExit(f"--universe {args.universe} has duplicate targetids; "
+                         "the sidecar is a per-targetid join and cannot resolve them")
     n_ours = len(ours)
-    print(f"[ours] clean sample n={n_ours:,}")
-    want = set(ours.targetid.astype(np.int64))
+    print(f"[ours] universe {args.universe.name}: n={n_ours:,}")
+    want = set(ours.targetid)
 
     # ---------------- CIGALE: mass, SFR, sSFR ----------------
     cat = load_cigale(args.cigale, want)
-    print(f"[cigale] {len(cat):,} rows match")
-    cat = cat.merge(ours[["targetid", "survey", "program"]].rename(columns={"targetid": "TARGETID"}),
-                    on="TARGETID", how="left")
-    cat["exact"] = ((cat.SURVEY == cat.survey) & (cat.PROGRAM == cat.program)).astype(int)
+    print(f"[cigale] {len(cat):,} rows match  "
+          f"({cat.TARGETID.nunique():,} distinct targetids)")
+    # One targetid can be fit more than once (several survey/program coadds).
+    # Prefer the fit of the SAME observation the rest of our row describes, then
+    # main over sv, then the better chi2. Without survey/program in the universe
+    # the first two keys are unavailable and the tie-break is chi2 alone.
+    has_obs = {"survey", "program"} <= set(ours.columns)
+    if has_obs:
+        cat = cat.merge(ours[["targetid", "survey", "program"]].rename(
+            columns={"targetid": "TARGETID"}), on="TARGETID", how="left")
+        cat["exact"] = ((cat.SURVEY == cat.survey) & (cat.PROGRAM == cat.program)).astype(int)
+    else:
+        print("[cigale] no survey/program in the universe; "
+              "duplicate fits resolved by main-survey preference and chi2 only")
+        cat["exact"] = 0
     cat["is_main"] = (cat.SURVEY == "main").astype(int)
     cat = (cat.sort_values(["TARGETID", "exact", "is_main", "CHI2"],
                            ascending=[True, False, False, True])
@@ -139,16 +166,26 @@ def main() -> None:
     out = pd.DataFrame({"targetid": cat.TARGETID.astype(np.int64)})
 
     def add(name, value, err, bad):
-        gated = (bad | ~np.isfinite(value) | ~np.isfinite(err) | (err <= 0)
-                 | (err > args.max_sigma))
+        # The sigma gate is reported on its own line. It is the only cut here
+        # that a downstream reader cannot re-derive from the sidecar columns
+        # (the rejected rows come out as NaN, indistinguishable from a source
+        # CIGALE never fit), and multitarget.py's load-time max_sigma is None
+        # precisely because this one has already been applied.
+        # Returns the gate so anything DERIVED from this column inherits it
+        # rather than re-deriving a weaker one (see ref_log_ssfr below).
+        unusable = bad | ~np.isfinite(value) | ~np.isfinite(err) | (err <= 0)
+        wide = np.isfinite(err) & (err > args.max_sigma) & ~unusable
+        gated = unusable | wide
         out[name] = np.where(gated, np.nan, value)
         out[f"{name}_sig_lo"] = np.where(gated, 0.0, err)
         out[f"{name}_sig_hi"] = np.where(gated, 0.0, err)
         print(f"[target] {name:20s} {int((~gated).sum()):6,} usable "
-              f"({(~gated).sum()/n_ours*100:5.1f}%)")
+              f"({(~gated).sum()/n_ours*100:5.1f}%)   "
+              f"[--max-sigma {args.max_sigma} alone removed {int(wide.sum()):,}]")
+        return gated
 
-    add("logmstar_cigale", logm, e_m, base_bad)
-    add("log_sfr", sfr, e_s, base_bad)
+    mass_gated = add("logmstar_cigale", logm, e_m, base_bad)
+    sfr_gated = add("log_sfr", sfr, e_s, base_bad)
 
     # sSFR is CARRIED, NOT TRAINED. It is an exact function of the two targets
     # above, so a head on it would add no label information -- only a different
@@ -158,11 +195,23 @@ def main() -> None:
     # correlation read off the joint instead of assumed. Kept here purely as a
     # reference to validate that implied version against. The sigma below
     # assumes independence, which is exactly the assumption the joint removes.
-    ssfr_bad = (base_bad | ~np.isfinite(sfr - logm) | (e_s <= 0) | (e_m <= 0))
+    #
+    # It inherits BOTH parents' gates, --max-sigma included. It used to be built
+    # from base_bad alone, which ignored --max-sigma entirely: measured on the
+    # 25,454-row DR2 universe at --max-sigma 1.0, that covered 19,777 rows
+    # against log_sfr's 17,677, i.e. 2,100 sSFR values whose SFR term the sigma
+    # gate had already judged too uncertain to train on. A reference you would
+    # validate an implied sSFR against must not be defined on rows the target it
+    # is being compared to does not have.
+    ssfr_bad = mass_gated | sfr_gated | ~np.isfinite(sfr - logm)
+    n_ungated = int((~(base_bad | ~np.isfinite(sfr - logm)
+                       | (e_s <= 0) | (e_m <= 0))).sum())
     out["ref_log_ssfr"] = np.where(ssfr_bad, np.nan, sfr - logm)
     out["ref_log_ssfr_sig_indep"] = np.where(ssfr_bad, np.nan, np.sqrt(e_s ** 2 + e_m ** 2))
     print(f"[carried] {'ref_log_ssfr':20s} {int((~ssfr_bad).sum()):6,} "
-          f"({(~ssfr_bad).sum()/n_ours*100:5.1f}%)  reference only, not a target")
+          f"({(~ssfr_bad).sum()/n_ours*100:5.1f}%)  reference only, not a target   "
+          f"[gates of BOTH parents applied; the pre-fix rule would have kept "
+          f"{n_ungated:,}]")
 
     for col, src in [("cigale_agnfrac", "AGNFRAC"), ("cigale_agnlum", "AGNLUM"),
                      ("cigale_chi2", "CHI2"), ("cigale_flag_sfrpdf", "FLAG_SFRPDF"),
@@ -180,13 +229,15 @@ def main() -> None:
             e = np.abs(bh[f"LOGMASS_DAS_{cal}_ERR"].to_numpy(np.float64))
             if cal in BH_TARGETS:
                 name = f"log_mbh_{cal.lower()}"
-                gated = (~np.isfinite(v) | ~np.isfinite(e) | (e <= 0)
-                         | (e > args.max_sigma) | (v <= 0))
+                unusable = ~np.isfinite(v) | ~np.isfinite(e) | (e <= 0) | (v <= 0)
+                wide = np.isfinite(e) & (e > args.max_sigma) & ~unusable
+                gated = unusable | wide
                 bh_out[name] = np.where(gated, np.nan, v)
                 bh_out[f"{name}_sig_lo"] = np.where(gated, 0.0, e)
                 bh_out[f"{name}_sig_hi"] = np.where(gated, 0.0, e)
                 print(f"[target] {name:20s} {int((~gated).sum()):6,} usable "
-                      f"({(~gated).sum()/n_ours*100:5.1f}%)")
+                      f"({(~gated).sum()/n_ours*100:5.1f}%)   "
+                      f"[--max-sigma {args.max_sigma} alone removed {int(wide.sum()):,}]")
             else:
                 bh_out[f"mbh_{cal.lower()}"] = v      # carried, not trained
         for c in ("FWHM_DAS", "RFE_DAS", "L3000_DAS"):
@@ -202,9 +253,17 @@ def main() -> None:
             print(f"[bh] spread across all five calibrations: median "
                   f"{np.median(M[k].max(1) - M[k].min(1)):.3f} dex on {int(k.sum()):,} rows")
 
-    # ---------------- merge into the band sidecar ----------------
-    bands = pd.read_csv(args.bands_csv)
-    merged = bands.merge(out, on="targetid", how="outer")
+    # ---------------- merge into the universe ----------------
+    # LEFT, not outer: the universe defines the sample. An outer join would
+    # readmit VAC rows for targets make_dr2_targets.py deliberately dropped
+    # (secondary NWAY candidates, no DR2 detection) with every X-ray column NaN.
+    collide = (set(out.columns) & set(ours.columns)) - {"targetid"}
+    if collide:
+        raise SystemExit(f"universe already carries {sorted(collide)}; "
+                         "the sidecar would silently produce _x/_y columns")
+    merged = ours.merge(out, on="targetid", how="left")
+    if len(merged) != n_ours:
+        raise SystemExit(f"join changed the row count {n_ours:,} -> {len(merged):,}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(args.out, index=False)
     print(f"\n[out] {args.out}  rows={len(merged):,}  cols={len(merged.columns)}  "
