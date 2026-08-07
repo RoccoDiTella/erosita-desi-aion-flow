@@ -17,7 +17,6 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
-from astropy.cosmology import Planck18
 from astropy.io import fits
 from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
@@ -172,40 +171,6 @@ def read_dataset(
     if rows is None:
         return dataset[:]
     return dataset[rows]
-
-
-def read_ml_flux_1(handle: h5py.File) -> np.ndarray:
-    if "ml_flux_1" in handle:
-        return handle["ml_flux_1"][:].astype(np.float32)
-    target_names = [
-        value.decode("utf-8") if isinstance(value, bytes) else str(value)
-        for value in handle.attrs.get("target_names", [])
-    ]
-    if "targets" in handle and "ml_flux_1" in target_names:
-        return handle["targets"][:, target_names.index("ml_flux_1")].astype(np.float32)
-    if "targets" in handle:
-        return handle["targets"][:, 0].astype(np.float32)
-    raise KeyError("Unable to read ML_FLUX_1 from source HDF5.")
-
-
-def compute_log_flux(flux: np.ndarray) -> np.ndarray:
-    flux = np.asarray(flux, dtype=np.float64)
-    out = np.full(flux.shape, np.nan, dtype=np.float64)
-    valid = np.isfinite(flux) & (flux > 0.0)
-    out[valid] = np.log10(flux[valid])
-    return out
-
-
-def compute_log_luminosity(redshift: np.ndarray, flux: np.ndarray) -> np.ndarray:
-    redshift = np.asarray(redshift, dtype=np.float64)
-    flux = np.asarray(flux, dtype=np.float64)
-    redshift, flux = np.broadcast_arrays(redshift, flux)
-    out = np.full(redshift.shape, np.nan, dtype=np.float64)
-    valid = np.isfinite(redshift) & np.isfinite(flux) & (flux > 0.0)
-    if valid.any():
-        d_l_cm = Planck18.luminosity_distance(redshift[valid]).to("cm").value
-        out[valid] = np.log10(4.0 * np.pi * d_l_cm * d_l_cm * flux[valid])
-    return out
 
 
 def _copy_dataset(

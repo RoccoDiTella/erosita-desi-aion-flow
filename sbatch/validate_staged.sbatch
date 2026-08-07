@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --account=finkbeiner_lab
 #SBATCH -J aionflow-validate
 #SBATCH -p gpu_test
 #SBATCH --gpus 1

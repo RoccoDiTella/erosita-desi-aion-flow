@@ -34,3 +34,9 @@ shareable_aion_flow/outputs/
 .vscode/
 docs/figures/johannes_buchner_comment.png
 docs/slides.pdf
+
+# Generated deck artifacts. Rebuilt by docs/build_deck.sh; slides.pdf was
+# already ignored and these two were not, so they drifted from the docs they
+# render for weeks at a time.
+docs/results.html
+docs/pipeline.pdf

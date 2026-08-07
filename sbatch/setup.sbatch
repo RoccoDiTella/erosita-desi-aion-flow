@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --account=finkbeiner_lab
 #SBATCH -J aionflow-setup
 #SBATCH -p shared
 #SBATCH -c 8
