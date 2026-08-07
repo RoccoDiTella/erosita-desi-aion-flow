@@ -162,6 +162,31 @@ def assert_joint_matches_flow(flows) -> None:
             f"joint flow has {actual} features but the head configuration declares "
             f"{declared} dimensions {_mt.joint_dims()}. The checkpoint and multitarget.JOINT_PAIR "
             "disagree; configure_heads_from_config(ckpt['config']) must run before the flows are built.")
+    assert_no_poisson_heads()
+
+
+def assert_no_poisson_heads() -> None:
+    """Refuse a Run B checkpoint until this module learns the count likelihood.
+
+    Every metric here -- NLL, information gain, R^2, RMSE -- is computed by
+    evaluating the flow's density AT THE TARGET VALUE. A Poisson latent-rate head
+    has no target value: ``targets[:, j]`` is a plug-in standardization anchor,
+    and scoring it would produce a full, plausible, entirely wrong table rather
+    than an error. That is precisely the class of silent failure this module was
+    refactored out of a 200-line main() to prevent, so it is a refusal and not a
+    warning.
+
+    The right metric for those heads is the marginal likelihood of the COUNTS,
+    ``multitarget.poisson_marginal_nll`` -- the same number the trainer reports.
+    """
+    pois = [t["name"] for t in _mt.MULTI_TARGETS if t.get("pois")]
+    if pois:
+        raise SystemExit(
+            f"this checkpoint has Poisson latent-rate heads {pois}, which eval_core "
+            f"cannot score: it evaluates a flow density at a target value, and those "
+            f"heads have no target value -- only counts, background and exposure. "
+            f"Scoring them would silently rate the standardization anchor. Use the "
+            f"count marginal likelihood (multitarget.poisson_marginal_nll) instead.")
 
 
 def hr_skip_reason(dims: tuple[str, ...]) -> str | None:

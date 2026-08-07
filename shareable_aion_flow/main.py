@@ -1020,6 +1020,25 @@ def parse_args() -> argparse.Namespace:
     mt.add_argument("--drop-heads", nargs="*", default=None,
                     help="Scalar heads to omit, e.g. log_flux_p4 (never learns; P2/P3 are required "
                     "by the joint head).")
+    mt.add_argument("--add-heads", nargs="*", default=None, metavar="HEAD",
+                    help="Opt-in heads to include on top of the default set. Today that is the "
+                         "Poisson latent-rate bands log_rate_1/p1/p2/p3/p4, whose label is "
+                         "(ape_cts, ape_bkg, ape_exp) rather than a value: the flow predicts "
+                         "p(log10 lambda | x) and the loss is the marginal likelihood of the "
+                         "observed counts, N ~ Poisson(lambda*t + B). They are off by default "
+                         "because their sidecar columns exist only after the counts chain is "
+                         "re-run, and a head with no column is a hard error. Run B wants "
+                         "`--add-heads log_rate_p2 log_rate_p3 --joint log_rate_p2,log_rate_p3`.")
+    mt.add_argument("--joint", default=None, metavar="DIM,DIM[,DIM...]",
+                    help="Declare WHICH dimensions the joint head models, comma-separated, in "
+                         "flow column order, e.g. --joint log_flux_p2,log_flux_p3. Without it "
+                         "the joint is a module constant, so Run A and Run B cannot declare "
+                         "different joints -- and editing that constant to the SAME ARITY "
+                         "silently relabels every joint column of every stored checkpoint while "
+                         "still loading clean under strict=True. The declaration is written to "
+                         "config.json as `joint_dims` and read back by "
+                         "configure_heads_from_config. Declaring a joint RESETS "
+                         "--joint-marginal, so pass that flag after this one.")
     mt.add_argument("--train-probe-size", type=int, default=2520,
                     help="Fixed training-split subset scored with the VAL protocol each epoch "
                     "(0 disables). Makes train and val directly comparable.")

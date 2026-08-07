@@ -15,6 +15,19 @@ one SHARED 768->512->256 MLP over the stacked CLS states, one small NSF flow
 per target. Joint loss: per-target NLL on standardized values, split-normal
 noise injection where sigma exists, per-source availability masks, and
 detached-EMA loss normalization so harder targets do not dominate gradients.
+
+Two kinds of head live here, and they are scored by different likelihoods.
+OBSERVED-VALUE heads (everything above) are a density evaluated at a measured
+number. POISSON latent-rate heads (POISSON_TARGETS, opt-in via --add-heads) have
+no measured value at all: the flow predicts p(log10 lambda | x) and the loss is
+the marginal likelihood of the observed COUNTS,
+
+    -log INT p(N | lambda*t + B) p(lambda | x) dlambda,
+
+by quadrature over the flow's own density. Counts are exact integers, so there
+is nothing to noise-inject, and N = 0 is ordinary data rather than a special
+case. Exposure and background are LIKELIHOOD terms and never model inputs --
+see poisson_band_logprob's docstring for why that is not a detail.
 """
 
 from __future__ import annotations
@@ -83,8 +96,65 @@ MULTI_TARGETS: list[dict] = [
     {"name": "log_mbh_vo09", "sig": ("log_mbh_vo09_sig_lo", "log_mbh_vo09_sig_hi"),
      "max_sigma": None, "det": None, "sidecar": True},
 ]
+#: The DEFAULT head set: what a run trains unless it says otherwise. NOT the
+#: full registry -- see _HEAD_REGISTRY. The name is kept because scripts and
+#: tests read it as "the heads a normal run has".
 _ALL_TARGETS = list(MULTI_TARGETS)
 N_TARGETS = len(MULTI_TARGETS)          # scalar heads
+
+# ---------------------------------------------------------------------------
+# RUN B: latent-rate heads with a POISSON observation model.
+#
+# `pois` names (counts, background, exposure) instead of a value column: the
+# flow predicts a latent RATE and the likelihood is
+#
+#     N_b ~ Poisson(lambda_b * t_b + B_b),   t = APE_EXP [s], B = APE_BKG [ct]
+#
+# so the LABEL is three columns, not one, and no value is ever standardized
+# against. See poisson_marginal_nll() for the likelihood and the docstring
+# there for why exposure and background are likelihood terms and never inputs.
+#
+# OPT-IN, not default: a run asks for them with --add-heads, because the counts
+# columns reach the sidecar only after scripts/make_dr2_targets.py is re-run,
+# and load_multi_target_matrix REFUSES a head whose columns are absent. Adding
+# them to the default set would break every Run A run with a hard error.
+#
+# There is no `det` gate. Gating on detection gates on the TARGET, which
+# truncates p(y|x) and selects on sky position; in count space the question does
+# not arise, because N = 0 is ordinary data (RUN_PLAN 3).
+POISSON_TARGETS: list[dict] = [
+    {"name": "log_rate_1", "sig": None, "max_sigma": None, "det": None, "sidecar": True,
+     "pois": ("ape_cts_1", "ape_bkg_1", "ape_exp_1")},
+    {"name": "log_rate_p1", "sig": None, "max_sigma": None, "det": None, "sidecar": True,
+     "pois": ("ape_cts_p1", "ape_bkg_p1", "ape_exp_p1")},
+    {"name": "log_rate_p2", "sig": None, "max_sigma": None, "det": None, "sidecar": True,
+     "pois": ("ape_cts_p2", "ape_bkg_p2", "ape_exp_p2")},
+    {"name": "log_rate_p3", "sig": None, "max_sigma": None, "det": None, "sidecar": True,
+     "pois": ("ape_cts_p3", "ape_bkg_p3", "ape_exp_p3")},
+    {"name": "log_rate_p4", "sig": None, "max_sigma": None, "det": None, "sidecar": True,
+     "pois": ("ape_cts_p4", "ape_bkg_p4", "ape_exp_p4")},
+]
+
+#: EVERY head that can be named, default or opt-in, in the one order that
+#: defines flow column numbering. APPENDED, never inserted, for the same reason
+#: MULTI_TARGETS is: the flows are indexed positionally, so inserting a head
+#: anywhere but the end silently renumbers every existing checkpoint.
+_HEAD_REGISTRY: list[dict] = list(_ALL_TARGETS) + list(POISSON_TARGETS)
+_DEFAULT_HEAD_NAMES = tuple(t["name"] for t in _ALL_TARGETS)
+
+
+def head_spec(name: str) -> dict:
+    """The registry entry for `name`, default or opt-in."""
+    for spec in _HEAD_REGISTRY:
+        if spec["name"] == name:
+            return spec
+    raise KeyError(f"{name!r} is not a known head; have "
+                   f"{[t['name'] for t in _HEAD_REGISTRY]}")
+
+
+def is_poisson(name: str) -> bool:
+    """True when `name` is a latent-rate head scored by a Poisson likelihood."""
+    return bool(head_spec(name).get("pois"))
 
 # The joint head. Dimensions are modelled together; `JOINT_MARGINAL` names the
 # ones that may be MISSING and are then integrated out by quadrature rather than
@@ -97,6 +167,12 @@ N_TARGETS = len(MULTI_TARGETS)          # scalar heads
 # inputs the two are in one-to-one correspondence: their joint density would be
 # supported on a line, and the flow could drive the NLL to -infinity by
 # collapsing that direction.
+#
+# It is a DEFAULT, not a definition: --joint names the joint for a run and
+# config.json records it, so Run A and Run B can declare different joints and a
+# checkpoint reloads the one it was trained with. Editing this constant used to
+# retroactively redefine every stored checkpoint (a same-arity edit relabels
+# every joint column and still loads clean under strict=True).
 JOINT_PAIR = ("logmstar_cigale", "log_sfr", "log_lx", "log_flux_p3")
 JOINT_MARGINAL = ("log_flux_p3",)
 _DEFAULT_JOINT_PAIR, _DEFAULT_JOINT_MARGINAL = JOINT_PAIR, JOINT_MARGINAL
@@ -185,20 +261,90 @@ def joint_availability(targets):
     return have_req, have_all
 
 
-def configure_heads(drop: tuple[str, ...] = ()) -> None:
-    """Drop scalar heads (e.g. P4, which never learns) before building the model.
+def configure_heads(drop: tuple[str, ...] = (), add: tuple[str, ...] = ()) -> None:
+    """Drop default heads and/or add opt-in ones before building the model.
+
+    `drop`  scalar heads to omit (e.g. P4, which never learns).
+    `add`   opt-in heads to include -- today the POISSON_TARGETS latent-rate
+            bands, which are not in the default set because their sidecar
+            columns only exist after the counts chain is re-run.
+
+    Head ORDER is always _HEAD_REGISTRY order, never the order of `add`: the
+    flows are indexed positionally, so ordering by anything a caller passes
+    would make two runs with the same head set incompatible checkpoints.
 
     Rebinds the module-level head configuration; call once at startup, before
     anything reads N_TARGETS / N_HEADS / HEAD_NAMES.
     """
     global MULTI_TARGETS, N_TARGETS, JOINT_IDX, N_HEADS, HEAD_NAMES
-    MULTI_TARGETS = [t for t in _ALL_TARGETS if t["name"] not in set(drop)]
+    drop, add = set(drop), set(add)
+    known = {t["name"] for t in _HEAD_REGISTRY}
+    unknown = sorted((drop | add) - known)
+    if unknown:
+        # A silently-ignored head name is the whole failure mode this file is
+        # organised against: --drop-heads log_flux_P3 would leave the head in.
+        raise ValueError(f"unknown head name(s) {unknown}; choose from {sorted(known)}")
+    MULTI_TARGETS = [t for t in _HEAD_REGISTRY
+                     if (t["name"] in _DEFAULT_HEAD_NAMES or t["name"] in add)
+                     and t["name"] not in drop]
     N_TARGETS = len(MULTI_TARGETS)
     kept = {t["name"] for t in MULTI_TARGETS}
     required = [n for n in JOINT_PAIR if n not in JOINT_MARGINAL]
     missing = [n for n in required if n not in kept]
     if missing:
         raise ValueError(f"cannot drop {missing}: the joint head requires them")
+    JOINT_IDX = _joint_idx()
+    N_HEADS = N_TARGETS + 1
+    HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
+
+
+def configure_joint(names: tuple[str, ...] | None) -> None:
+    """Declare WHICH dimensions the joint head models, in flow column order.
+
+    `--joint log_rate_p2,log_rate_p3` is Run B's band joint;
+    `--joint logmstar_cigale,log_sfr,log_lx` is Run A's collider joint. Without
+    this the joint was a module constant, so the two runs could not both be
+    expressed, and -- worse -- editing the constant to the same ARITY silently
+    relabelled every joint column of every stored checkpoint while still loading
+    clean under strict=True.
+
+    Declaring a joint RESETS JOINT_MARGINAL to empty: the old marginal names
+    belong to the old joint, and silently carrying one over would make a
+    dimension optional in a joint that never declared it so. Pass
+    --joint-marginal after --joint to re-declare it.
+
+    Call BEFORE configure_heads(): configure_heads validates that every required
+    joint dimension survived the drop set.
+    """
+    global JOINT_PAIR, JOINT_MARGINAL, JOINT_IDX, N_HEADS, HEAD_NAMES
+    if names is None:
+        return
+    names = tuple(names)
+    if len(names) < 2:
+        raise ValueError(
+            f"--joint needs at least two dimensions, got {list(names)}. A 1-D "
+            f"'joint' is the scalar head of the same name and carries no "
+            f"correlation, which is the only reason the joint head exists.")
+    if len(set(names)) != len(names):
+        raise ValueError(f"--joint repeats a dimension: {list(names)}")
+    known = {t["name"] for t in _HEAD_REGISTRY}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ValueError(f"--joint names unknown head(s) {unknown}; "
+                         f"choose from {sorted(known)}")
+    kinds = {is_poisson(n) for n in names}
+    if len(kinds) > 1:
+        # The two kinds are scored by different likelihoods -- a density on an
+        # observed value versus a marginal over an unobserved latent -- so a
+        # mixed joint would need a partly-observed quadrature that nothing in
+        # the run plan asks for. Refuse loudly rather than pick one silently.
+        raise ValueError(
+            f"--joint mixes Poisson latent-rate heads with observed-value heads: "
+            f"{[n for n in names if is_poisson(n)]} vs "
+            f"{[n for n in names if not is_poisson(n)]}. A mixed joint is not "
+            f"implemented; declare one kind or the other.")
+    JOINT_PAIR = names
+    JOINT_MARGINAL = ()
     JOINT_IDX = _joint_idx()
     N_HEADS = N_TARGETS + 1
     HEAD_NAMES = [t["name"] for t in MULTI_TARGETS] + ["joint"]
@@ -243,7 +389,7 @@ def configure_joint_marginal(names: tuple[str, ...] | None) -> None:
 
 
 def configure_heads_from_config(config: dict | None) -> None:
-    """Rebind the head set to match a CHECKPOINT, not the current default list.
+    """Rebind the head set AND the joint to match a CHECKPOINT, not the defaults.
 
     Checkpoints store the head names they were trained with. Reading `drop_heads`
     alone is not enough: when a new head is appended to MULTI_TARGETS (log_sfr
@@ -251,14 +397,32 @@ def configure_heads_from_config(config: dict | None) -> None:
     current default and would fail to load with a shape mismatch. Deriving the
     drop set from the stored `heads` list keeps every earlier checkpoint
     loadable without hand-passing --drop-heads.
+
+    The joint is read from the checkpoint's `joint_dims` for the same reason and
+    a sharper one. It used to be RE-DERIVED from whatever JOINT_PAIR happened to
+    say at load time, so an edit to that constant of the SAME ARITY silently
+    relabelled every joint column of every stored checkpoint -- and, being the
+    same arity, loaded clean under strict=True. Three eras of checkpoint, all
+    still loadable:
+
+      `joint_dims` present   (since 2026-08-07) -- the joint verbatim, in flow
+                             column order, with `joint_marginal` beside it
+      `p2xp3_joint` in heads (before 2026-08)   -- the 2-D band joint, whose
+                             head is also NAMED differently in HEAD_NAMES
+      neither                                   -- the joint that was hardcoded
+                             at the time, i.e. the module default
     """
     global JOINT_PAIR, JOINT_MARGINAL
     config = config or {}
     stored = config.get("heads") or []
-    # Restore the joint the checkpoint was TRAINED with. Runs before the
-    # (M*, SFR, Lx, P3) joint used a 2-D P2xP3 head; loading one of those under
-    # the current definition would demand targets it never had.
-    if "p2xp3_joint" in stored:
+    stored_dims = tuple(config.get("joint_dims") or ())
+    if stored_dims:
+        JOINT_PAIR = stored_dims
+        JOINT_MARGINAL = tuple(config.get("joint_marginal") or ())
+    elif "p2xp3_joint" in stored:
+        # Runs before the (M*, SFR, Lx, P3) joint used a 2-D P2xP3 head; loading
+        # one of those under the current definition would demand targets it
+        # never had. Kept working forever: these checkpoints predate joint_dims.
         JOINT_PAIR = ("log_flux_p2", "log_flux_p3")
         JOINT_MARGINAL = ()
     else:
@@ -267,18 +431,116 @@ def configure_heads_from_config(config: dict | None) -> None:
     if stored:
         joint_names = {"p2xp3_joint", "joint"}
         keep = {h for h in stored if h not in joint_names}
-        drop = tuple(t["name"] for t in _ALL_TARGETS if t["name"] not in keep)
+        drop = tuple(t["name"] for t in _HEAD_REGISTRY if t["name"] not in keep)
+        # `add` re-enables opt-in heads (the Poisson bands): a Run B checkpoint
+        # lists them in `heads`, and without this they would be filtered out as
+        # "not in the default set" and the flows would not match the state dict.
+        add = tuple(keep)
     else:                                    # pre-`heads` checkpoints
         drop = tuple(config.get("drop_heads", ()) or ())
-    configure_heads(drop)
-    if "p2xp3_joint" in stored:
+        add = ()
+    configure_heads(drop, add)
+    if not stored_dims and "p2xp3_joint" in stored:
         HEAD_NAMES[-1] = "p2xp3_joint"
+
+
+#: Floor, in COUNTS, on the plug-in source signal used to build a Poisson head's
+#: standardization anchor. See _poisson_anchor().
+POISSON_ANCHOR_FLOOR = 1.0
+
+
+def _poisson_anchor(counts, bkg, exposure):
+    """A plug-in log10 rate for a Poisson head. NOT a label -- never in the loss.
+
+    A latent-rate head has no observed value to standardize against, but the
+    flow still needs UNITS: TargetStandardizer defines what "one sigma of
+    latent" means, and JOINT_QUAD_SPAN measures the quadrature grid in exactly
+    those units. This is the cheapest defensible scale: the background-subtracted
+    aperture rate, floored at one count of signal so that N <= B (every
+    non-detection) lands on a finite upper-limit-shaped value instead of -inf.
+
+    It is used for THREE things and nothing else:
+      * fitting the standardizer (units for the latent),
+      * availability -- NaN here means "this band is unusable for this row",
+        so joint_availability() needs no separate rule for Poisson dims,
+      * NOT the loss. Every nat of the Poisson loss comes from (N, B, t).
+    """
+    signal = np.maximum(counts - bkg, POISSON_ANCHOR_FLOOR)
+    return np.log10(signal / exposure)
+
+
+def _load_poisson_band(spec: dict, col, n: int):
+    """((N, B, t) [n,3], anchor [n]) for one Poisson head, or None if absent.
+
+    THE TWO HAZARDS, decided here and nowhere else. Both are rare enough to slip
+    through unnoticed and both are fatal inside a Poisson, so neither is allowed
+    to enter silently and both are counted out loud.
+
+    NEGATIVE COUNTS -> DROP the band for that row. `APE_CTS` is int16 in the
+    parent catalogue and WRAPS: 20 band-1 rows are already negative, and the
+    merged rebuild pulls in brighter sources, so the count grows. A wrap is not
+    a count and it is not invertible (past 98,303 counts it wraps twice, and it
+    can land back on a plausible positive number). Clipping to zero would be the
+    worst available answer: it turns the very brightest sources into
+    non-detections, i.e. it puts a systematic of exactly the wrong sign at
+    exactly the end of the distribution the fit is most sensitive to.
+
+    NEGATIVE BACKGROUND -> CLIP to zero. `APE_BKG` is a background-MAP value,
+    not a count: it is an estimate of a quantity that is non-negative by
+    construction, and the negatives are small subtraction residuals on 2 rows.
+    Clipping keeps the row and moves lambda up by at most |B|/t; dropping would
+    discard a perfectly good count over a nuisance parameter's rounding.
+
+    NON-POSITIVE OR MISSING EXPOSURE -> DROP the band for that row. With t = 0
+    the likelihood is Poisson(B), which does not contain lambda at all: the row
+    would contribute a constant to the loss, no gradient, and a silent offset to
+    every reported per-source NLL. There is nothing to learn from it.
+    """
+    cts_c, bkg_c, exp_c = spec["pois"]
+    counts, bkg, exposure = col(cts_c), col(bkg_c), col(exp_c)
+    if counts is None or bkg is None or exposure is None:
+        return None
+    counts = np.asarray(counts, dtype=np.float64)
+    bkg = np.asarray(bkg, dtype=np.float64)
+    exposure = np.asarray(exposure, dtype=np.float64)
+
+    wrapped = np.isfinite(counts) & (counts < 0)
+    neg_bkg = np.isfinite(bkg) & (bkg < 0)
+    bkg = np.where(neg_bkg, 0.0, bkg)
+    bad_exp = ~np.isfinite(exposure) | (exposure <= 0)
+    usable = (np.isfinite(counts) & ~wrapped & np.isfinite(bkg) & ~bad_exp)
+
+    frac = counts[usable] - np.rint(counts[usable])
+    if frac.size and np.abs(frac).max() > 1e-6:
+        raise ValueError(
+            f"{spec['name']}: {cts_c} is not integral (max fractional part "
+            f"{np.abs(frac).max():.3g}). torch.lgamma would accept it and the "
+            f"Poisson likelihood would be silently wrong; counts are counts.")
+
+    if wrapped.any() or neg_bkg.any() or bad_exp.any():
+        print(f"[pois] {spec['name']}: dropped {int(wrapped.sum())} int16-wrapped "
+              f"{cts_c}, dropped {int(bad_exp.sum())} rows with {exp_c} <= 0, "
+              f"clipped {int(neg_bkg.sum())} negative {bkg_c} to 0 "
+              f"({int(usable.sum())}/{n} rows usable)", flush=True)
+
+    out = np.full((n, 3), np.nan)
+    out[usable, 0] = counts[usable]
+    out[usable, 1] = bkg[usable]
+    out[usable, 2] = exposure[usable]
+    anchor = np.full(n, np.nan)
+    anchor[usable] = _poisson_anchor(counts[usable], bkg[usable], exposure[usable])
+    return out, anchor
 
 
 def load_multi_target_matrix(
     staged_path: Path, extra_targets_csv: Path | None
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(targets [n,7], sig_lo [n,7], sig_hi [n,7]) aligned to a staged split file.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(targets, sig_lo, sig_hi, pois) aligned to a staged split file.
+
+    The first three are [n, N_TARGETS]. ``pois`` is [n, N_TARGETS, 3] carrying
+    (counts N, background B, exposure t) for POISSON_TARGETS heads and NaN
+    everywhere else -- the analogue of the ``sig`` channel, three columns per
+    band instead of two.
 
     Unavailable entries are NaN in ``targets`` (masked in the loss); missing
     sigmas are 0 (no injection). Sidecar targets join by targetid.
@@ -290,7 +552,8 @@ def load_multi_target_matrix(
         tids = handle["desi_targetid"][:].astype(np.int64)
         store_cols = {}
         for spec in MULTI_TARGETS:
-            cols = [spec["name"]] + (list(spec["sig"]) if spec["sig"] else [])
+            cols = ([spec["name"]] + (list(spec["sig"]) if spec["sig"] else [])
+                    + list(spec.get("pois") or ()))
             for c in cols:
                 if not spec["sidecar"] and c in handle:
                     store_cols[c] = read_dataset(handle, c).astype(np.float64)
@@ -302,6 +565,7 @@ def load_multi_target_matrix(
     y = np.full((n, N_TARGETS), np.nan)
     slo = np.zeros((n, N_TARGETS))
     shi = np.zeros((n, N_TARGETS))
+    pois = np.full((n, N_TARGETS, 3), np.nan)
     absent: list[str] = []
     for j, spec in enumerate(MULTI_TARGETS):
         if spec["sidecar"]:
@@ -312,6 +576,13 @@ def load_multi_target_matrix(
         else:
             def col(c, _store=store_cols):
                 return _store.get(c)
+        if spec.get("pois"):
+            got = _load_poisson_band(spec, col, n)
+            if got is None:
+                absent.append(spec["name"])
+                continue
+            pois[:, j, :], y[:, j] = got
+            continue
         vals = col(spec["name"])
         if vals is None:
             # The column does not exist in EITHER source. That is a
@@ -354,7 +625,7 @@ def load_multi_target_matrix(
             f"target: it would post no loss and read as early convergence. "
             f"(`logmstar` is the usual one -- the FastSpecFit mass is no longer "
             f"staged; use logmstar_cigale.)")
-    return y, slo, shi
+    return y, slo, shi, pois
 
 
 class SharedCLSHead(nn.Module):
@@ -413,6 +684,258 @@ class EMALossWeights:
         return {"ema": self.ema.tolist(), "seen": self.seen.tolist(), "beta": self.beta}
 
 
+# ---------------------------------------------------------------------------
+# The Poisson head (RUN B). Latent rate, counts likelihood, quadrature.
+# ---------------------------------------------------------------------------
+
+LN10 = float(np.log(10.0))
+#: exp() of anything past this overflows float32 long before it is physical:
+#: mu = 1e17 counts in one aperture. Clamping keeps a grid node that is already
+#: at likelihood e^-1e17 from producing an inf, and therefore a NaN gradient.
+_LOG_MU_MAX = 40.0
+#: and the other end, so `N * log_mu` cannot meet a -inf. mu = 1e-27 counts.
+_LOG_MU_MIN = -60.0
+
+
+def poisson_band_logprob(
+    *,
+    u: torch.Tensor,                  # standardized latent log10 rate
+    counts: torch.Tensor,             # N, broadcastable against u
+    bkg: torch.Tensor,                # B, expected background COUNTS in aperture
+    exposure: torch.Tensor,           # t, seconds
+    standardizer: TargetStandardizer,
+) -> torch.Tensor:
+    """log p(N | lambda(u)) for ONE band. N = 0 is ordinary data, not a case.
+
+    The latent is the standardized log10 RATE, so
+
+        lambda = 10 ** (mean + std * u)      [ct/s]
+        mu     = lambda * t + B              [ct]
+        log p  = N log mu - mu - log(N!)
+
+    EXPOSURE AND BACKGROUND ARE LIKELIHOOD TERMS AND MUST NEVER BE MODEL INPUTS.
+    They arrive here, at the loss, and nowhere else. They are per-source and
+    known, so feeding them to the encoder would let the model infer how WELL
+    MEASURED a source is rather than what it IS -- it would learn the exposure
+    map and read off the depth of the field instead of the physics of the
+    object. This is the same principle as the standing ban on conditioning on
+    per-source sigma, and the same failure mode: feeding the answer.
+
+    Predicting the latent rate rather than the counts is also what makes a
+    hardness ratio meaningful. A predicted COUNT posterior carries Poisson
+    counting noise in its spread, so an HR derived from it is inflated by
+    variance that is not astrophysical; with a rate posterior, HR is an exact
+    deterministic pushforward of each sampled pair.
+
+    All of it in log space: `mu` is formed by logaddexp so that lambda*t + B can
+    never be <= 0 inside a log. Everything is clamped to a finite window (see
+    _LOG_MU_MIN/_LOG_MU_MAX), so no node of the quadrature grid can contribute
+    an inf and turn the gradient into a NaN.
+
+    WRITTEN AROUND THE PEAK, not as `N log mu - mu - lgamma(N+1)`. That textbook
+    form is a difference of three large numbers whose answer is small, and in
+    float32 it loses the answer: at N = 40,000 the terms are ~4e5 and the result
+    is ~30, so the relative precision of float32 (6e-8) leaves an absolute error
+    of ~2e-2 nats -- MEASURED, and it was the entire residual against a
+    brute-force reference once the grid was fixed. Rewriting it as
+
+        N log(mu/N) - (mu - N)   +   [N log N - N - log N!]
+
+    puts the lambda-dependent part at O(1) near the maximum (it is exactly 0
+    there) and isolates the cancellation into a per-source constant, which is
+    then evaluated in float64 -- cheap, because it has no node axis. N = 0
+    falls out of the same expression as -mu, with no branch.
+
+    What is LEFT is float32 on the latent itself: log(mu) carries a relative
+    error of ~6e-8 and it is multiplied by N. Measured against a brute-force
+    reference, the residual is 5e-5 nats at N = 800, 4e-4 at N = 9,500 and
+    5e-3 at N = 40,000. `APE_CTS` is int16, so N > 32,767 is a wrap and already
+    dropped; over a 20,000-source held-out mean the worst case moves the
+    reported number by under 1e-5 nats. Documented rather than fixed, because
+    fixing it means running the whole grid in float64.
+    """
+    dtype = u.dtype
+    log_lam = (float(standardizer.mean) + float(standardizer.std) * u) * LN10
+    log_t = torch.log(exposure.clamp_min(torch.finfo(dtype).tiny))
+    # -3.4e38 rather than -inf: logaddexp(a, -inf) is correct but leaves an inf
+    # on the graph, and B = 0 is the COMMON case (background-free apertures),
+    # not an edge one.
+    minus_inf = torch.full_like(bkg, torch.finfo(dtype).min)
+    log_b = torch.where(bkg > 0, torch.log(bkg.clamp_min(torch.finfo(dtype).tiny)),
+                        minus_inf)
+    log_mu = torch.logaddexp(log_lam + log_t, log_b).clamp(_LOG_MU_MIN, _LOG_MU_MAX)
+    log_n = torch.log(counts.clamp_min(1.0))
+    peak = counts * (log_mu - log_n) - (torch.exp(log_mu) - counts)
+    nd = counts.double()
+    stirling = (nd * torch.log(nd.clamp_min(1.0)) - nd - torch.lgamma(nd + 1.0)).to(dtype)
+    return peak + stirling
+
+
+def _quad_nodes(device, dtype) -> tuple[torch.Tensor, float]:
+    """Uniform standardized-space grid and its spacing, as used by the joint."""
+    nodes = torch.linspace(-JOINT_QUAD_SPAN, JOINT_QUAD_SPAN, JOINT_QUAD_NODES,
+                           device=device, dtype=dtype)
+    return nodes, float(nodes[1] - nodes[0])
+
+
+def poisson_marginal_nll(
+    *,
+    flow,
+    context: torch.Tensor,            # [m, ctx]
+    standardizers: list[TargetStandardizer],   # one per joint dimension, in flow column order
+    counts: torch.Tensor,             # [m, D]
+    bkg: torch.Tensor,                # [m, D]
+    exposure: torch.Tensor,           # [m, D]
+    present: torch.Tensor | None = None,   # [m, D] bool; False = no likelihood factor
+) -> torch.Tensor:
+    """-log INT p(N | lambda) p(lambda | x) dlambda, per source. Returns [m].
+
+    QUADRATURE, not importance sampling (user's call). The grid runs over the
+    LATENT dimensions only, so a 2-band joint is a 2-D grid of JOINT_QUAD_NODES^2
+    points -- the same machinery, and the same cost scale, as the existing
+    marginalisation of a missing joint dimension in multi_target_nll.
+
+    The integral is taken in STANDARDIZED latent space against the flow's own
+    density, which is exactly the change of variables that makes the Jacobian
+    disappear: INT p(lambda|x) dlambda = INT q(u|x) du. So no dlambda/du ever
+    has to be written down, and the answer is the marginal likelihood of the
+    COUNTS, which is the number Run B reports.
+
+    The Poisson FACTORISES across bands, so the D-dimensional integrand is one
+    flow evaluation times a sum of D independent log-pmfs -- the bands are
+    coupled only through p(lambda|x), which is the entire point of the joint.
+
+    `present` is how a band with an unusable (N, B, t) drops out: its factor is
+    omitted and that dimension is simply integrated out of the joint. With
+    `present` all True this is the ordinary complete-data likelihood.
+    """
+    _, log_integrand, log_volume = poisson_log_integrand(
+        flow=flow, context=context, standardizers=standardizers,
+        counts=counts, bkg=bkg, exposure=exposure, present=present)
+    return -(torch.logsumexp(log_integrand, dim=0) + log_volume)
+
+
+def poisson_quad_proposal(
+    *, counts, bkg, exposure, standardizer, present=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(centre, scale) of the per-source quadrature grid, in standardized units.
+
+    MEASURED, AND THE REASON THE GRID IS NOT FIXED. A Poisson likelihood is
+    narrow in log-rate exactly where the source is bright: its width is
+    0.434/sqrt(N) dex, i.e. sqrt(N)/(ln10 * std * (N-B)) in standardized latent
+    units. On a 48-node grid over +/-5 sigma the node SPACING is 0.213, so a
+    source with N ~ 800 has a likelihood peak eight times narrower than the gap
+    between nodes, and a fixed grid steps straight over it. Measured against a
+    brute-force reference on such a source, a fixed grid was wrong by ~4 nats --
+    not a rounding error, a different answer. Most of the sample is affected:
+    the peak is under-resolved from roughly N = 10 upward.
+
+    So the METHOD is unchanged -- deterministic quadrature over the latent, which
+    is what was chosen -- and only the node PLACEMENT is per-source. The integral
+    runs over u = centre + scale * v with v on the same fixed JOINT_QUAD_NODES
+    grid, and the Jacobian `scale` is carried exactly, so nothing is
+    approximated: a badly chosen proposal misplaces nodes, it cannot bias the
+    estimator's definition.
+
+    The proposal is the Laplace approximation of the POSTERIOR under a unit-scale
+    prior proxy, which is what the standardizer makes the prior by construction.
+    Two limits, both correct and both automatic:
+
+      likelihood much narrower than the prior (a bright source)
+          scale -> the likelihood width, centre -> the maximum-likelihood rate
+      likelihood uninformative (N = 0, or a band with no data at all)
+          scale -> 1, centre -> 0: EXACTLY the fixed +/-5 sigma prior grid this
+          code used before, which is the right grid when the integrand is the
+          prior
+
+    `scale` is capped at 1 by construction, so the window is never WIDER than the
+    fixed grid it replaces: this can only sharpen resolution, never lose prior
+    coverage relative to the previous behaviour.
+    """
+    mean, std = float(standardizer.mean), float(standardizer.std)
+    # Signal counts, floored at half a count so that N <= B -- every
+    # non-detection -- has a finite peak location instead of log10(0).
+    signal = (counts - bkg).clamp_min(0.5)
+    u_hat = (torch.log10(signal / exposure) - mean) / std
+    sigma = counts.clamp_min(1.0).sqrt() / (LN10 * std * signal)
+    scale = sigma / torch.sqrt(1.0 + sigma**2)
+    centre = u_hat / (1.0 + sigma**2)
+    if present is not None:
+        # A band with no usable (N, B, t) contributes no likelihood factor, so
+        # its integrand is the prior alone and its grid must be the prior grid.
+        centre = torch.where(present, centre, torch.zeros_like(centre))
+        scale = torch.where(present, scale, torch.ones_like(scale))
+    return centre, scale
+
+
+def poisson_log_integrand(
+    *, flow, context, standardizers, counts, bkg, exposure, present=None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(u [G, m, D], log q(u|x) + log p(N|u) [G, m], log volume element [m]).
+
+    The unnormalized log POSTERIOR over the latent rates on the quadrature grid.
+    It is the integrand of the marginal likelihood and, renormalized, the
+    per-source rate posterior that a hardness ratio is pushed forward from. Split
+    out so the same grid serves the loss and the diagnostics: an HR read off a
+    different grid from the one the model was trained against would be a second,
+    silently disagreeing definition of the posterior.
+
+    The grid is per-source and per-dimension -- see poisson_quad_proposal -- so
+    `u` has an `m` axis and the volume element is per-source too.
+    """
+    m, D = counts.shape
+    dtype = counts.dtype
+    nodes, dv = _quad_nodes(context.device, dtype)
+    K = nodes.numel()
+
+    centres, scales = [], []
+    for d in range(D):
+        c, s = poisson_quad_proposal(
+            counts=counts[:, d], bkg=bkg[:, d], exposure=exposure[:, d],
+            standardizer=standardizers[d],
+            present=None if present is None else present[:, d])
+        centres.append(c); scales.append(s)
+    centre = torch.stack(centres, dim=-1)            # [m, D]
+    scale = torch.stack(scales, dim=-1)              # [m, D]
+
+    # Cartesian product of the per-dimension node INDICES: [K**D, D]. Only the
+    # indices are shared across sources; the node VALUES are per-source.
+    idx = torch.arange(K, device=nodes.device)
+    mesh = torch.stack(torch.meshgrid(*([idx] * D), indexing="ij"), dim=-1).reshape(-1, D)
+    v = nodes[mesh]                                   # [G, D]
+    u = centre.unsqueeze(0) + scale.unsqueeze(0) * v.unsqueeze(1)      # [G, m, D]
+    G = u.shape[0]
+
+    log_lik = counts.new_zeros((G, m))
+    for d in range(D):
+        lp = poisson_band_logprob(
+            u=u[:, :, d],
+            counts=counts[:, d].view(1, m), bkg=bkg[:, d].view(1, m),
+            exposure=exposure[:, d].view(1, m), standardizer=standardizers[d],
+        )
+        if present is not None:
+            lp = lp * present[:, d].view(1, m).to(dtype)
+        log_lik = log_lik + lp
+
+    # flow density at every grid point, one broadcast call: [G, m]
+    log_q = flow.log_prob_draws(u if D > 1 else u.squeeze(-1), context)
+    log_volume = scale.log().sum(dim=-1) + D * float(np.log(dv))       # [m]
+    return u, log_q + log_lik, log_volume
+
+
+def _poisson_columns(pois: torch.Tensor, cols: list[int], rows: torch.Tensor):
+    """(counts, bkg, exposure, present) [m, D] for target columns `cols`."""
+    sub = pois[rows][:, cols, :]                      # [m, D, 3]
+    counts, bkg, exposure = sub[..., 0], sub[..., 1], sub[..., 2]
+    present = torch.isfinite(counts) & torch.isfinite(bkg) & torch.isfinite(exposure)
+    # A band that is not present contributes no factor, but must still be a
+    # finite number so the arithmetic above never sees a NaN: NaN * 0 is NaN.
+    zero = torch.zeros_like(counts)
+    one = torch.ones_like(counts)
+    return (torch.where(present, counts, zero), torch.where(present, bkg, zero),
+            torch.where(present, exposure, one), present)
+
+
 def multi_target_nll(
     *,
     contexts: torch.Tensor,            # [B, K, 256]
@@ -426,11 +949,24 @@ def multi_target_nll(
     inject: bool = True,
     inject_samples: int = 50,
     return_terms: bool = False,
+    pois: torch.Tensor | None = None,  # [B, K, 3] (counts, bkg, exposure)
 ) -> tuple[torch.Tensor, list[float | None]]:
     """Weighted joint NLL over available (source, target) pairs.
 
     Returns (total_loss, per-target UNweighted mean losses for the EMA update).
+
+    A POISSON_TARGETS head is scored by the marginal likelihood of its COUNTS
+    (poisson_marginal_nll) instead of the density of an observed value; `pois`
+    carries (N, B, t) per head and is required when any such head is active.
+    Nothing is injected into a count: counts are exact integers.
     """
+    poisson_heads = [j for j, t in enumerate(MULTI_TARGETS) if t.get("pois")]
+    if poisson_heads and pois is None:
+        raise ValueError(
+            f"heads {[MULTI_TARGETS[j]['name'] for j in poisson_heads]} are "
+            f"Poisson latent-rate heads and need `pois=` (counts, background, "
+            f"exposure). Passing None would score them as if the standardization "
+            f"anchor were a label, which it is not.")
     total = contexts.new_zeros(())
     raw: list[float | None] = []
     terms: list[torch.Tensor | None] = []
@@ -465,7 +1001,16 @@ def multi_target_nll(
             raw.append(None)
             terms.append(None)
             continue
-        nll = -flow.log_prob_draws(_std_inject(j, mask), contexts[mask, j]).mean()
+        if j in poisson_heads:
+            # The counts are the whole label. `targets[:, j]` is only the
+            # standardization anchor and never enters the likelihood; it decides
+            # availability, which is why the mask above is still the right one.
+            n_b, b_b, t_b, present = _poisson_columns(pois, [j], mask)
+            nll = poisson_marginal_nll(
+                flow=flow, context=contexts[mask, j], standardizers=[standardizers[j]],
+                counts=n_b, bkg=b_b, exposure=t_b, present=present).mean()
+        else:
+            nll = -flow.log_prob_draws(_std_inject(j, mask), contexts[mask, j]).mean()
         raw.append(float(nll.item()))
         terms.append(nll)
         # availability weighting (user): sources without this target do not
@@ -483,8 +1028,40 @@ def multi_target_nll(
     # one definition, shared with eval -- see joint_availability()
     have_req, have_all = joint_availability(targets)
 
+    joint_is_poisson = len(JOINT_IDX) >= 2 and all(j in poisson_heads for j in JOINT_IDX)
+    if JOINT_IDX and any(j in poisson_heads for j in JOINT_IDX) and not joint_is_poisson:
+        # configure_joint() refuses this at startup; this is the belt to that
+        # brace, for a joint assembled by hand in a script or a test.
+        raise NotImplementedError(
+            f"joint {joint_dims()} mixes Poisson latent-rate dimensions with "
+            f"observed-value ones. The two are scored by different likelihoods; "
+            f"a mixed joint is not implemented.")
+
     joint_terms, joint_counts, joint_branch = [], [], []
-    if bool(have_req.any()) and len(JOINT_IDX) >= 2:
+    if joint_is_poisson and bool(have_req.any()):
+        # ---- Poisson joint: ONE quadrature over every latent dimension ------
+        # There is no "complete" branch in the observed-value sense: the latent
+        # rates are NEVER observed, so every row is integrated. What differs
+        # between rows is how many Poisson FACTORS multiply the flow density --
+        # a row whose marginalisable band is unusable simply contributes one
+        # factor fewer, and that band is integrated out of the joint. The two
+        # branch labels are kept so --select-metric joint_complete keeps meaning
+        # "the rows with every band measured", which is still a different
+        # likelihood scale from the rows without.
+        ctx_j = contexts[:, N_TARGETS]
+        cols = list(JOINT_IDX)
+        stds = [standardizers[j] for j in cols]
+        n_b, b_b, t_b, present = _poisson_columns(pois, cols, have_req)
+        per_row = poisson_marginal_nll(
+            flow=flows.joint, context=ctx_j[have_req], standardizers=stds,
+            counts=n_b, bkg=b_b, exposure=t_b, present=present)
+        complete = have_all[have_req]
+        for label, sel in (("complete", complete), ("quadrature", ~complete)):
+            if bool(sel.any()):
+                joint_terms.append(per_row[sel].mean())
+                joint_counts.append(int(sel.sum()))
+                joint_branch.append(label)
+    elif bool(have_req.any()) and len(JOINT_IDX) >= 2:
         ctx_j = contexts[:, N_TARGETS]
         # (a) fully observed rows: ordinary joint likelihood
         if bool(have_all.any()):
@@ -612,27 +1189,43 @@ def head_influence(loss_terms, contexts) -> dict[str, float]:
 
 
 class MultiTargetLookup:
-    """targetid -> (targets [7], sig_lo [7], sig_hi [7]) across all staged splits."""
+    """targetid -> (targets [K], sig_lo [K], sig_hi [K], pois [K,3]) across splits."""
 
     def __init__(self, staged_dir: Path, extra_targets_csv: Path | None) -> None:
-        ys, slos, shis, tids = [], [], [], []
+        ys, slos, shis, poiss, tids = [], [], [], [], []
         for split in ("train", "val", "test"):
             path = Path(staged_dir) / f"desi_{split}.hdf5"
-            y, lo, hi = load_multi_target_matrix(path, extra_targets_csv)
+            y, lo, hi, pois = load_multi_target_matrix(path, extra_targets_csv)
             with h5py.File(path, "r") as handle:
                 tids.append(handle["desi_targetid"][:].astype(np.int64))
-            ys.append(y); slos.append(lo); shis.append(hi)
+            ys.append(y); slos.append(lo); shis.append(hi); poiss.append(pois)
         tid = np.concatenate(tids)
         y = np.concatenate(ys); lo = np.concatenate(slos); hi = np.concatenate(shis)
+        pois = np.concatenate(poiss)
         _, first = np.unique(tid, return_index=True)
         self.index = {int(t): int(i) for i, t in zip(first, tid[first])}
         self.y = torch.from_numpy(y.astype(np.float32))
         self.slo = torch.from_numpy(lo.astype(np.float32))
         self.shi = torch.from_numpy(hi.astype(np.float32))
+        self.pois = torch.from_numpy(pois.astype(np.float32))
+
+    def _rows(self, targetids: torch.Tensor) -> torch.Tensor:
+        return torch.tensor([self.index[int(t)] for t in targetids.cpu().tolist()],
+                            dtype=torch.long)
 
     def batch(self, targetids: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        rows = torch.tensor([self.index[int(t)] for t in targetids.cpu().tolist()], dtype=torch.long)
+        rows = self._rows(targetids)
         return (self.y[rows].to(device), self.slo[rows].to(device), self.shi[rows].to(device))
+
+    def batch_pois(self, targetids: torch.Tensor, device) -> torch.Tensor:
+        """(N, B, t) per head, [B, K, 3]; NaN for heads that are not Poisson.
+
+        A SEPARATE method rather than a fourth element of `batch()`: three
+        scripts and the eval path unpack that 3-tuple, and widening it would
+        make every one of them a silent positional-unpack bug of exactly the
+        kind `j2, j3 = JOINT_IDX` already was.
+        """
+        return self.pois[self._rows(targetids)].to(device)
 
     def values_for(self, targetids: np.ndarray) -> np.ndarray:
         rows = [self.index[int(t)] for t in targetids if int(t) in self.index]
@@ -658,9 +1251,22 @@ def run_train_multi(args) -> None:
 
     import pandas as pd
 
-    configure_heads(tuple(args.drop_heads or ()))
+    # ORDER MATTERS: the joint is declared first because configure_heads()
+    # validates that every REQUIRED joint dimension survived the drop set, and
+    # --joint-marginal is validated against the joint, so it comes last.
+    joint_names = tuple(n for n in (args.joint or "").split(",") if n) if getattr(args, "joint", None) else None
+    configure_joint(joint_names)
+    add_heads = tuple(args.add_heads or ())
+    configure_heads(tuple(args.drop_heads or ()), add_heads)
     if args.drop_heads:
         print(f"[multi] dropped heads: {list(args.drop_heads)} -> {N_HEADS} heads", flush=True)
+    if add_heads:
+        print(f"[multi] added heads: {list(add_heads)} -> {N_HEADS} heads", flush=True)
+    pois_heads = [t["name"] for t in MULTI_TARGETS if t.get("pois")]
+    if pois_heads:
+        print(f"[multi] Poisson latent-rate heads: {pois_heads} "
+              f"(likelihood on observed counts; exposure and background are "
+              f"likelihood terms, never model inputs)", flush=True)
     configure_joint_marginal(tuple(args.joint_marginal) if args.joint_marginal else None)
     print(f"[multi] joint: {joint_dims()}"
           + (f"  marginalised: {tuple(n for n in JOINT_MARGINAL if n in joint_dims())}"
@@ -863,19 +1469,23 @@ def run_train_multi(args) -> None:
         "bucketed": bool(args.bucketed),
         "accumulate_buckets": bool(args.accumulate_buckets),
         "drop_heads": list(args.drop_heads or []),
-        "heads": HEAD_NAMES,
+        "add_heads": list(add_heads),
         # What this run was CONDITIONED on, and what the joint head actually
         # covered. Neither used to be recorded, so a checkpoint could not say
         # which experiment it was. The joint in particular was re-derived at
         # load time from whatever the module constant happened to be, so an edit
         # to JOINT_PAIR of the same arity would silently relabel every joint
-        # column of every stored checkpoint. Written for the reader; the loader
-        # does not consume these yet (RUN_PLAN A1).
+        # column of every stored checkpoint and still load clean under
+        # strict=True. configure_heads_from_config now CONSUMES `joint_dims` and
+        # `joint_marginal`, so a checkpoint reloads the joint it was trained
+        # with rather than today's module constant.
         "fixed_combo": list(fixed_combo) if fixed_combo else None,
         "select_metric": getattr(args, "select_metric", "pair_mean"),
         "val_combo": list(val_combo),
         "joint_dims": list(joint_dims()),
         "joint_marginal": [n for n in JOINT_MARGINAL if n in joint_dims()],
+        "poisson_heads": pois_heads,
+        "joint_quad_nodes": int(JOINT_QUAD_NODES), "joint_quad_span": float(JOINT_QUAD_SPAN),
         "cls_variant": "readonly", "num_cls": N_HEADS, "adapter": "full-rank",
         "standardizers": [s.state_dict() for s in standardizers],
         "clean_split_csv": str(args.clean_split_csv), "extra_targets_csv": str(args.extra_targets_csv),
@@ -919,6 +1529,7 @@ def run_train_multi(args) -> None:
         for batch in train_loader:
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
             y_all, slo_all, shi_all = lookup.batch(batch[7], device)
+            pois_all = lookup.batch_pois(batch[7], device)
             if args.bucketed:
                 # Length-bucketed packing: per-source combos, one forward AND
                 # one optimizer step per bucket -- each bucket lands near the
@@ -954,15 +1565,16 @@ def run_train_multi(args) -> None:
             want_diag = (global_step % args.diag_every == 0)
             for si, (combo, sub, drop, rows) in enumerate(steps):
                 if rows is None:
-                    y, slo, shi = y_all, slo_all, shi_all
+                    y, slo, shi, pois = y_all, slo_all, shi_all, pois_all
                 else:
                     y, slo, shi = y_all[rows], slo_all[rows], shi_all[rows]
+                    pois = pois_all[rows]
                 cls_seq, _ = encoder.encode_tokens(sub, tuple(combo), modality_dropout=drop)
                 contexts = head(cls_seq)
                 loss, raw, terms = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=weights, inject=not args.no_inject,
-                    inject_samples=args.inject_samples, return_terms=True,
+                    inject_samples=args.inject_samples, return_terms=True, pois=pois,
                 )
                 if want_diag and si == 0:
                     diag_extra.update(head_influence(terms, contexts))
@@ -1019,6 +1631,7 @@ def run_train_multi(args) -> None:
                     _, raw_ = multi_target_nll(
                         contexts=head(cs), flows=flows, targets=yv, sig_lo=slov, sig_hi=shiv,
                         standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
+                        pois=lookup.batch_pois(b[7], device),
                     )
                     nb = int(b[6].shape[0])
                     for jj, vv in enumerate(raw_):
@@ -1048,7 +1661,7 @@ def run_train_multi(args) -> None:
                 _, raw = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,
                     standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
-                    stats=jstats,
+                    stats=jstats, pois=lookup.batch_pois(batch[7], device),
                 )
                 for br in ("complete", "quadrature"):
                     nb = jstats.get(f"joint_{br}_n", 0)
@@ -1060,6 +1673,15 @@ def run_train_multi(args) -> None:
                     if val is not None:
                         sums[j] += val * n; counts[j] += n
                 for j in range(N_TARGETS):
+                    # No R^2 for a Poisson head. There is no observed value to
+                    # regress against: y[:, j] is the plug-in standardization
+                    # anchor, which is floored at one count and therefore biased
+                    # exactly where the counts run out. An R^2 against it would
+                    # be a number about the anchor, printed as if it were about
+                    # the model. Its held-out NLL is the count marginal
+                    # likelihood, which is the metric RUN_PLAN 3 names.
+                    if MULTI_TARGETS[j].get("pois"):
+                        continue
                     mask = torch.isfinite(y[:, j])
                     if bool(mask.any()):
                         samp = flows.flows[j].sample(contexts[mask, j], num_samples=64)
