@@ -608,13 +608,13 @@ def run_train_multi(args) -> None:
 
     try:
         from .stub_encoder import stub_requested
-        from .attention_pooling_head import ComboSampler
+        from .attention_pooling_head import ComboSampler, MODALITIES
         from .data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
         from .main import _OOM_ERROR  # noqa: F401  (import kept for parity)
         from .tracking import init_tracking
     except ImportError:
         from stub_encoder import stub_requested
-        from attention_pooling_head import ComboSampler
+        from attention_pooling_head import ComboSampler, MODALITIES
         from data_to_aion_embeddings import AIONTokenEncoder, build_dataloaders, write_json
         from tracking import init_tracking
 
@@ -794,6 +794,30 @@ def run_train_multi(args) -> None:
         print("[multi] head loss weights: " + ", ".join(
             f"{n}={w:g}" for n, w in zip(HEAD_NAMES, head_weight) if w != 1.0), flush=True)
 
+    # --fixed-combo pins the conditioning set for the WHOLE run: training,
+    # validation and therefore checkpoint selection. Without it a run that is
+    # meant to answer "what do spectra and z alone say" instead trains a
+    # full-dropout model and early-stops on an all-inputs criterion it never
+    # trained for -- three different experiments in one job, none of them the
+    # one that was asked for.
+    #
+    # It has to reach the VALIDATION loops too, not just the sampler. Both used
+    # to hardcode ("spectra","z","wise","image"), so pinning only the training
+    # combo would have left the model selected on modalities it never saw.
+    fixed_combo = tuple(args.fixed_combo.split("+")) if args.fixed_combo else None
+    if fixed_combo:
+        unknown = [m for m in fixed_combo if m not in MODALITIES]
+        if unknown:
+            raise ValueError(
+                f"--fixed-combo names unknown modalities {unknown}; "
+                f"valid names are {list(MODALITIES)} joined with '+', "
+                f"e.g. --fixed-combo spectra+z")
+        if len(set(fixed_combo)) != len(fixed_combo):
+            raise ValueError(f"--fixed-combo repeats a modality: {fixed_combo}")
+    val_combo = fixed_combo if fixed_combo else MODALITIES
+    print(f"[multi] conditioning: {'FIXED ' + '+'.join(fixed_combo) if fixed_combo else 'sampled combos'}"
+          f"; validation and checkpoint selection on {'+'.join(val_combo)}", flush=True)
+
     sampler = ComboSampler.default()
     generator = torch.Generator(); generator.manual_seed(args.seed)
     ema = EMALossWeights()
@@ -814,6 +838,17 @@ def run_train_multi(args) -> None:
         "accumulate_buckets": bool(args.accumulate_buckets),
         "drop_heads": list(args.drop_heads or []),
         "heads": HEAD_NAMES,
+        # What this run was CONDITIONED on, and what the joint head actually
+        # covered. Neither used to be recorded, so a checkpoint could not say
+        # which experiment it was. The joint in particular was re-derived at
+        # load time from whatever the module constant happened to be, so an edit
+        # to JOINT_PAIR of the same arity would silently relabel every joint
+        # column of every stored checkpoint. Written for the reader; the loader
+        # does not consume these yet (RUN_PLAN A1).
+        "fixed_combo": list(fixed_combo) if fixed_combo else None,
+        "val_combo": list(val_combo),
+        "joint_dims": list(joint_dims()),
+        "joint_marginal": [n for n in JOINT_MARGINAL if n in joint_dims()],
         "cls_variant": "readonly", "num_cls": N_HEADS, "adapter": "full-rank",
         "standardizers": [s.state_dict() for s in standardizers],
         "clean_split_csv": str(args.clean_split_csv), "extra_targets_csv": str(args.extra_targets_csv),
@@ -862,7 +897,8 @@ def run_train_multi(args) -> None:
                 # one optimizer step per bucket -- each bucket lands near the
                 # calibrated per-forward size while the step count stays high.
                 B = int(batch[6].shape[0])
-                combos_ps = [sampler.sample(generator) for _ in range(B)]
+                combos_ps = ([fixed_combo] * B if fixed_combo
+                             else [sampler.sample(generator) for _ in range(B)])
                 steps = []
                 bucket_names = []
                 for bucket, idx in bucket_assignments(combos_ps):
@@ -879,7 +915,7 @@ def run_train_multi(args) -> None:
                         steps.append((bucket["union"], sub, drop, rows))
                         bucket_names.append(bucket["name"])
             else:
-                steps = [(sampler.sample(generator), batch, None, None)]
+                steps = [(fixed_combo or sampler.sample(generator), batch, None, None)]
                 bucket_names = ["all"]
             # With --accumulate-buckets every optimizer step sees the FULL combo
             # mix (gradients summed over all buckets) instead of alternating
@@ -952,7 +988,7 @@ def run_train_multi(args) -> None:
                 for b in loader:
                     b = tuple(t.to(device, non_blocking=True) for t in b)
                     yv, slov, shiv = lookup.batch(b[7], device)
-                    cs, _ = encoder.encode_tokens(b, ("spectra", "z", "wise", "image"))
+                    cs, _ = encoder.encode_tokens(b, val_combo)
                     _, raw_ = multi_target_nll(
                         contexts=head(cs), flows=flows, targets=yv, sig_lo=slov, sig_hi=shiv,
                         standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
@@ -972,7 +1008,7 @@ def run_train_multi(args) -> None:
             for batch in val_loader:
                 batch = tuple(t.to(device, non_blocking=True) for t in batch)
                 y, slo, shi = lookup.batch(batch[7], device)
-                cls_seq, _ = encoder.encode_tokens(batch, ("spectra", "z", "wise", "image"))
+                cls_seq, _ = encoder.encode_tokens(batch, val_combo)
                 contexts = head(cls_seq)
                 _, raw = multi_target_nll(
                     contexts=contexts, flows=flows, targets=y, sig_lo=slo, sig_hi=shi,

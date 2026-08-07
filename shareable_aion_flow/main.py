@@ -1032,6 +1032,14 @@ def parse_args() -> argparse.Namespace:
                          "untrained flow, which is smoother than a trained one.")
     mt.add_argument("--joint-quad-span", type=float, default=None,
                     help="Half-width of the quadrature grid in standardized units (default 5.0).")
+    mt.add_argument("--fixed-combo", default=None,
+                    help="Pin the conditioning set for the WHOLE run, '+'-joined, "
+                         "e.g. 'spectra+z'. Applies to training AND to both "
+                         "validation loops, so the checkpoint is selected on the "
+                         "same inputs it was trained on. Without it the run "
+                         "samples modality combos and validates on all four, "
+                         "which is three different experiments in one job. Run A "
+                         "wants spectra+z; Run B wants all four, i.e. omit this.")
     mt.add_argument("--warmup-steps", type=int, default=0,
                     help="Linear LR warmup over this many optimizer steps, composed with "
                          "--lr-schedule in ONE LambdaLR so per-group LR ratios are preserved. "
