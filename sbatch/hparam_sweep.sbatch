@@ -55,6 +55,11 @@ COMMON=(
   --fixed-combo spectra+z --joint-marginal log_sfr --select-metric joint_complete
   --no-inject --bucketed --accumulate-buckets --grad-checkpoint
   --num-workers 8 --output-dir "$OUT"
+  # Each setting becomes its own wandb run, named by --run-id, so the sweep is
+  # readable without the SSH socket -- which has died three times in two hours,
+  # once mid-command. A long run that can only be monitored over a socket that
+  # keeps dropping is a long run nobody is watching.
+  --wandb
 )
 
 echo "############ PHASE 1: batch size ############"
