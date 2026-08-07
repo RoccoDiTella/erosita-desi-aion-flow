@@ -72,6 +72,13 @@ JOINT_QUAD_SPAN="${JOINT_QUAD_SPAN:-}"
 #   SELECT_METRIC   what best.pt is chosen on. The default pair_mean gives every
 #                   head an equal vote, so the joint counts for 1/N_HEADS.
 #                   Run A: "joint_complete".
+#   ADD_HEADS / JOINT are Run B: Poisson latent-rate heads are OPT-IN because
+#   their sidecar columns did not exist until the counts re-run, and an absent
+#   column is a hard error. Without these two knobs a Run B submission runs
+#   Run A's default heads and looks perfectly healthy while answering the
+#   wrong question -- which is exactly what happened to job 37700733.
+ADD_HEADS="${ADD_HEADS:-}"
+JOINT="${JOINT:-}"
 FIXED_COMBO="${FIXED_COMBO:-}"
 JOINT_MARGINAL="${JOINT_MARGINAL:-}"
 SELECT_METRIC="${SELECT_METRIC:-}"
@@ -95,6 +102,8 @@ python -m shareable_aion_flow.main train-multi \
   --diag-every "$DIAG_EVERY" \
   ${JOINT_QUAD_NODES:+--joint-quad-nodes $JOINT_QUAD_NODES} \
   ${JOINT_QUAD_SPAN:+--joint-quad-span $JOINT_QUAD_SPAN} \
+  ${ADD_HEADS:+--add-heads $ADD_HEADS} \
+  ${JOINT:+--joint $JOINT} \
   ${FIXED_COMBO:+--fixed-combo $FIXED_COMBO} \
   ${JOINT_MARGINAL:+--joint-marginal $JOINT_MARGINAL} \
   ${SELECT_METRIC:+--select-metric $SELECT_METRIC} \
