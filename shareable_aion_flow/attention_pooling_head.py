@@ -10,6 +10,7 @@ paper; see the repository README for how it relates to the full research code.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
@@ -29,6 +30,41 @@ def all_nonempty_modality_combos() -> list[tuple[str, ...]]:
 def combo_name(combo: tuple[str, ...] | list[str] | set[str]) -> str:
     ordered = [name for name in MODALITIES if name in set(combo)]
     return "+".join(ordered)
+
+
+def available_matrix(present: dict[str, torch.Tensor]) -> torch.Tensor:
+    """``[B, 4]`` bool availability matrix in ``MODALITIES`` order.
+
+    ``present`` is what ``data_to_aion_embeddings.modality_presence`` returns:
+    one boolean per source per modality. Column order is fixed by ``MODALITIES``
+    so ``MODALITY_TO_ID`` indexes it.
+    """
+    return torch.stack([present[name].to(torch.bool) for name in MODALITIES], dim=1)
+
+
+def combo_supported(
+    combo: Iterable[str], available: torch.Tensor, *, require: str = "all"
+) -> torch.Tensor:
+    """Which rows of ``available`` can be conditioned on ``combo``.
+
+    ``require="all"`` is the strict reading — the source has EVERY modality the
+    combo names — and is what a pinned ``--fixed-combo`` needs, because a run
+    that pins spectra+z is asking a question about spectra AND z.
+    ``require="any"`` is the maskable reading: the source has at least one of
+    them, so the ones it lacks can be dropped from the encoder input and the
+    source still contributes something real. That is what a batch-level sampled
+    combo needs, where the combo is a property of the step rather than a claim
+    about the row.
+    """
+    cols = [MODALITY_TO_ID[name] for name in combo]
+    if not cols:
+        raise ValueError("combo is empty; there is nothing to condition on.")
+    sub = available[:, cols]
+    if require == "all":
+        return sub.all(dim=1)
+    if require == "any":
+        return sub.any(dim=1)
+    raise ValueError(f"unknown require {require!r}; use 'all' or 'any'.")
 
 
 def combo_presence_id(combo: tuple[str, ...] | list[str] | set[str]) -> int:
@@ -307,6 +343,53 @@ class CLSContext(nn.Module):
         return self.norm_out(self.project(self.norm_in(tokens[:, 0])))
 
 
+@dataclass
+class ComboDrawStats:
+    """Counters for how often availability had to change a combo draw.
+
+    A silent fix is only half a fix: a run has to be able to say what fraction
+    of its conditioning was not what the sampler nominally asked for.
+
+      draws            presence-aware draws requested
+      clamped          draws whose SIZE was reduced because the source does not
+                       have that many modalities
+      masked           source-steps where a modality named by a batch-level
+                       combo was removed for that source (the batch-level path
+                       cannot restratify per source, so it masks instead)
+      dropped_missing  sources excluded from a step because they have NO
+                       modality the step could use
+      dropped_pinned   sources excluded because they cannot honour --fixed-combo
+    """
+
+    draws: int = 0
+    clamped: int = 0
+    masked: int = 0
+    dropped_missing: int = 0
+    dropped_pinned: int = 0
+    rows: int = 0
+
+    def reset(self) -> None:
+        for name in ("draws", "clamped", "masked", "dropped_missing",
+                     "dropped_pinned", "rows"):
+            setattr(self, name, 0)
+
+    @property
+    def adjusted(self) -> int:
+        return self.clamped + self.masked
+
+    @property
+    def adjusted_fraction(self) -> float:
+        return self.adjusted / self.rows if self.rows else 0.0
+
+    def summary(self) -> str:
+        pct = 100.0 * self.adjusted_fraction
+        return (f"{self.rows:,} source-steps; combo adjusted for {self.adjusted:,} "
+                f"({pct:.1f}%) [size-clamped {self.clamped:,}, modality-masked "
+                f"{self.masked:,}]; dropped {self.dropped_pinned + self.dropped_missing:,} "
+                f"(cannot honour the pin {self.dropped_pinned:,}, "
+                f"no usable modality {self.dropped_missing:,})")
+
+
 @dataclass(frozen=True)
 class ComboSampler:
     """Uniformly sample by combo size: singles, pairs, triples, all-input."""
@@ -325,8 +408,8 @@ class ComboSampler:
     ) -> list[tuple[str, ...]]:
         """One combo per source, same size-stratified marginal as ``sample``.
 
-        Used for fixed-composition batches: every batch then contains the full
-        combo mix, so per-batch memory and gradient composition are constant.
+        PRESENCE-BLIND. Only correct where every source has every modality; use
+        ``sample_per_source_available`` anywhere real data is involved.
         """
         return [self.sample(generator) for _ in range(n)]
 
@@ -336,3 +419,99 @@ class ComboSampler:
         combos = self.combos_by_size[sizes[size_index]]
         combo_index = int(torch.randint(len(combos), (1,), generator=generator).item())
         return combos[combo_index]
+
+    def sample_available(
+        self,
+        available: Iterable[str],
+        generator: torch.Generator | None = None,
+        stats: ComboDrawStats | None = None,
+    ) -> tuple[str, ...]:
+        """Draw a combo the source can actually honour.
+
+        The size is drawn EXACTLY as in ``sample`` -- uniformly over the sizes
+        this sampler knows -- and then CLAMPED to how many modalities the source
+        has. Within the resulting size the choice is uniform over the combos that
+        are subsets of ``available``. Two consequences worth stating:
+
+        * when all four modalities are present this is ``sample`` exactly, draw
+          for draw: it consumes the same two randints in the same order and
+          returns the same combo, so the size-stratified marginal is not merely
+          approximated, it is untouched;
+        * for a source with ``k`` modalities, sizes 1..k-1 keep their uniform
+          within-size marginal and all draws of size >= k collapse onto the one
+          legal combo of size k.
+
+        THE FALLBACK, and why there is nothing to choose. Legality here is
+        "subset of what the source has", so the legal sizes are exactly
+        1..len(available) with no gaps. A drawn size is illegal only when it
+        EXCEEDS len(available), the nearest smaller legal size is then
+        len(available) itself, and the only legal combo of that size is the
+        source's full available set. "Fall back to a smaller size" and "fall
+        back to the source's full available set" therefore name the same combo.
+        Clamping implements both. It is counted as ``clamped`` so a run can
+        report how much of its mix was decided by availability rather than by
+        the sampler.
+
+        Raises ``ValueError`` when ``available`` is empty: a source with no
+        input at all cannot be conditioned on anything, and inventing a combo
+        for it is precisely the bug this function exists to remove. Callers
+        drop such rows (see ``sample_per_source_available``).
+        """
+        wanted = {name for name in available}
+        avail = tuple(name for name in MODALITIES if name in wanted)
+        if not avail:
+            raise ValueError(
+                "no modality is available for this source, so no combo is legal; "
+                "the caller must exclude the row rather than condition it on "
+                "inputs that do not exist.")
+        sizes = tuple(sorted(self.combos_by_size))
+        drawn_size = sizes[int(torch.randint(len(sizes), (1,), generator=generator).item())]
+        aset = set(avail)
+        legal: tuple[tuple[str, ...], ...] = ()
+        size = min(drawn_size, len(avail))
+        while size >= 1:
+            legal = tuple(c for c in self.combos_by_size.get(size, ())
+                          if aset.issuperset(c))
+            if legal:
+                break
+            size -= 1
+        if not legal:
+            raise ValueError(
+                f"no combo in this sampler is a subset of {avail}; the sampler's "
+                f"combo set and the modality set have diverged.")
+        combo = legal[int(torch.randint(len(legal), (1,), generator=generator).item())]
+        if stats is not None:
+            stats.draws += 1
+            stats.clamped += int(size != drawn_size)
+        return combo
+
+    def sample_per_source_available(
+        self,
+        available: torch.Tensor,
+        generator: torch.Generator | None = None,
+        stats: ComboDrawStats | None = None,
+    ) -> tuple[list[tuple[str, ...]], torch.Tensor]:
+        """Per-source presence-aware combos for a ``[B, 4]`` availability matrix.
+
+        Returns ``(combos, usable)``. A row with no modality at all gets an
+        EMPTY combo and ``usable=False`` so the caller can drop it; it is never
+        handed a combo naming an input it does not have.
+        """
+        if available.dim() != 2 or available.shape[1] != len(MODALITIES):
+            raise ValueError(
+                f"available must be [B, {len(MODALITIES)}] in MODALITIES order, "
+                f"got {tuple(available.shape)}.")
+        flags = available.to(torch.bool).cpu().tolist()
+        combos: list[tuple[str, ...]] = []
+        usable: list[bool] = []
+        for row in flags:
+            names = [name for name, ok in zip(MODALITIES, row) if ok]
+            if not names:
+                combos.append(())
+                usable.append(False)
+                if stats is not None:
+                    stats.dropped_missing += 1
+                continue
+            combos.append(self.sample_available(names, generator, stats))
+            usable.append(True)
+        return combos, torch.tensor(usable, dtype=torch.bool, device=available.device)

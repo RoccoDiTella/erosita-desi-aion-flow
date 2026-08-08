@@ -9,6 +9,7 @@ error mode's full call path runs on CPU in milliseconds.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from shareable_aion_flow.main import batch_nll, validation_metrics
@@ -109,3 +110,78 @@ def test_validation_metrics_full_path_every_mode():
         for modality in ("z", "spectra", "wise", "image"):
             assert f"val/{modality}_nll" in metrics
         assert "val/all_inputs_r2" in metrics
+
+
+# ------------------------------------------------------------ presence in batch_nll
+# batch_nll used to encode whatever the combo named. A source staged without a
+# Legacy Survey cutout carries an all-zero image, so an image combo tokenized
+# zeros as sky. Now every source is conditioned on `combo INTERSECT what it has`.
+
+
+class SpyEncoder(StubEncoder):
+    """Records what it was actually asked to encode."""
+
+    def __init__(self):
+        self.calls = []
+
+    def encode_tokens(self, batch, combo, spectrum_token_mask=None, mask_mode="drop",
+                      modality_dropout=None):
+        self.calls.append({"n": int(batch[0].shape[0]), "combo": tuple(combo),
+                           "dropout": modality_dropout})
+        return super().encode_tokens(batch, combo, spectrum_token_mask, mask_mode,
+                                     modality_dropout)
+
+
+def batch_with_images(n, blank_rows):
+    b = list(make_batch(n=n))
+    b[5] = torch.rand(n, 4, 8, 8) + 0.1
+    for row in blank_rows:
+        b[5][row] = 0.0
+    return tuple(b)
+
+
+def test_batch_nll_drops_sources_that_have_none_of_the_combo():
+    _e, ctx, flow, std = parts()
+    encoder = SpyEncoder()
+    batch = batch_with_images(8, blank_rows=[1, 3, 5, 6, 7])   # 3 real cutouts
+    loss = batch_nll(encoder=encoder, context_encoder=ctx, flow=flow, batch=batch,
+                     combo=("image",), standardizer=std)
+    assert torch.isfinite(loss)
+    assert encoder.calls[0]["n"] == 3, "only sources with a real cutout may be encoded"
+
+
+def test_batch_nll_refuses_a_batch_with_nothing_to_condition_on():
+    from shareable_aion_flow.main import NoConditionableRows
+
+    _e, ctx, flow, std = parts()
+    encoder = SpyEncoder()
+    batch = batch_with_images(4, blank_rows=range(4))          # no cutouts at all
+    with pytest.raises(NoConditionableRows):
+        batch_nll(encoder=encoder, context_encoder=ctx, flow=flow, batch=batch,
+                  combo=("image",), standardizer=std)
+    assert not encoder.calls, "nothing may reach the encoder"
+
+
+def test_batch_nll_masks_the_absent_modality_but_keeps_the_source():
+    """A source with spectra but no cutout still trains -- on its spectra."""
+    _e, ctx, flow, std = parts()
+    encoder = SpyEncoder()
+    batch = batch_with_images(4, blank_rows=[2])
+    batch_nll(encoder=encoder, context_encoder=ctx, flow=flow, batch=batch,
+              combo=("spectra", "image"), standardizer=std)
+    call = encoder.calls[0]
+    assert call["n"] == 4, "no source is dropped when spectra remain"
+    assert call["dropout"]["image"].tolist() == [False, False, True, False]
+    assert not call["dropout"]["spectra"].any()
+
+
+def test_batch_nll_is_unchanged_when_every_modality_is_present():
+    _e, ctx, flow, std = parts()
+    encoder = SpyEncoder()
+    batch = batch_with_images(4, blank_rows=[])
+    b = list(batch)
+    b[4] = torch.rand(4, 3) + 0.5                              # positive WISE flux
+    batch_nll(encoder=encoder, context_encoder=ctx, flow=flow, batch=tuple(b),
+              combo=("spectra", "z", "wise", "image"), standardizer=std)
+    call = encoder.calls[0]
+    assert call["n"] == 4 and call["dropout"] is None

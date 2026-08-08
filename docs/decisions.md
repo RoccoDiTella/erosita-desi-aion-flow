@@ -1553,3 +1553,79 @@ Two reasons the manifest is load-bearing rather than bookkeeping:
   ivars, which a training batch cannot; it is complementary to
   `data_to_aion_embeddings.modality_presence()`, which is the batch-side rule,
   and neither replaces the other.
+
+---
+
+## 12. Presence-aware combo sampling (2026-08-08)
+
+**The defect.** `ComboSampler.default()` sampled uniformly over all 15 non-empty
+modality combos with no knowledge of what any individual source has, and
+`multitarget.py` never consulted the presence flags at all. Staging writes an
+all-ZERO image for a source with no Legacy Survey cutout and records
+`has_image=False`; nothing downstream read that, so the model could be handed a
+zero-filled image tensor and trained on it as if it were sky. Nothing warned.
+
+**Why it was invisible.** On the dr2v2 sample `has_image` is EXACTLY
+`has_spectrum` — measured, 0 rows differ — so every image combo was legitimate
+and the bug was a true no-op. On the MERGED sample only 36,760 of 103,800
+in-split rows have a cutout (35.4%) while the fetch runs, so roughly two thirds
+of image-combo draws would have been zeros.
+
+### What the fix is
+
+1. **The four presence flags reach the training loop.** They are APPENDED to the
+   batch tuple as element 10 (`BATCH_PRESENCE_INDEX`), a `[B, 4]` bool in
+   `PRESENCE_FLAGS` order — an 11-tuple. Appending, not inserting: every reader
+   in the repository addresses the batch positionally (`batch[6]` target,
+   `batch[7]` targetid, `batch[8:10]` sigmas) and three of them test
+   `len(batch) >= 10`, so appending is invisible to all of them. Row-aligned and
+   NOT looked up by targetid, because staged targetids are deliberately not
+   unique across the three files (`clean_view_row_maps` dedups them), so a
+   targetid-keyed presence lookup would be ambiguous exactly where it matters.
+   This gives `modality_presence(batch, flags=...)` its first caller:
+   `batch_modality_presence`. Measured effect on the real dr2v2 test split: the
+   manifest verdict tightens the `common` row set by 6 rows in 996 — the
+   ZWARN-flagged and ivar-zero rows a batch-side check physically cannot see.
+
+2. **Combo sampling is presence-aware.** `ComboSampler.sample_available` draws
+   the SIZE exactly as before (uniform over 1..4) and then clamps it to how many
+   modalities the source has, choosing uniformly among the combos that are
+   subsets of what it has. With all four present it is the old sampler draw for
+   draw — same generator consumption, same combo — so nothing about dr2v2
+   changes. **The fallback is a clamp, and the two candidate rules coincide:**
+   legality is "subset of available", so the legal sizes are exactly
+   1..len(available) with no gaps; a drawn size is illegal only if it EXCEEDS
+   len(available); the nearest smaller legal size is then len(available); and the
+   only legal combo of that size is the source's full available set. "Fall back
+   to a smaller size" and "fall back to the full available set" name the same
+   combo, so there was nothing to choose between.
+
+3. **`--fixed-combo` DROPS rows it cannot honour; it never falls back.** A pin
+   exists so that every row answers the same question. Conditioning a row on the
+   subset it happens to have would answer a different question for an unnamed
+   subset — and that subset is not random, it is exactly the rows with worse
+   data — then report the mixture under the pin's name. The rule applies to
+   validation too, so dropped rows are out of checkpoint selection, and the
+   startup log states the count per split.
+
+4. **It says so out loud.** A `[presence]` block at startup prints per-modality
+   coverage for the rows the run will actually train on (walking the clean-split
+   view, not the staged file), and one line per epoch reports what fraction of
+   draws availability changed: size-clamped, modality-masked, rows dropped.
+   Mirrored to the tracker as `presence/*`.
+
+**Where a batch-level combo is used** (`train-multi` without `--bucketed`, and
+`main.py train`), presence cannot restratify — the combo is a property of the
+step, not of the row — so each source is conditioned on
+`combo INTERSECT what it has` via the encoder's native input mask, and a source
+left with nothing is dropped from that step. `main.py::batch_nll` raises
+`NoConditionableRows` when no row in the batch survives, which the loop counts
+and skips; that is the correct outcome for e.g. an image-only combo on a batch
+with no cutouts.
+
+**Not covered** (both single-target legacy paths, neither used by Run A or B):
+`main.py::validation_metrics` and `evals.py::evaluate_all_combos` still score
+every source on the nominal combo. Fixing them properly means per-combo row sets,
+which needs `eval_core`'s sample declaration (`sample`/`n_test`/`n_sample`)
+because NLL, R², RMSE and IG are all row-set dependent — the multi-target eval
+path already has it and now uses the manifest flags too.

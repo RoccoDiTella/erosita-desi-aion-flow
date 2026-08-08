@@ -1445,3 +1445,61 @@ def test_quadrature_is_the_same_estimand_as_sampling_the_latents() -> None:
     #     luck, so it cannot be the loss and cannot be a reported number.
     assert draws[:, :2].std(axis=0).max() < 0.05, draws[:, :2].std(axis=0)
     assert draws[:, 2].std() > 1.0, draws[:, 2]
+
+
+# ------------------------------------------------- presence-aware conditioning
+# `bucket_modality_dropout` used to see only the IMAGE tensor, and only its
+# content. Every other modality was taken on faith from the sampled combo, and
+# the sampler had no idea what a source had.
+
+
+def test_bucket_dropout_masks_every_absent_modality_not_just_blank_images() -> None:
+    import multitarget as mt
+    from attention_pooling_head import MODALITIES
+
+    bucket = {"union": ("spectra", "z", "wise", "image")}
+    combos = [tuple(MODALITIES)] * 3            # all three ask for all four
+    idx = np.arange(3)
+    available = torch.tensor([
+        [True, True, True, True],               # has everything
+        [True, True, True, False],              # no cutout
+        [True, False, False, True],             # no z (ZWARN), no WISE detection
+    ])
+    out = mt.bucket_modality_dropout(bucket, combos, idx, available=available)
+    assert out["image"].tolist() == [False, True, False]
+    assert out["z"].tolist() == [False, False, True]
+    assert out["wise"].tolist() == [False, False, True]
+    assert not out["spectra"].any()
+
+
+def test_bucket_dropout_availability_can_only_drop_more() -> None:
+    """It is a backstop, never a source of conditioning."""
+    import multitarget as mt
+
+    bucket = {"union": ("spectra", "z", "wise", "image")}
+    combos = [("spectra", "z")] * 2             # combo already excludes wise/image
+    idx = np.arange(2)
+    available = torch.ones(2, 4, dtype=torch.bool)
+    out = mt.bucket_modality_dropout(bucket, combos, idx, available=available)
+    assert out["wise"].all() and out["image"].all()
+    assert not out["spectra"].any() and not out["z"].any()
+
+
+def test_fixed_combo_drop_policy_is_all_or_nothing() -> None:
+    """--fixed-combo drops a row it cannot honour; it never falls back.
+
+    A pin exists so every row answers the SAME question. Falling back to
+    "whatever this row happens to have" would answer a different question for an
+    unnamed subset -- and that subset is not random, it is exactly the rows with
+    worse data -- then report the mixture under the pin's name.
+    """
+    from attention_pooling_head import combo_supported
+
+    available = torch.tensor([
+        [True, True, True, True],
+        [True, False, True, True],              # no z: cannot honour spectra+z
+        [False, True, True, True],              # no spectra
+    ])
+    keep = combo_supported(("spectra", "z"), available, require="all")
+    assert keep.tolist() == [True, False, False]
+    assert int((~keep).sum()) == 2              # the count a run must print

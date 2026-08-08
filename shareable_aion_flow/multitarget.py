@@ -41,9 +41,11 @@ import torch
 from torch import nn
 
 try:
+    from .attention_pooling_head import MODALITY_TO_ID
     from .data_to_aion_embeddings import read_dataset
     from .normalizing_flow import ConditionalNSFFlow, TargetStandardizer, sample_split_normal
 except ImportError:
+    from attention_pooling_head import MODALITY_TO_ID
     from data_to_aion_embeddings import read_dataset
     from normalizing_flow import ConditionalNSFFlow, TargetStandardizer, sample_split_normal
 
@@ -1316,14 +1318,20 @@ def run_train_multi(args) -> None:
 
     try:
         from .stub_encoder import build_encoder
-        from .attention_pooling_head import ComboSampler, MODALITIES
-        from .data_to_aion_embeddings import build_dataloaders, write_json
+        from .attention_pooling_head import (
+            ComboDrawStats, ComboSampler, MODALITIES,
+            available_matrix, combo_supported)
+        from .data_to_aion_embeddings import (
+            batch_modality_presence, build_dataloaders, presence_report, write_json)
         from .main import _OOM_ERROR  # noqa: F401  (import kept for parity)
         from .tracking import init_tracking
     except ImportError:
         from stub_encoder import build_encoder
-        from attention_pooling_head import ComboSampler, MODALITIES
-        from data_to_aion_embeddings import build_dataloaders, write_json
+        from attention_pooling_head import (
+            ComboDrawStats, ComboSampler, MODALITIES,
+            available_matrix, combo_supported)
+        from data_to_aion_embeddings import (
+            batch_modality_presence, build_dataloaders, presence_report, write_json)
         from tracking import init_tracking
 
     import pandas as pd
@@ -1538,9 +1546,101 @@ def run_train_multi(args) -> None:
     print(f"[multi] conditioning: {'FIXED ' + '+'.join(fixed_combo) if fixed_combo else 'sampled combos'}"
           f"; validation and checkpoint selection on {'+'.join(val_combo)}", flush=True)
 
+    # ----------------------------------------------------------- presence report
+    # WHICH INPUTS THE ROWS ACTUALLY HAVE, said out loud before a single step.
+    # Combo sampling used to be presence-blind: a source staged without a Legacy
+    # Survey cutout carries an all-zero image, and any combo naming `image` fed
+    # AION that zero frame as though it were sky. On the dr2v2 sample that was a
+    # measured no-op (has_image was EXACTLY has_spectrum), which is the only
+    # reason it never showed up; on the merged sample it is a third of the rows.
+    presence_counts: dict[str, np.ndarray] = {}
+    for split_name, loader_ in (("train", train_loader), ("val", val_loader)):
+        line, flags_ = presence_report(split_name, loader_.dataset)
+        presence_counts[split_name] = flags_
+        print(line, flush=True)
+    print("[presence] counts are the MANIFEST verdict; the per-batch content check "
+          "(all-zero cutout, non-finite z, non-positive WISE flux) can only lower "
+          "them.", flush=True)
+
+    # THE --fixed-combo POLICY, decided here and stated in the log because it
+    # changes the row set: a source that lacks a pinned modality is DROPPED for
+    # that step, never silently conditioned on the subset it happens to have.
+    # A pin exists to make every row answer the same question; falling back
+    # would answer a different question for an unnamed subset and report the
+    # mixture under the pin's name -- and the affected rows are not random, they
+    # are exactly the rows with worse data. Dropping is visible, and the count
+    # below is what makes it visible.
+    if fixed_combo:
+        cols = [MODALITY_TO_ID[m] for m in fixed_combo]
+        for split_name, flags_ in presence_counts.items():
+            n = len(flags_)
+            ok = int(flags_[:, cols].all(axis=1).sum()) if n else 0
+            lost = n - ok
+            print(f"[presence] --fixed-combo {'+'.join(fixed_combo)}: {split_name} "
+                  f"{ok:,} of {n:,} rows can be conditioned as asked; {lost:,} "
+                  f"({100.0 * lost / max(n, 1):.1f}%) are DROPPED"
+                  + (" from training" if split_name == "train"
+                     else " from validation AND from checkpoint selection"),
+                  flush=True)
+            if n and lost > n // 2:
+                print(f"[presence] WARNING: the pin discards MORE THAN HALF of "
+                      f"{split_name}. That is a different sample, not a different "
+                      f"conditioning set.", flush=True)
+    else:
+        print("[presence] combos are drawn only from modalities a source HAS; a "
+              "draw whose size exceeds a source's available count is clamped to "
+              "that source's full available set (the two candidate fallbacks "
+              "coincide -- see ComboSampler.sample_available).", flush=True)
+
     sampler = ComboSampler.default()
     generator = torch.Generator(); generator.manual_seed(args.seed)
+    draw_stats = ComboDrawStats()
+    val_stats = ComboDrawStats()
     ema = EMALossWeights()
+
+    def condition_eval_batch(batch_):
+        """Presence-aware conditioning for an EVALUATION forward.
+
+        Validation used to hand every source the whole ``val_combo`` regardless
+        of what it had, which on the merged sample means a zero-filled image
+        tensor for two rows in three -- and validation is what picks the
+        checkpoint, so a fix confined to training would leave the selection
+        criterion computed on inputs that do not exist.
+
+        Two rules, matching training exactly so the gap between the curves stays
+        a generalization gap:
+
+        * PINNED (``--fixed-combo``): a source that cannot honour the pin is
+          removed from validation and therefore from checkpoint selection. The
+          startup log states how many rows that is, per split.
+        * SAMPLED (``val_combo`` = all four): each source is scored on
+          ``val_combo INTERSECT what it has``; the rest is masked out of the
+          encoder input. A source with none of them is removed.
+
+        Returns ``(batch, modality_dropout)``, or ``(None, None)`` when nothing
+        in the batch is conditionable.
+        """
+        avail_ = available_matrix(batch_modality_presence(batch_))
+        val_stats.rows += int(avail_.shape[0])
+        require = "all" if fixed_combo else "any"
+        keep_mask = combo_supported(val_combo, avail_, require=require)
+        if fixed_combo:
+            val_stats.dropped_pinned += int((~keep_mask).sum())
+        else:
+            val_stats.dropped_missing += int((~keep_mask).sum())
+        if not bool(keep_mask.all()):
+            keep_ = keep_mask.nonzero(as_tuple=True)[0]
+            if keep_.numel() == 0:
+                return None, None
+            batch_ = tuple(t[keep_] for t in batch_)
+            avail_ = avail_[keep_]
+        if fixed_combo:
+            return batch_, None          # survivors have every pinned modality
+        drop_ = {m: ~avail_[:, MODALITY_TO_ID[m]] for m in val_combo}
+        val_stats.masked += int(torch.stack(list(drop_.values()), dim=1).any(dim=1).sum())
+        if not any(bool(v.any()) for v in drop_.values()):
+            return batch_, None
+        return batch_, drop_
 
     config = {
         "mode": "train-multi", "heads": HEAD_NAMES, "epochs": args.epochs,
@@ -1601,6 +1701,10 @@ def run_train_multi(args) -> None:
     best = float("inf"); best_epoch = 0; global_step = 0
     for epoch in range(1, args.epochs + 1):
         t0 = time.monotonic()
+        # Per-EPOCH rates, so the numbers printed below describe this epoch.
+        # (The train-probe pass runs after the print and lands in the counters
+        # that the next reset clears, so it never contaminates a reported rate.)
+        draw_stats.reset(); val_stats.reset()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         encoder.eval(); head.train(); flows.train()
@@ -1616,6 +1720,36 @@ def run_train_multi(args) -> None:
         grad_norm = 0.0; last_raw = [None] * N_HEADS; last_loss = float("nan")
         for batch in train_loader:
             batch = tuple(t.to(device, non_blocking=True) for t in batch)
+            # WHAT THIS SOURCE ACTUALLY HAS. Manifest verdict (carried in the
+            # batch) AND the content check, per row, before anything decides
+            # what to condition on.
+            avail = available_matrix(batch_modality_presence(batch))
+            draw_stats.rows += int(avail.shape[0])
+            # A batch-level combo is drawn BEFORE the usability filter because
+            # which rows are usable depends on which combo was drawn.
+            batch_combo = None
+            if not args.bucketed:
+                batch_combo = fixed_combo or sampler.sample(generator)
+            if fixed_combo:
+                # Pinned: the row honours the pin in full, or it is not in this
+                # step. See the policy note at the [presence] startup block.
+                usable = combo_supported(fixed_combo, avail, require="all")
+                draw_stats.dropped_pinned += int((~usable).sum())
+            elif batch_combo is not None:
+                # Sampled batch-level combo: the modalities the row lacks are
+                # masked out of the encoder input; the row survives if ANY of
+                # the combo remains.
+                usable = combo_supported(batch_combo, avail, require="any")
+                draw_stats.dropped_missing += int((~usable).sum())
+            else:
+                usable = avail.any(dim=1)   # bucketed: per-source combos below
+                draw_stats.dropped_missing += int((~usable).sum())
+            if not bool(usable.all()):
+                keep = usable.nonzero(as_tuple=True)[0]
+                if keep.numel() == 0:
+                    continue                # nothing in this batch is conditionable
+                batch = tuple(t[keep] for t in batch)
+                avail = avail[keep]
             y_all, slo_all, shi_all = lookup.batch(batch[7], device)
             pois_all = lookup.batch_pois(batch[7], device)
             if args.bucketed:
@@ -1623,8 +1757,14 @@ def run_train_multi(args) -> None:
                 # one optimizer step per bucket -- each bucket lands near the
                 # calibrated per-forward size while the step count stays high.
                 B = int(batch[6].shape[0])
-                combos_ps = ([fixed_combo] * B if fixed_combo
-                             else [sampler.sample(generator) for _ in range(B)])
+                if fixed_combo:
+                    combos_ps = [fixed_combo] * B
+                else:
+                    # Presence-aware: a source is never assigned a combo naming
+                    # a modality it does not have, so `usable` comes back all
+                    # True (rows with nothing at all were dropped above).
+                    combos_ps, _ = sampler.sample_per_source_available(
+                        avail, generator, stats=draw_stats)
                 steps = []
                 bucket_names = []
                 for bucket, idx in bucket_assignments(combos_ps):
@@ -1637,11 +1777,20 @@ def run_train_multi(args) -> None:
                         sub = tuple(t[rows] for t in batch)
                         drop = {k: v.to(device) for k, v in
                                 bucket_modality_dropout(bucket, combos_ps, part,
-                                                        images=sub[5]).items()}
+                                                        available=avail[rows]).items()}
                         steps.append((bucket["union"], sub, drop, rows))
                         bucket_names.append(bucket["name"])
             else:
-                steps = [(fixed_combo or sampler.sample(generator), batch, None, None)]
+                # One combo for the whole batch, so presence cannot restratify;
+                # it masks instead. Every source is conditioned on
+                # `batch_combo INTERSECT what it has`, which is never a superset
+                # of its inputs.
+                drop = {m: ~avail[:, MODALITY_TO_ID[m]] for m in batch_combo}
+                masked_any = torch.stack(list(drop.values()), dim=1).any(dim=1)
+                draw_stats.masked += int(masked_any.sum())
+                if not any(bool(v.any()) for v in drop.values()):
+                    drop = None
+                steps = [(batch_combo, batch, drop, None)]
                 bucket_names = ["all"]
             # With --accumulate-buckets every optimizer step sees the FULL combo
             # mix (gradients summed over all buckets) instead of alternating
@@ -1714,8 +1863,11 @@ def run_train_multi(args) -> None:
             with torch.no_grad():
                 for b in loader:
                     b = tuple(t.to(device, non_blocking=True) for t in b)
+                    b, drop_v = condition_eval_batch(b)
+                    if b is None:
+                        continue
                     yv, slov, shiv = lookup.batch(b[7], device)
-                    cs, _ = encoder.encode_tokens(b, val_combo)
+                    cs, _ = encoder.encode_tokens(b, val_combo, modality_dropout=drop_v)
                     _, raw_ = multi_target_nll(
                         contexts=head(cs), flows=flows, targets=yv, sig_lo=slov, sig_hi=shiv,
                         standardizers=standardizers, weights=np.ones(N_HEADS), inject=False,
@@ -1743,9 +1895,12 @@ def run_train_multi(args) -> None:
         with torch.no_grad():
             for batch in val_loader:
                 batch = tuple(t.to(device, non_blocking=True) for t in batch)
+                batch, drop_v = condition_eval_batch(batch)
+                if batch is None:
+                    continue
                 y, slo, shi = lookup.batch(batch[7], device)
                 pois_v = lookup.batch_pois(batch[7], device)
-                cls_seq, _ = encoder.encode_tokens(batch, val_combo)
+                cls_seq, _ = encoder.encode_tokens(batch, val_combo, modality_dropout=drop_v)
                 contexts = head(cls_seq)
                 jstats: dict = {}
                 _, raw = multi_target_nll(
@@ -1817,7 +1972,20 @@ def run_train_multi(args) -> None:
         print(f"epoch={epoch} val_sum={val_sum:.3f} " +
               " ".join(f"{n}={v:.3f}" for n, v in zip(HEAD_NAMES, val_nll)) +
               f" ({dt:.0f}s, {n_seen/dt:.1f}/s, {peak:.1f}GB)", flush=True)
+        # How much of this epoch's conditioning was decided by availability
+        # rather than by the sampler. Printed every epoch, not once at startup,
+        # because the sampler is stochastic and the answer is a rate.
+        print(f"[presence] epoch {epoch} train: {draw_stats.summary()}", flush=True)
+        print(f"[presence] epoch {epoch} val:   {val_stats.summary()}", flush=True)
         payload = {"epoch": epoch, "val/multi_nll_sum": val_sum,
+                   "presence/train_adjusted_frac": draw_stats.adjusted_fraction,
+                   "presence/train_size_clamped": draw_stats.clamped,
+                   "presence/train_modality_masked": draw_stats.masked,
+                   "presence/train_rows_dropped":
+                       draw_stats.dropped_pinned + draw_stats.dropped_missing,
+                   "presence/val_rows_dropped":
+                       val_stats.dropped_pinned + val_stats.dropped_missing,
+                   "presence/val_modality_masked": val_stats.masked,
                    "val/pair_mean_nll": val_pair_mean,
                    "val/joint_complete_nll": joint_branch_nll["complete"],
                    "val/joint_quadrature_nll": joint_branch_nll["quadrature"],
@@ -1913,19 +2081,35 @@ def bucket_assignments(
 def bucket_modality_dropout(
     bucket: dict, combos: list[tuple[str, ...]], idx: np.ndarray,
     images: torch.Tensor | None = None,
+    available: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Per-source modality-dropout masks WITHIN a bucket (True = drop).
 
-    Sources staged without a Legacy Survey cutout carry an all-zero image, and
-    the image modality is dropped for them regardless of the sampled combo. That
-    is what lets a source with spectra but no cutout still train the seven
-    combinations that do not use images, instead of being discarded at staging.
-    A real cutout is never identically zero across every band and pixel.
+    A modality is dropped for a source when the source's combo does not name it
+    OR the source does not have it. The second half is the backstop: presence-
+    aware sampling should already mean no source is handed a combo naming an
+    absent modality, so this can only ever drop MORE, never resurrect anything.
+    Two ways to state "does not have it":
+
+      ``available``  the [len(idx), 4] availability matrix in MODALITIES order,
+                     i.e. the manifest verdict AND the content check. Covers all
+                     four modalities and is what the training loop passes.
+      ``images``     legacy content-only check on the image tensor alone: a
+                     source staged without a Legacy Survey cutout carries an
+                     all-zero frame, and a real cutout is never identically zero
+                     across every band and pixel. Kept because it needs no
+                     presence column, so it still works on an old staged file.
+
+    Passing neither reduces to combo membership, which is presence-BLIND and
+    only correct where every source has every modality.
     """
     out = {
         group: torch.tensor([group not in combos[i] for i in idx], dtype=torch.bool)
         for group in bucket["union"]
     }
+    if available is not None:
+        for group in out:
+            out[group] = out[group] | ~available[:, MODALITY_TO_ID[group]].cpu()
     if images is not None and "image" in out:
         blank = ~images.flatten(1).abs().any(dim=1).cpu()
         out["image"] = out["image"] | blank

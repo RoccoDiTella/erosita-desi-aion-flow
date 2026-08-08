@@ -20,10 +20,14 @@ import torch
 try:
     from .attention_pooling_head import (
         MODALITIES,
+        MODALITY_TO_ID,
         AIONAttentionContext,
         CLSContext,
+        ComboDrawStats,
         ComboSampler,
         all_nonempty_modality_combos,
+        available_matrix,
+        combo_supported,
     )
     from .data_to_aion_embeddings import (
         FITS_POOL_DIR,
@@ -31,7 +35,9 @@ try:
         SPLIT_MANIFEST,
         STAGED_DIR,
         AIONTokenEncoder,
+        batch_modality_presence,
         build_dataloaders,
+        presence_report,
         prepare_staged_data,
         read_target_values,
         read_view_target_values,
@@ -43,10 +49,14 @@ try:
 except ImportError:
     from attention_pooling_head import (
         MODALITIES,
+        MODALITY_TO_ID,
         AIONAttentionContext,
         CLSContext,
+        ComboDrawStats,
         ComboSampler,
         all_nonempty_modality_combos,
+        available_matrix,
+        combo_supported,
     )
     from data_to_aion_embeddings import (
         FITS_POOL_DIR,
@@ -54,7 +64,9 @@ except ImportError:
         SPLIT_MANIFEST,
         STAGED_DIR,
         AIONTokenEncoder,
+        batch_modality_presence,
         build_dataloaders,
+        presence_report,
         prepare_staged_data,
         read_target_values,
         read_view_target_values,
@@ -180,6 +192,16 @@ def load_checkpoint(
     return encoder, context_encoder, flow, standardizer, checkpoint.get("config", {})
 
 
+class NoConditionableRows(RuntimeError):
+    """No source in this batch has any modality the requested combo names.
+
+    Not an error in the data and not a bug: with a batch-level combo like
+    ``image`` on a sample where most rows have no Legacy Survey cutout, a whole
+    small batch can legitimately have nothing to condition on. The caller skips
+    the step. The alternative -- encoding zeros -- is the defect this replaces.
+    """
+
+
 def batch_nll(
     *,
     encoder: AIONTokenEncoder,
@@ -202,13 +224,36 @@ def batch_nll(
     deconvolves it via the convolution likelihood, ``inject`` adds it as noise,
     ``none`` ignores it. Falls back to plain log-prob when errors are absent/zero.
     ``mask_mode`` governs how ``spectrum_token_mask`` removes tokens (drop|replace).
+
+    PRESENCE. Every source is conditioned on ``combo INTERSECT what it has``.
+    A source staged without a Legacy Survey cutout carries an all-zero image and
+    a source whose redshift the survey flagged carries an unusable one; both
+    used to be tokenized as if they were data. Sources left with NOTHING under
+    this combo cannot be conditioned at all and raise ``NoConditionableRows`` —
+    the training loop catches it and skips the step, which is the honest
+    outcome for e.g. an image-only combo on a batch with no cutouts.
     """
+    present = batch_modality_presence(batch)
+    available = available_matrix(present)
+    usable = combo_supported(combo if combos_per_source is None else MODALITIES,
+                             available, require="any")
+    if not bool(usable.all()):
+        keep = usable.nonzero(as_tuple=True)[0]
+        if keep.numel() == 0:
+            raise NoConditionableRows(
+                f"no source in this batch has any of combo={'+'.join(combo)}")
+        batch = tuple(t[keep] for t in batch)
+        available = available[keep]
+        if combos_per_source is not None:
+            idx = keep.tolist()
+            combos_per_source = [combos_per_source[i] for i in idx]
+        if spectrum_token_mask is not None:
+            spectrum_token_mask = spectrum_token_mask[keep]
     target = batch[6]
     if not torch.isfinite(target).all():
         bad = int((~torch.isfinite(target)).sum().item())
         raise FloatingPointError(f"Encountered {bad} non-finite target values in a training/eval batch.")
     target_std = standardizer.transform_tensor(target)
-    modality_dropout = None
     if combos_per_source is not None:
         # Stratified fixed-composition batch: encode once at the full all-inputs
         # sequence length; each source excludes modalities via the native input
@@ -220,6 +265,16 @@ def batch_nll(
             )
             for group in MODALITIES
         }
+    else:
+        modality_dropout = {group: torch.zeros(len(target), dtype=torch.bool)
+                            for group in combo}
+    # AND in absence, always: a modality the source does not have is dropped
+    # whether or not the combo named it. Presence-aware sampling should make
+    # this a no-op for the per-source path, so it can only ever drop more.
+    for group, mask in modality_dropout.items():
+        modality_dropout[group] = mask | ~available[:, MODALITY_TO_ID[group]].cpu()
+    if not any(bool(v.any()) for v in modality_dropout.values()):
+        modality_dropout = None
     tokens, group_ids = encoder.encode_tokens(
         batch, combo, spectrum_token_mask=spectrum_token_mask, mask_mode=mask_mode,
         modality_dropout=modality_dropout,
@@ -301,14 +356,21 @@ def oom_resilient_step(
             sub_combos = combos_per_source[sl] if combos_per_source is not None else None
             sub_mask = token_mask[sl] if token_mask is not None else None
             weight = (sl.stop - sl.start) / n
-            value, sub_chunks = oom_resilient_step(
-                batch=sub_batch, combos_per_source=sub_combos, token_mask=sub_mask,
-                optimizer=optimizer,
-                nll_kwargs={**nll_kwargs, "_loss_scale": weight},
-                depth=depth + 1,
-            )
+            try:
+                value, sub_chunks = oom_resilient_step(
+                    batch=sub_batch, combos_per_source=sub_combos, token_mask=sub_mask,
+                    optimizer=optimizer,
+                    nll_kwargs={**nll_kwargs, "_loss_scale": weight},
+                    depth=depth + 1,
+                )
+            except NoConditionableRows:
+                # One half can be entirely unconditionable while the other is
+                # not; contribute nothing rather than losing the whole step.
+                continue
             total += value
             chunks += sub_chunks
+        if chunks == 0:
+            raise NoConditionableRows("no half of this batch was conditionable")
         return total, chunks
 
 
@@ -536,6 +598,14 @@ def train(args: argparse.Namespace) -> None:
     generator.manual_seed(args.seed)
     global_step = 0
 
+    # Say what the rows actually have before training on them. Combo sampling
+    # is presence-aware from here on, and batch_nll masks every modality a
+    # source lacks, so these counts explain the [presence] rates printed per
+    # epoch below.
+    for split_name, loader_ in (("train", train_loader), ("val", val_loader)):
+        print(presence_report(split_name, loader_.dataset)[0], flush=True)
+    draw_stats = ComboDrawStats()
+
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.monotonic()
         encoder.eval()
@@ -551,6 +621,7 @@ def train(args: argparse.Namespace) -> None:
         train_losses: list[float] = []
         train_counts: list[int] = []
         size_losses: dict[int, list[float]] = {1: [], 2: [], 3: [], 4: []}
+        draw_stats.reset()
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -558,11 +629,24 @@ def train(args: argparse.Namespace) -> None:
         for batch in train_loader:
             batch = tuple(item.to(device, non_blocking=True) for item in batch)
             combos_per_source = None
+            draw_stats.rows += int(batch[6].shape[0])
+            avail = available_matrix(batch_modality_presence(batch))
             if args.stratified_combos and not fixed_combo:
                 combo = tuple(MODALITIES)
-                combos_per_source = sampler.sample_per_source(int(batch[6].shape[0]), generator)
+                # Presence-aware: a source is never given a combo naming an
+                # input it does not have. A row with NO input at all gets a
+                # placeholder here and is dropped inside batch_nll, which masks
+                # against presence again and so cannot be fooled by it.
+                combos_per_source, _ok = sampler.sample_per_source_available(
+                    avail, generator, stats=draw_stats)
+                combos_per_source = [c if c else (MODALITIES[0],)
+                                     for c in combos_per_source]
             else:
                 combo = fixed_combo if fixed_combo else sampler.sample(generator)
+                # One combo for the whole batch: presence cannot restratify, so
+                # batch_nll masks per source. Count how many sources that is.
+                cols = [MODALITY_TO_ID[m] for m in combo]
+                draw_stats.masked += int((~avail[:, cols]).any(dim=1).sum())
             token_mask = None
             if args.token_mask_augment:
                 mask_np = sample_training_mask(
@@ -570,22 +654,28 @@ def train(args: argparse.Namespace) -> None:
                 )
                 token_mask = torch.from_numpy(mask_np).to(device)
             optimizer.zero_grad(set_to_none=True)
-            loss_value, n_chunks = oom_resilient_step(
-                batch=batch,
-                combos_per_source=combos_per_source,
-                token_mask=token_mask,
-                optimizer=optimizer,
-                nll_kwargs=dict(
-                    encoder=encoder,
-                    context_encoder=context_encoder,
-                    flow=flow,
-                    combo=combo,
-                    standardizer=standardizer,
-                    error_mode=args.error_mode,
-                    inject_samples=args.inject_samples,
-                    mask_mode=args.mask_mode,
-                ),
-            )
+            try:
+                loss_value, n_chunks = oom_resilient_step(
+                    batch=batch,
+                    combos_per_source=combos_per_source,
+                    token_mask=token_mask,
+                    optimizer=optimizer,
+                    nll_kwargs=dict(
+                        encoder=encoder,
+                        context_encoder=context_encoder,
+                        flow=flow,
+                        combo=combo,
+                        standardizer=standardizer,
+                        error_mode=args.error_mode,
+                        inject_samples=args.inject_samples,
+                        mask_mode=args.mask_mode,
+                    ),
+                )
+            except NoConditionableRows:
+                # A batch-level combo naming only modalities nobody in this
+                # batch has. Skipping is correct: the step has no data.
+                draw_stats.dropped_missing += int(batch[6].shape[0])
+                continue
             if n_chunks > 1:
                 oom_fallback_steps += 1
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
@@ -636,6 +726,7 @@ def train(args: argparse.Namespace) -> None:
             f"val_r2={val_metrics['val/all_inputs_r2']:.4f} ig={val_metrics.get('val/all_inputs_info_gain', float('nan')):.3f} ({epoch_seconds:.0f}s)",
             flush=True,
         )
+        print(f"[presence] epoch {epoch} train: {draw_stats.summary()}", flush=True)
         # train/nll mixes modality combos (mostly harder, fewer-input ones), so it
         # is NOT comparable to the all-inputs val NLL; the per-size curves and
         # train/nll_all_inputs are the comparable views.
@@ -647,6 +738,10 @@ def train(args: argparse.Namespace) -> None:
             "throughput/samples_per_second": float(sum(train_counts) / max(epoch_seconds, 1e-6)),
             "vram/peak_gb": float(torch.cuda.max_memory_allocated() / 2**30) if torch.cuda.is_available() else 0.0,
             "train/oom_fallback_steps": oom_fallback_steps,
+            "presence/train_adjusted_frac": draw_stats.adjusted_fraction,
+            "presence/train_size_clamped": draw_stats.clamped,
+            "presence/train_modality_masked": draw_stats.masked,
+            "presence/train_rows_dropped": draw_stats.dropped_missing,
             **val_metrics,
         }
         for size, losses in size_losses.items():
@@ -1081,7 +1176,15 @@ def parse_args() -> argparse.Namespace:
                          "same inputs it was trained on. Without it the run "
                          "samples modality combos and validates on all four, "
                          "which is three different experiments in one job. Run A "
-                         "wants spectra+z; Run B wants all four, i.e. omit this.")
+                         "wants spectra+z; Run B wants all four, i.e. omit this. "
+                         "A SOURCE THAT LACKS A PINNED MODALITY IS DROPPED for "
+                         "every training and validation step, not quietly "
+                         "conditioned on the subset it happens to have: the pin "
+                         "exists so that every row answers the same question, "
+                         "and the rows it discards are not random -- they are the "
+                         "rows with worse data. The startup [presence] block "
+                         "prints how many rows that is per split, and dropped "
+                         "validation rows are out of checkpoint selection too.")
     mt.add_argument("--warmup-steps", type=int, default=0,
                     help="Linear LR warmup over this many optimizer steps, composed with "
                          "--lr-schedule in ONE LambdaLR so per-group LR ratios are preserved. "

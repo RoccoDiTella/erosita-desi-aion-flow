@@ -71,7 +71,7 @@ node placement is now per-source Laplace. See commit 5240425.
 |---|---|---|
 | **Merged source HDF5** (plan step 29) | Sample size only, and it is NOT blocked on any download. | **Measured 2026-08-07: 100% of the merged split's spectra are already on disk** (81,000 of 103,800 from the new shards, the rest from the old source HDF5, zero missing). Two mechanical steps remain: assemble the merged source HDF5, then re-run `build_manifest` twice — `manifest_merged.csv` currently has `split` 100% NaN and `source_row >= 0` on only 24,058 of 129,486 rows, and the stager filters on both, so merged staging would emit nothing today. **Image cutouts do not gate this**: `require_cutout` is off by default and image-less rows stage with a zero image, and Run A is spectra+z, so the cutout fetch (~5 more days) blocks nothing. Payoff is 6,717 galaxies against 1,407. |
 | **eval path never run on a real model** | Reporting, not training. | Both eval scripts are fixed and tested, but no evaluation has ever executed on a DR2 checkpoint. Every performance number we hold describes a different model. |
-| **Presence-aware combo sampling + `encode_tokens` masking** | The merged sample only. | Measured no-ops on the current sample: `has_image` is EXACTLY `has_spectrum`, 0 rows differ. Real once the expansion is in. |
+| ~~**Presence-aware combo sampling + `encode_tokens` masking**~~ | **DONE 2026-08-08** — see `decisions.md` §12. | The four presence flags now reach the training loop (batch element 10), combos are drawn only from what a source HAS, `--fixed-combo` DROPS rows it cannot honour (count printed per split at startup), and a `[presence]` line per epoch reports what fraction of draws availability changed. Verified a no-op on dr2v2 (draw for draw identical when all four are present) and firing on a merged-like fixture: 41.7% image coverage, 58.3% of rows dropped under `--fixed-combo spectra+image`. |
 | **Which HR to headline** | Run B's framing, not its code. | P2/P3 wins on measurability (median 68% width 0.697). Which is most AGN-diagnostic is unanswered — the literature agent died mid-search. Relaunch it. |
 
 ### Cheap and unresolved — reviewed 2026-08-07, only one survives
@@ -388,10 +388,15 @@ same table as the counts and the temptation is structural.
    68%): P2/P3 0.697 (best), P1/P2 0.728, P1/P3 0.744, P2/P4 0.821, P3/P4 0.850.
    P2/P3 wins on measurability. Which is most AGN-diagnostic is a physics
    question the literature agent died before answering. Relaunch it.
-4. Presence-aware combo sampling (`ComboSampler.default()` can draw `('image',)`
-   for an image-less source) and `encode_tokens` masking. **Both are no-ops on
-   the current sample** -- `has_image` is exactly `has_spectrum`, 0 rows differ --
-   and become real on the merged sample.
+4. ~~Presence-aware combo sampling and `encode_tokens` masking.~~ **LANDED
+   2026-08-08** (`decisions.md` §12). It was a no-op on dr2v2 -- `has_image` is
+   exactly `has_spectrum`, 0 rows differ -- and would have been a third of the
+   merged sample's image draws. What REMAINS unresolved is not the machinery but
+   the reporting question it exposes: a run on merged conditions different rows
+   on different modality sets, so any per-combo number is a statement about a row
+   set as well as about inputs. `eval_core`'s `--sample common` is the answer for
+   the eval tables; the training curve has no equivalent and its per-bucket
+   series should be read with the `[presence]` rates next to it.
 
 ---
 

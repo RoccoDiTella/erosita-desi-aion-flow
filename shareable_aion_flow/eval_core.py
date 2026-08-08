@@ -79,10 +79,17 @@ SAMPLE_CHOICES = ("common", "native", "both")
 # information gain was computed on a row set nobody had declared. A duplicated
 # definition of "which rows count" is the same class of defect as a duplicated
 # definition of "which column is P3".
+#
+# The DEFAULT `presence_fn` is `batch_modality_presence`, which hands
+# `modality_presence` the manifest verdict the batch itself now carries. Bare
+# `modality_presence` stays exported because it is still THE definition, and a
+# caller with a hand-built batch has no flags to hand it.
 try:
-    from .data_to_aion_embeddings import modality_presence  # noqa: F401
+    from .data_to_aion_embeddings import (  # noqa: F401
+        batch_modality_presence, modality_presence)
 except ImportError:                                          # flat-layout imports
-    from data_to_aion_embeddings import modality_presence    # noqa: F401
+    from data_to_aion_embeddings import (   # noqa: F401
+        batch_modality_presence, modality_presence)
 
 
 def resolve_samples(sample: str) -> tuple[str, ...]:
@@ -328,7 +335,7 @@ def run_eval(
     joint_samples: int = 256,
     hr_combo: str | None = None,
     allin_combo: str | None = None,
-    presence_fn=modality_presence,
+    presence_fn=batch_modality_presence,
     log=print,
 ) -> EvalResult:
     """Score every modality combo on the test loader. One encoder pass per combo.

@@ -23,9 +23,9 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from tqdm import tqdm
 
 try:
-    from .attention_pooling_head import MODALITY_TO_ID
+    from .attention_pooling_head import MODALITIES, MODALITY_TO_ID
 except ImportError:  # Allows `python data_to_aion_embeddings.py` during local debugging.
-    from attention_pooling_head import MODALITY_TO_ID
+    from attention_pooling_head import MODALITIES, MODALITY_TO_ID
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -57,6 +57,26 @@ TOKEN_KEYS_BY_MODALITY = {
 PRESENCE_FLAGS = ("has_spectrum", "has_z", "has_wise", "has_image")
 _FLAG_TO_MODALITY = {"has_spectrum": "spectra", "has_z": "z",
                      "has_wise": "wise", "has_image": "image"}
+
+# Where the presence column lives in the batch tuple, and how long that tuple
+# is. The flags are APPENDED, never inserted: every reader in this repository
+# addresses the batch positionally (batch[6] target, batch[7] targetid,
+# batch[8:10] sigmas) and three of them also test `len(batch) >= 10`, so
+# appending is invisible to all of them while inserting would silently
+# re-point every index. `scripts/validate_staged.py` asserts the arity
+# explicitly and is updated with this constant.
+BATCH_PRESENCE_INDEX = 10
+BATCH_ARITY = 11
+
+# The presence column is stored in PRESENCE_FLAGS order, and every consumer
+# indexes it with MODALITY_TO_ID (which is MODALITIES order). Those are two
+# tuples in two files; if they ever drift the flags silently transpose --
+# has_wise would be read as has_image and vice versa, which is exactly the
+# failure this whole mechanism exists to prevent. Asserted at import.
+if tuple(_FLAG_TO_MODALITY[flag] for flag in PRESENCE_FLAGS) != MODALITIES:
+    raise ImportError(
+        f"PRESENCE_FLAGS order {PRESENCE_FLAGS} does not map onto MODALITIES "
+        f"order {MODALITIES}; the presence column would be read transposed.")
 
 
 def modality_presence(batch, flags: dict[str, torch.Tensor] | None = None
@@ -111,6 +131,36 @@ def modality_presence(batch, flags: dict[str, torch.Tensor] | None = None
             # input exists, which does not make an all-zero frame usable.
             present[modality] = present[modality] & f.to(torch.bool)
     return present
+
+
+def batch_presence_flags(batch) -> dict[str, torch.Tensor] | None:
+    """The staged manifest verdict carried at ``batch[BATCH_PRESENCE_INDEX]``.
+
+    ``None`` for a batch built before the column existed (or by a test that
+    hand-rolls a 10-tuple), in which case ``modality_presence`` falls back to
+    its content heuristic alone -- strictly weaker, and the reason this column
+    exists.
+    """
+    if len(batch) <= BATCH_PRESENCE_INDEX:
+        return None
+    column = batch[BATCH_PRESENCE_INDEX]
+    if column.dim() != 2 or column.shape[1] != len(PRESENCE_FLAGS):
+        raise ValueError(
+            f"batch[{BATCH_PRESENCE_INDEX}] should be [B, {len(PRESENCE_FLAGS)}] "
+            f"presence flags in PRESENCE_FLAGS order, got {tuple(column.shape)}.")
+    return {name: column[:, i].to(torch.bool) for i, name in enumerate(PRESENCE_FLAGS)}
+
+
+def batch_modality_presence(batch) -> dict[str, torch.Tensor]:
+    """``modality_presence`` with the batch's own staged flags supplied.
+
+    This is the call every training/eval site should make. Calling
+    ``modality_presence(batch)`` bare silently discards the manifest verdict --
+    zwarn and the per-band WISE inverse variances, the two rules the batch
+    cannot re-derive -- and answers a weaker question than the one asked.
+    """
+    return modality_presence(batch, batch_presence_flags(batch))
+
 
 DATASET_ALIASES = {
     "desi_targetid": ("desi_targetid",),
@@ -484,11 +534,21 @@ def load_extra_targets(csv_path: Path, target_name: str) -> dict[int, tuple[floa
 class AIONHDF5Dataset(Dataset):
     """PyTorch dataset over one staged split (optionally a row-subset view).
 
-    Each item is the 10-tuple ``(spectra, spectra_ivar, wavelength, redshift, wise,
-    image, target, targetid, sig_lo, sig_hi)`` consumed by the AION tokenizer and
-    the training loop. ``rows`` restricts the dataset to those row indices — used
-    by the clean-split runtime view so the cleaned configuration needs no second
-    staged copy of the data.
+    Each item is the 11-tuple ``(spectra, spectra_ivar, wavelength, redshift, wise,
+    image, target, targetid, sig_lo, sig_hi, presence)`` consumed by the AION
+    tokenizer and the training loop. ``rows`` restricts the dataset to those row
+    indices — used by the clean-split runtime view so the cleaned configuration
+    needs no second staged copy of the data.
+
+    ``presence`` is a ``[4]`` bool tensor in ``PRESENCE_FLAGS`` order — the
+    manifest's verdict on which inputs this row actually has. It is the LAST
+    element on purpose (see ``BATCH_PRESENCE_INDEX``), and it is row-aligned
+    rather than looked up by targetid because staged targetids are NOT unique
+    across the three files: ``clean_view_row_maps`` deduplicates them precisely
+    because the same targetid appears in more than one staged split, so a
+    targetid-keyed presence lookup would be ambiguous exactly where the flags
+    matter. A staged file predating the flags yields all-True and the caller
+    falls back to the content heuristic.
     """
 
     def __init__(
@@ -516,6 +576,13 @@ class AIONHDF5Dataset(Dataset):
             self.length = n if self.rows is None else int(len(self.rows))
             self._wavelength = torch.from_numpy(read_dataset(handle, "spectra_lambda").astype(np.float32))
             self.has_err = bool(self.err_cols) and all(name in handle for name in self.err_cols)
+            # Read the presence columns ONCE (n x 4 bools is ~0.4 MB at 100k
+            # rows) rather than four scalar HDF5 reads per __getitem__.
+            self.staged_flags = tuple(f for f in PRESENCE_FLAGS if f in handle)
+            self._presence = np.ones((n, len(PRESENCE_FLAGS)), dtype=bool)
+            for i, flag in enumerate(PRESENCE_FLAGS):
+                if flag in handle:
+                    self._presence[:, i] = np.asarray(handle[flag][:], dtype=bool)
 
     def _ensure_open(self) -> h5py.File:
         if self._handle is None:
@@ -567,6 +634,7 @@ class AIONHDF5Dataset(Dataset):
             torch.tensor(targetid, dtype=torch.int64),
             torch.tensor(sig_lo, dtype=torch.float32),
             torch.tensor(sig_hi, dtype=torch.float32),
+            torch.from_numpy(self._presence[index].copy()),
         )
 
 
@@ -717,6 +785,45 @@ def build_dataloaders(
             )
         )
     return loaders[0], loaders[1], loaders[2]
+
+
+def dataset_presence_flags(dataset) -> np.ndarray:
+    """``[N, 4]`` staged presence flags for exactly the rows a loader will serve.
+
+    Walks ``Subset``/``ConcatDataset`` wrappers down to the ``AIONHDF5Dataset``
+    leaves, so the counts reported at startup are counts of the ROWS THIS RUN
+    TRAINS ON, not of the staged file or the manifest. Reads only the boolean
+    columns — no spectra and no 160x160x4 images — so it is cheap enough to run
+    before every job.
+
+    This is the MANIFEST verdict alone. ``modality_presence`` ANDs a content
+    check on top per batch, so the per-batch numbers can only be lower.
+    """
+    from torch.utils.data import Subset
+
+    if isinstance(dataset, ConcatDataset):
+        parts = [dataset_presence_flags(d) for d in dataset.datasets]
+        return (np.concatenate(parts, axis=0) if parts
+                else np.zeros((0, len(PRESENCE_FLAGS)), dtype=bool))
+    if isinstance(dataset, Subset):
+        parent = dataset_presence_flags(dataset.dataset)
+        return parent[np.asarray(dataset.indices, dtype=np.int64)]
+    if isinstance(dataset, AIONHDF5Dataset):
+        rows = (np.arange(dataset.length, dtype=np.int64) if dataset.rows is None
+                else dataset.rows)
+        return dataset._presence[rows]
+    raise TypeError(f"cannot read presence flags from a {type(dataset).__name__}.")
+
+
+def presence_report(name: str, dataset) -> tuple[str, np.ndarray]:
+    """One human-readable line of per-modality coverage, plus the flag matrix."""
+    flags = dataset_presence_flags(dataset)
+    n = len(flags)
+    parts = []
+    for i, flag in enumerate(PRESENCE_FLAGS):
+        k = int(flags[:, i].sum())
+        parts.append(f"{_FLAG_TO_MODALITY[flag]} {k:,} ({100.0 * k / max(n, 1):.1f}%)")
+    return f"[presence] {name}: {n:,} rows -- " + "  ".join(parts), flags
 
 
 def read_target_values(hdf5_path: Path, target_name: str) -> np.ndarray:

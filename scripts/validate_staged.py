@@ -415,17 +415,24 @@ def check_split_provenance(rep: Report, handles: dict[str, h5py.File], paper_man
 def check_model_contract(rep: Report, staged_dir: Path, target: str | None, run_forward: bool) -> None:
     """Confirm the dataloader emits exactly what train()/batch_nll() destructure."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from shareable_aion_flow.data_to_aion_embeddings import build_dataloaders
+    from shareable_aion_flow.data_to_aion_embeddings import (
+        BATCH_ARITY, PRESENCE_FLAGS, build_dataloaders)
 
     train_loader, _, _ = build_dataloaders(
         staged_dir=staged_dir, target_name=target, batch_size=4, eval_batch_size=4, num_workers=0, seed=0
     )
     batch = next(iter(train_loader))
-    rep.check(len(batch) == 10, "dataloader tuple arity", f"{len(batch)} tensors (train() expects 10)")
+    rep.check(len(batch) == BATCH_ARITY, "dataloader tuple arity",
+              f"{len(batch)} tensors (train() expects {BATCH_ARITY})")
 
-    names = ["flux", "ivar", "wavelength", "redshift", "wise", "image", "target", "targetid", "sig_lo", "sig_hi"]
+    names = ["flux", "ivar", "wavelength", "redshift", "wise", "image", "target", "targetid",
+             "sig_lo", "sig_hi", "presence"]
     shapes = {n: tuple(t.shape) for n, t in zip(names, batch)}
     print(f"\nbatch shapes: {shapes}")
+    rep.check(shapes.get("presence", ())[1:] == (len(PRESENCE_FLAGS),),
+              "batch presence shape",
+              f"{shapes.get('presence')} — per-row {PRESENCE_FLAGS} carried to the "
+              f"training loop, so combo sampling can see what a source actually has")
     rep.check(shapes["image"][1:] == (IMAGE_BANDS, IMAGE_SIZE, IMAGE_SIZE), "batch image shape", str(shapes["image"]))
     rep.check(shapes["wise"][1] == 3, "batch wise shape", str(shapes["wise"]))
     rep.check(

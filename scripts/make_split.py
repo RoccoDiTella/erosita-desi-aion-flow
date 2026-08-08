@@ -177,9 +177,23 @@ def main() -> None:
     # still states the selection function as four stacked cuts with p_any "not
     # yet wired in", so running this default makes the sample and that section
     # disagree. Pass --min-p-any 0 to reproduce the documented four-cut sample.
-    ap.add_argument("--min-p-any", type=float, default=0.5,
-                    help="NWAY reliability cut; 0 to keep every row. UNSETTLED default: "
-                         "see rebuild plan D1, and note DATA.md does not yet record it")
+    ap.add_argument("--min-p-any", default=0.5,
+                    help="NWAY reliability cut. A NUMBER applies one flat threshold to "
+                         "every source; the word 'threshold6' applies NWAY's OWN "
+                         "per-source cut from the nway_threshold6 column, calibrated at "
+                         "the purity/completeness intersection by a randomised-catalogue "
+                         "test. Prefer threshold6: a flat 0.5 is not class-neutral, and "
+                         "on dr2v2 it cost GALAXY 12.5%% against QSO 1.2%% -- a 10x "
+                         "asymmetry falling on the science arm. 0 keeps every row.")
+    ap.add_argument("--missing-threshold", choices=("flat", "median", "drop"), default="flat",
+                    help="What to do with rows that have no finite nway_threshold6. "
+                         "They are missing metadata, not missing reliability: on the "
+                         "merged table all 2,431 have a finite p_any with median 0.939. "
+                         "'flat' applies --fallback-p-any and is the conservative choice; "
+                         "'median' imputes the population threshold; 'drop' discards them.")
+    ap.add_argument("--fallback-p-any", type=float, default=0.5,
+                    help="Flat cut for rows with no calibrated threshold, under "
+                         "--missing-threshold flat.")
     ap.add_argument("--match-quality", type=Path, default=None,
                     help="DR1 spec-z match audit; its keep=False verdict is applied "
                          "only where the LS10 counterpart is unchanged in DR2")
@@ -231,11 +245,59 @@ def main() -> None:
 
     # --- NWAY reliability -------------------------------------------------
     p_any_cost = {}
-    if args.min_p_any > 0:
+    use_thresh6 = str(args.min_p_any).lower() == "threshold6"
+    min_p_any = 0.0 if use_thresh6 else float(args.min_p_any)
+    if use_thresh6 or min_p_any > 0:
         if "nway_p_any" not in frame.columns:
-            raise SystemExit("--min-p-any > 0 but --targets carries no nway_p_any; "
-                             "rebuild the target table with make_dr2_targets.py")
-        keep = (frame.nway_p_any.to_numpy(float) > args.min_p_any)
+            raise SystemExit("a reliability cut was asked for but --targets carries no "
+                             "nway_p_any; rebuild the table with make_dr2_targets.py")
+        if use_thresh6:
+            # NWAY's OWN per-source cut, calibrated at the purity/completeness
+            # intersection by a randomised-catalogue test (Salvato et al.). A flat
+            # threshold is one number applied to sources with very different prior
+            # densities of chance counterparts; theirs varies per source and is what
+            # the catalogue authors intend the column to be compared against.
+            #
+            # It matters because a flat 0.5 is not class-neutral: on dr2v2 it cost
+            # GALAXY 12.5% against QSO 1.2%, a 10x asymmetry falling entirely on the
+            # science arm rather than on the negative control.
+            if "nway_threshold6" not in frame.columns:
+                raise SystemExit("--min-p-any threshold6 but --targets carries no "
+                                 "nway_threshold6 column")
+            thr = frame.nway_threshold6.to_numpy(float)
+            bad = ~np.isfinite(thr)
+            if bad.any():
+                # Measured on the merged table: 2,431 of 129,486 rows (1.9%) have no
+                # calibrated threshold, and they are NOT junk -- every one has a finite
+                # p_any, median 0.939, against a typical threshold of 0.045. They are
+                # missing METADATA, not missing reliability, and 911 of them are
+                # GALAXY, the science arm. Dropping them silently would spend the
+                # thing we are trying to buy.
+                #
+                # The fallback is a real choice, so it is named rather than assumed:
+                #   flat   apply --fallback-p-any (default 0.5) to them. Cannot be
+                #          laxer than the flat cut we would otherwise have used on
+                #          EVERY row, so it can never inflate the sample relative to
+                #          the status quo. Costs ~625 of the 2,431.
+                #   median use the population median threshold. Statistically the
+                #          better estimate of the cut they WOULD have had, but it is
+                #          an imputation and is labelled as one.
+                #   drop   discard them. Cleanest provenance, biggest cost.
+                if args.missing_threshold == "drop":
+                    thr = np.where(bad, np.inf, thr)
+                elif args.missing_threshold == "median":
+                    thr = np.where(bad, float(np.nanmedian(thr)), thr)
+                else:
+                    thr = np.where(bad, float(args.fallback_p_any), thr)
+                print(f"[p_any>threshold6] {int(bad.sum()):,} rows have no calibrated "
+                      f"threshold -> --missing-threshold {args.missing_threshold}"
+                      + (f" (p_any > {args.fallback_p_any})"
+                         if args.missing_threshold == "flat" else ""))
+            keep = frame.nway_p_any.to_numpy(float) > thr
+            print(f"[p_any>threshold6] per-source cut, median {np.median(thr):.4f}, "
+                  f"range [{thr.min():.4f}, {thr.max():.4f}]")
+        else:
+            keep = (frame.nway_p_any.to_numpy(float) > min_p_any)
         # The cut is several times more expensive for galaxies than for quasars,
         # and the galaxy arm is the science arm rather than the negative control,
         # so the per-class cost is recorded rather than left to be rediscovered.
@@ -245,9 +307,10 @@ def main() -> None:
                 mask = keep[cls_of == cls]
                 p_any_cost[cls] = {"n": int(mask.size), "kept": int(mask.sum()),
                                    "lost_frac": float(1.0 - mask.mean())}
-                print(f"[p_any>{args.min_p_any}] {cls:8s} {mask.sum():7,} of {mask.size:7,}"
+                label = "threshold6" if use_thresh6 else f">{min_p_any}"
+                print(f"[p_any {label}] {cls:8s} {mask.sum():7,} of {mask.size:7,}"
                       f"   costs {1.0 - mask.mean():.1%}")
-        drop(f"nway_p_any>{args.min_p_any}", keep)
+        drop("nway_p_any>threshold6" if use_thresh6 else f"nway_p_any>{min_p_any}", keep)
 
     # --- DR1 spec-z match audit ------------------------------------------
     n_void = 0
@@ -342,7 +405,9 @@ def main() -> None:
                                "n_excess_rows": n_input - n_detuid,
                                "n_detuids_multi_fibre": n_shared}},
         "filters": filters,
-        "min_p_any": args.min_p_any,
+        "min_p_any": "threshold6" if use_thresh6 else min_p_any,
+        "missing_threshold": args.missing_threshold if use_thresh6 else None,
+        "fallback_p_any": args.fallback_p_any if use_thresh6 else None,
         "p_any_cost_by_spectype": p_any_cost,
         "match_quality_rejects_voided": n_void,
         "require_finite": list(args.require_finite),

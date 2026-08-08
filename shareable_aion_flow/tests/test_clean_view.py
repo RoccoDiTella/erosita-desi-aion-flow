@@ -24,9 +24,13 @@ from shareable_aion_flow.data_to_aion_embeddings import (
 N_PIX = 16
 
 
-def write_split(path: Path, targetids: list[int], base_value: float) -> None:
+def write_split(path: Path, targetids: list[int], base_value: float,
+                flags: dict[str, list[bool]] | None = None,
+                images: np.ndarray | None = None) -> None:
     n = len(targetids)
     with h5py.File(path, "w") as handle:
+        for flag, values in (flags or {}).items():
+            handle.create_dataset(flag, data=np.asarray(values, dtype=bool))
         handle.create_dataset("desi_targetid", data=np.asarray(targetids, dtype=np.int64))
         handle.create_dataset("spectra", data=np.zeros((n, N_PIX), dtype=np.float32))
         handle.create_dataset("spectra_ivar", data=np.ones((n, N_PIX), dtype=np.float32))
@@ -34,7 +38,11 @@ def write_split(path: Path, targetids: list[int], base_value: float) -> None:
         handle.create_dataset("redshift", data=np.full(n, 0.5, dtype=np.float32))
         for band in ("flux_w1", "flux_w2", "flux_w3"):
             handle.create_dataset(band, data=np.zeros(n, dtype=np.float32))
-        handle.create_dataset("image_flux", data=np.zeros((n, 4, 8, 8), dtype=np.float32))
+        handle.create_dataset(
+            "image_flux",
+            data=(np.zeros((n, 4, 8, 8), dtype=np.float32) if images is None
+                  else images.astype(np.float32)),
+        )
         # target value encodes identity: base + targetid, so we can verify exactly
         # which physical rows the view served.
         handle.create_dataset(
@@ -169,3 +177,105 @@ def test_nonfinite_targets_excluded_in_view(tmp_path: Path) -> None:
         staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0, clean_split_csv=csv_path
     )
     assert collect_targetids(train_loader) == {1, 6}
+
+
+# --------------------------------------------------------------- presence flags
+# The batch is an 11-tuple: the four staged presence flags ride at index 10 so
+# the training loop can see WHICH INPUTS A SOURCE ACTUALLY HAS before it picks a
+# modality combo. Row-aligned, not looked up by targetid — the staged files
+# deliberately share targetids (see clean_view_row_maps' dedup), so a
+# targetid-keyed lookup would be ambiguous exactly where the flags matter.
+
+
+def test_batch_carries_presence_flags_at_the_documented_index(tmp_path: Path) -> None:
+    from shareable_aion_flow.data_to_aion_embeddings import (
+        BATCH_ARITY, BATCH_PRESENCE_INDEX, PRESENCE_FLAGS, batch_presence_flags)
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    for split, ids in (("train", [1, 2]), ("val", [3]), ("test", [4])):
+        write_split(staged / f"desi_{split}.hdf5", ids, base_value=0.0,
+                    flags={f: [True] * len(ids) for f in PRESENCE_FLAGS})
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=2, num_workers=0
+    )
+    batch = next(iter(train_loader))
+    assert len(batch) == BATCH_ARITY == 11
+    presence = batch[BATCH_PRESENCE_INDEX]
+    assert presence.shape == (2, len(PRESENCE_FLAGS)) and presence.dtype == torch.bool
+    flags = batch_presence_flags(batch)
+    assert set(flags) == set(PRESENCE_FLAGS)
+    # the batch element ordering the rest of the loop unpacks is unchanged
+    assert batch[6].shape == (2,) and batch[7].dtype == torch.int64
+
+
+def test_presence_ands_the_manifest_verdict_with_the_content_check(tmp_path: Path) -> None:
+    """Manifest AND content, never either alone.
+
+    Row 0: manifest says it has a cutout and the frame is real -> present.
+    Row 1: manifest says it has a cutout but the staged frame is all zero (no
+           FITS was found at staging) -> ABSENT. This is the zero-image bug.
+    Row 2: the frame is real but the manifest withheld it -> ABSENT.
+    """
+    from shareable_aion_flow.data_to_aion_embeddings import (
+        PRESENCE_FLAGS, batch_modality_presence)
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    images = np.ones((3, 4, 8, 8), dtype=np.float32)
+    images[1] = 0.0                                    # staged without a cutout
+    flags = {f: [True, True, True] for f in PRESENCE_FLAGS}
+    flags["has_image"] = [True, True, False]           # manifest withholds row 2
+    flags["has_z"] = [True, False, True]               # e.g. ZWARN != 0 on row 1
+    write_split(staged / "desi_train.hdf5", [1, 2, 3], 0.0, flags=flags, images=images)
+    write_split(staged / "desi_val.hdf5", [4], 0.0)
+    write_split(staged / "desi_test.hdf5", [5], 0.0)
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=3, num_workers=0
+    )
+    batch = next(iter(train_loader))
+    present = batch_modality_presence(batch)
+    # the train loader shuffles, so read the answers back by targetid
+    by_id = {int(t): (bool(i), bool(z)) for t, i, z
+             in zip(batch[7], present["image"], present["z"])}
+    assert by_id == {1: (True, True), 2: (False, False), 3: (False, True)}
+
+
+def test_presence_flags_default_true_on_a_staged_file_without_the_columns(tmp_path: Path) -> None:
+    """Old staged files still load; presence then falls back to content alone."""
+    from shareable_aion_flow.data_to_aion_embeddings import (
+        batch_modality_presence, batch_presence_flags)
+
+    staged = build_superset(tmp_path)      # written with no presence columns
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0
+    )
+    batch = next(iter(train_loader))
+    assert all(bool(v.all()) for v in batch_presence_flags(batch).values())
+    # ...and the content check still catches the all-zero staged image
+    assert not bool(batch_modality_presence(batch)["image"].any())
+
+
+def test_dataset_presence_flags_follows_the_clean_view_rows(tmp_path: Path) -> None:
+    """Startup counts must describe the rows the RUN trains on, not the file."""
+    from shareable_aion_flow.data_to_aion_embeddings import (
+        MODALITY_TO_ID, PRESENCE_FLAGS, dataset_presence_flags)
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    # targetids 1..4 in train; only 2 and 4 have a cutout
+    flags = {f: [True] * 4 for f in PRESENCE_FLAGS}
+    flags["has_image"] = [False, True, False, True]
+    write_split(staged / "desi_train.hdf5", [1, 2, 3, 4], 0.0, flags=flags)
+    write_split(staged / "desi_val.hdf5", [5], 0.0)
+    write_split(staged / "desi_test.hdf5", [6], 0.0)
+    csv_path = tmp_path / "view.csv"
+    pd.DataFrame({"targetid": [2, 3, 5, 6], "split": ["train", "train", "val", "test"]}).to_csv(
+        csv_path, index=False)
+    train_loader, _, _ = build_dataloaders(
+        staged_dir=staged, target_name="log_ml_flux_1", batch_size=4, num_workers=0,
+        clean_split_csv=csv_path,
+    )
+    got = dataset_presence_flags(train_loader.dataset)
+    assert got.shape == (2, len(PRESENCE_FLAGS))
+    assert got[:, MODALITY_TO_ID["image"]].tolist() == [True, False]   # rows 2, 3
