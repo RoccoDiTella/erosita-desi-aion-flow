@@ -42,6 +42,27 @@ case "$DATASET" in
     EXTRA_TARGETS_CSV="${EXTRA_TARGETS_CSV:-$AIONFLOW_DATA/targets_sidecar_dr2_v2.csv}"
     STAGED_DIR="${STAGED_DIR:-$AIONFLOW_DATA/staged_v2}"
     ;;
+
+  merged)
+    # dr2v2 PLUS the 104,945-target DR2 expansion, on one merged source HDF5.
+    # Everything true of dr2v2 is true here; three things are additionally true:
+    #   * the reliability cut is NWAY's OWN per-source nway_threshold6, not a
+    #     flat 0.5. Measured on this table: GALAXY costs 2.9% against the flat
+    #     cut's 12.5%, QSO 0.2%. 2,431 rows carry no calibrated threshold and
+    #     fall back to p_any > 0.5, recorded in the split provenance.
+    #   * redshifts are accepted without a zwarn vouch (--allow-unvouched-z),
+    #     because the expansion has no DESI properties CSV. 102,921 of 126,734
+    #     in-split rows have a usable z; the rest are z <= 0 and excluded.
+    #   * has_image is ~35% and NOT equal to has_spectrum, which is why
+    #     presence-aware combo sampling had to land before this branch was
+    #     usable. On dr2v2 the two were identical and the issue was invisible.
+    # 126,734 split rows (101,154/12,825/12,755) from a 129,486-row table.
+    # The split is a strict SUPERSET of the previous merged split: 0 of 103,800
+    # shared targetids changed side.
+    CLEAN_SPLIT_CSV="${CLEAN_SPLIT_CSV:-$AIONFLOW_DATA/clean_split_merged_t6.csv}"
+    EXTRA_TARGETS_CSV="${EXTRA_TARGETS_CSV:-$AIONFLOW_DATA/targets_sidecar_merged.csv}"
+    STAGED_DIR="${STAGED_DIR:-$AIONFLOW_DATA/staged_merged}"
+    ;;
   dr1)
     # DELETED 2026-08-06, not merely defaulted away from. `targets_sidecar.csv`
     # has 39 columns and none of det_like_0, det_like_p1..p4, log_ml_flux_1,
