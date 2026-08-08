@@ -29,6 +29,12 @@ row set a number is about before putting it on a slide.
 | **manifest, live** | `data/dr2/manifest_dr2.csv` | 2026-08-06 17:42 | **25,454** (30 cols) | 18,275 / 2,274 / 2,251 |
 | **split, live** | `data/dr2/clean_split_dr2_v2.csv` | 2026-08-06 17:41 | **22,800** | 18,275 / 2,274 / 2,251 |
 | **staged, live** | `data/dr2/staged_v2/` | 2026-08-07 07:12 | **22,800** (inputs only) | 18,275 / 2,274 / 2,251 |
+| **MERGED source** | `data/dr2/spectra_merged_source.h5` | 2026-08-08 | **133,591** spectra, 7.43 GB | — |
+| **MERGED targets** | `data/dr2/merged_targets.csv` | 2026-08-06 17:54 | **129,486** | — |
+| **MERGED sidecar** | `data/dr2/targets_sidecar_merged.csv` | 2026-08-06 18:01 | **129,486** | — |
+| **MERGED manifest** | `data/dr2/manifest_merged_t6.csv` | 2026-08-08 | **129,486** (30 cols) | 101,154 / 12,825 / 12,755 |
+| **MERGED split** | `data/dr2/clean_split_merged_t6.csv` | 2026-08-08 | **126,734** | 101,154 / 12,825 / 12,755 |
+| superseded merged split | `data/dr2/clean_split_merged.csv` | 2026-08-06 17:55 | 103,800 | 82,773 / 10,595 / 10,432 |
 | superseded sidecar | `data/dr2/targets_sidecar_dr2.csv` | 2026-08-04 16:56 | 25,582 (47 cols) | — |
 | superseded split | `data/dr2/clean_split_dr2.csv` | 2026-08-04 17:03 | 25,582 | 20,465 / 2,548 / 2,569 |
 
@@ -50,6 +56,63 @@ sha256 `874503a21b1e7ae11f50af01dc3acecb3f673559b1b33a8d1d44a56c4d7fc5ed`.
 The un-suffixed `targets_sidecar_dr2.csv` / `clean_split_dr2.csv` pair is kept
 unmodified so an already-published number stays reproducible. It is the only
 thing `DATASET=dr2` still resolves, and no new work should use it.
+
+## 0b. The MERGED sample, built 2026-08-08 — `DATASET=merged`
+
+dr2v2 plus the 104,945-target DR2 expansion. **This is what both planned runs
+train on.** Five things about it that a number alone will not tell you:
+
+**It is not blocked on any download.** Spectra coverage of the split is 100%:
+101,629 unique targetids across 8,759 `.npz` shards plus the 28,646 in the old
+`erosita_spectra_merged_32k.hdf5`, assembled into one source file by
+`scripts/build_merged_source.py`. That script STREAMS into resizable datasets:
+the first version accumulated in lists and concatenated, needing ~14.5 GB on a
+15 GB machine, and was OOM-killed at 8,000/9,316 shards after forty minutes with
+nothing written. Streaming holds one shard, measured peak 2.6 GB.
+
+**The reliability cut is NWAY's own per-source `nway_threshold6`**, not a flat
+0.5. Measured cost on this table: GALAXY **2.9%**, QSO 0.2%, STAR 0.9%. The flat
+0.5 cost GALAXY 12.5% against QSO 1.2% -- a 10x asymmetry falling entirely on
+the science arm. 2,431 rows carry no calibrated threshold and fall back to
+`p_any > 0.5` (`--missing-threshold flat`, recorded in the split provenance).
+Those rows are NOT junk: every one has a finite p_any, median 0.939, against a
+typical threshold of 0.045, and 911 are GALAXY. They are missing metadata, not
+missing reliability.
+
+**Redshifts are accepted without a zwarn vouch** (`build_manifest
+--allow-unvouched-z`), because the expansion has no DESI properties CSV to
+supply zwarn. Without the flag `has_z` was True for only 22,691 of 103,800
+in-split rows while z was finite for ALL of them -- staging that would have
+marked 78% of the sample as lacking the very modality Run A conditions on.
+With it: 102,921 of 126,734. The 879 excluded are z <= 0.
+**UNVALIDATED RISK:** "present" is not "correct". If DESI redshifts are
+systematically poor for the expansion, Run A's conditioning is polluted and
+nothing downstream would flag it. Worth checking against the 22,691 vouched rows
+before trusting a result.
+
+**`has_image` is ~35% and NOT equal to `has_spectrum`.** On dr2v2 the two were
+byte-identical (0 rows differ), which is why presence-aware combo sampling was
+dormant. Here 44,674 of 126,734 in-split rows have a cutout, spread evenly by
+the detuid hash: train 35.2%, val 35.8%, **test 34.7%**. It is a SNAPSHOT --
+the cutout fetch was still running at ~47k of 104,945 when this was staged, and
+staging freezes today's coverage into the HDF5.
+
+**The split is a strict SUPERSET of the previous merged split**: 0 of 103,800
+shared targetids changed side, +22,934 added. That is the design property, not
+luck -- the assignment is a pure keyed blake2b of `ero_detuid` with no RNG, so
+appending rows moves nothing.
+
+Usable rows, under the rule the loader actually implements (`joint_availability`
+requires every non-marginal joint dimension, plus `det_like_0 >= 6`):
+
+| | rows | GALAXY |
+|---|---:|---:|
+| Run A, M* and SFR both present | 83,936 | 8,887 |
+| Run A, + SFR marginalised | 96,661 | **10,629** |
+| Run B, any detection | 125,763 | — |
+
+The GALAXY arm carries Run A's claim, and 10,629 against dr2v2's 1,407 is
+**7.6x**.
 
 **What the rebuild made stale, and has NOT yet been re-measured.** Everything
 keyed to 25,582: the coverage table in §3, the per-band detection counts in §5,
