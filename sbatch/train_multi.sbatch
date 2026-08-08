@@ -77,6 +77,11 @@ JOINT_QUAD_SPAN="${JOINT_QUAD_SPAN:-}"
 #   column is a hard error. Without these two knobs a Run B submission runs
 #   Run A's default heads and looks perfectly healthy while answering the
 #   wrong question -- which is exactly what happened to job 37700733.
+# Gradient checkpointing recomputes activations in the backward pass to save
+# memory. Measured 2026-08-08: Run A peaks at 7-9 GB of an 80 GB A100 across
+# batch 256-2048, so we were paying a compute tax for memory we do not need.
+# Default ON for back-compat; set GRAD_CHECKPOINT= (empty) to turn it off.
+GRAD_CHECKPOINT="${GRAD_CHECKPOINT:-1}"
 ADD_HEADS="${ADD_HEADS:-}"
 JOINT="${JOINT:-}"
 FIXED_COMBO="${FIXED_COMBO:-}"
@@ -96,7 +101,7 @@ python -m shareable_aion_flow.main train-multi \
   --extra-targets-csv "$EXTRA_TARGETS_CSV" \
   ${DROP_HEADS:+--drop-heads $DROP_HEADS} \
   --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
-  --bucketed --accumulate-buckets --grad-checkpoint \
+  --bucketed --accumulate-buckets ${GRAD_CHECKPOINT:+--grad-checkpoint} \
   --lr "$LR" --lr-schedule "$LR_SCHEDULE" \
   --warmup-steps "$WARMUP_STEPS" --grad-clip "$GRAD_CLIP" \
   --diag-every "$DIAG_EVERY" \
